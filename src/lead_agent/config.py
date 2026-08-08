@@ -75,6 +75,8 @@ class Settings(BaseSettings):
     browser_headless: bool = False
     facebook_navigation_timeout_seconds: int = Field(default=30, ge=10, le=120)
     facebook_post_load_timeout_seconds: int = Field(default=15, ge=5, le=60)
+    facebook_max_scrolls: int = Field(default=12, ge=0, le=30)
+    facebook_scroll_settle_seconds: float = Field(default=0.75, ge=0.25, le=5)
     max_posts_per_group: int = Field(default=20, ge=1, le=50)
     min_post_text_length: int = Field(default=15, ge=1, le=500)
 

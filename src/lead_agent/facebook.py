@@ -274,7 +274,10 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         """Retry through Facebook placeholders and transient feed re-renders."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.settings.facebook_post_load_timeout_seconds
+        initial_grace_deadline = loop.time() + 2
         visible_article_seen = False
+        collected: dict[str, FacebookPost] = {}
+        scrolls = 0
 
         while loop.time() < deadline:
             await self._require_normal_page(page, group_id=group.id)
@@ -282,41 +285,57 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 story_posts = await self._extract_story_posts(page, group, max_posts=max_posts)
             except Error:
                 story_posts = []
-            if story_posts:
-                return story_posts
-            try:
-                articles = await self._post_articles(page)
-                count = min(await articles.count(), max(max_posts * 5, 50))
-            except Error:
+            for story_post in story_posts:
+                collected.setdefault(story_post.identity_key, story_post)
+            if len(collected) >= max_posts:
+                return list(collected.values())[:max_posts]
+
+            if not story_posts:
+                try:
+                    articles = await self._post_articles(page)
+                    count = min(await articles.count(), max(max_posts * 5, 50))
+                except Error:
+                    count = 0
+
+                for index in range(count):
+                    try:
+                        article = articles.nth(index)
+                        if not await article.is_visible(timeout=1000):
+                            continue
+                        visible_article_seen = True
+                        if is_facebook_comment_label(
+                            await article.get_attribute("aria-label", timeout=1000)
+                        ):
+                            continue
+                        if await self._is_nested_article(article):
+                            continue
+                        legacy_post = await self._extract_article(article, group)
+                    except Error:
+                        # Facebook commonly replaces placeholder nodes while the feed hydrates.
+                        continue
+                    if legacy_post is not None:
+                        collected.setdefault(legacy_post.identity_key, legacy_post)
+                        if len(collected) >= max_posts:
+                            return list(collected.values())[:max_posts]
+
+            if not collected and loop.time() < initial_grace_deadline:
                 await page.wait_for_timeout(250)
                 continue
+            if scrolls >= self.settings.facebook_max_scrolls:
+                break
 
-            posts: list[FacebookPost] = []
-            identities: set[str] = set()
-            for index in range(count):
-                try:
-                    article = articles.nth(index)
-                    if not await article.is_visible(timeout=1000):
-                        continue
-                    visible_article_seen = True
-                    if is_facebook_comment_label(
-                        await article.get_attribute("aria-label", timeout=1000)
-                    ):
-                        continue
-                    if await self._is_nested_article(article):
-                        continue
-                    post = await self._extract_article(article, group)
-                except Error:
-                    # Facebook commonly replaces placeholder nodes while the feed hydrates.
-                    continue
-                if post is not None and post.identity_key not in identities:
-                    identities.add(post.identity_key)
-                    posts.append(post)
-                    if len(posts) >= max_posts:
-                        break
-            if posts:
-                return posts
-            await page.wait_for_timeout(250)
+            await self._scroll_for_more(page)
+            scrolls += 1
+            remaining_seconds = max(deadline - loop.time(), 0)
+            if remaining_seconds > 0:
+                settle_milliseconds = min(
+                    int(self.settings.facebook_scroll_settle_seconds * 1000),
+                    max(int(remaining_seconds * 1000), 1),
+                )
+                await page.wait_for_timeout(settle_milliseconds)
+
+        if collected:
+            return list(collected.values())[:max_posts]
 
         await self._require_normal_page(page, group_id=group.id)
         reason = (
@@ -325,6 +344,20 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
             else "No visible Facebook posts appeared before the safety timeout"
         )
         await self._stop(page, group.id, FacebookPageState.UNEXPECTED, reason)
+
+    async def _scroll_for_more(self, page: Page) -> None:
+        """Reach the last loaded story, then move less than one viewport without clicking."""
+        messages = page.locator(STORY_MESSAGE_SELECTOR)
+        if await messages.count():
+            await messages.last.scroll_into_view_if_needed(timeout=1000)
+        await page.evaluate(
+            """
+            () => {
+                const distance = Math.max(Math.floor(window.innerHeight * 0.85), 600);
+                window.scrollBy(0, distance);
+            }
+            """
+        )
 
     async def _extract_story_posts(
         self,
@@ -357,10 +390,10 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 continue
             hrefs = await self._nearest_post_hrefs(message)
             post_url = select_facebook_permalink(hrefs, group.url)
-            if post_url is None or facebook_group_key(post_url) != expected_group_key:
+            if post_url is not None and facebook_group_key(post_url) != expected_group_key:
                 continue
             post = FacebookPost(
-                external_post_id=extract_post_id(post_url),
+                external_post_id=extract_post_id(post_url) if post_url else None,
                 post_url=post_url,
                 group_id=group.id,
                 group_name=group.name,
@@ -381,7 +414,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
             node => {
                 let owner = node;
                 let depth = 0;
-                while (owner && depth < 24) {
+                while (owner && depth < 60 && owner.getAttribute('role') !== 'feed') {
                     const hrefs = Array.from(owner.querySelectorAll('a[href]'))
                         .map(link => link.href)
                         .filter(href => (

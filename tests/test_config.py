@@ -22,6 +22,8 @@ def test_safe_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert settings.lead_threshold == 75
     assert settings.browser_channel is None
     assert settings.browser_headless is False
+    assert settings.facebook_max_scrolls == 12
+    assert settings.facebook_scroll_settle_seconds == 0.75
 
 
 @pytest.mark.parametrize(

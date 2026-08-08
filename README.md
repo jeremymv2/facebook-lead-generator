@@ -99,6 +99,8 @@ Important settings include:
 | `PER_GROUP_DAILY_POSTING_LIMIT` | `2` | Planned per-group cap |
 | `FACEBOOK_PROFILE_PATH` | `~/.jjmiller-lead-agent/facebook-profile` | Dedicated persistent profile |
 | `BROWSER_HEADLESS` | `false` | Keeps manual login and scan behavior visible |
+| `FACEBOOK_MAX_SCROLLS` | `12` | Maximum bounded lazy-load scrolls per group |
+| `FACEBOOK_SCROLL_SETTLE_SECONDS` | `0.75` | Wait after each bounded scroll |
 | `MAX_POSTS_PER_GROUP` | `20` | Conservative visible-post cap per run |
 | `MIN_POST_TEXT_LENGTH` | `15` | Ignores very short UI fragments |
 
@@ -250,6 +252,11 @@ the parent post's permalink. Facebook comment and reply articles are also reject
 semantic `aria-label`, including when Facebook exposes them outside the parent article subtree.
 Current Facebook group feeds are read from semantic `story_message` nodes and paired with the
 nearest owning group-post permalink; role-based article extraction remains a guarded fallback.
+When Facebook exposes no post permalink, the scanner leaves the URL empty and uses the normalized
+top-level text hash for deduplication; it never substitutes a comment, photo, or unrelated URL.
+`--max-posts` is a target and hard cap: the scanner accumulates unique posts across bounded
+sub-viewport scrolls until it reaches the target, its scroll limit, or its load timeout. It rechecks
+login, CAPTCHA, checkpoint, redirect, and page state after every scroll.
 
 To scan every enabled group sequentially, omit `--group-id`. The current proof of concept is manual;
 it does not yet run every five minutes.
