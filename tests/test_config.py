@@ -136,6 +136,25 @@ def test_remote_approval_requires_https_origin_and_e164_numbers(
         )
 
 
+def test_remote_approval_origin_must_leave_room_for_compliant_sms(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    Settings(
+        _env_file=None,
+        facebook_profile_path=tmp_path.parent / "browser-profile",
+        remote_approval_base_url=f"https://{'a' * 41}.com",
+    )
+    with pytest.raises(ValidationError, match="too long for one SMS segment"):
+        Settings(
+            _env_file=None,
+            facebook_profile_path=tmp_path.parent / "browser-profile",
+            remote_approval_base_url=f"https://{'a' * 42}.com",
+        )
+
+
 def test_remote_approval_readiness_never_exposes_secrets(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

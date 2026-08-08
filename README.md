@@ -448,6 +448,25 @@ The Telnyx sender and recipient must use E.164 notation. The recipient is the re
 does not have to be the business's published customer text number. Complete the applicable Telnyx
 sender registration and assign the number to a messaging profile before testing.
 
+### Telnyx consent and 10DLC compliance
+
+Register this internal notification program before sending through a US 10-digit long-code number.
+Use the `LOW_VOLUME` campaign with the `ACCOUNT_NOTIFICATION` sub-use case; these are transactional
+lead-review alerts to an authorized company administrator, not marketing or customer-care messages.
+The exact pre-submission checklist and campaign copy live in
+[`docs/telnyx-low-volume-campaign.md`](docs/telnyx-low-volume-campaign.md).
+
+Every application-generated alert identifies `JJ Miller & Co LLC`, includes `Reply STOP to opt
+out.`, uses only ASCII, and fits in one 160-character segment. The source post and draft never leave
+the Mac in the SMS. Obtain the recipient's express consent before enabling notifications and retain
+that consent outside the repository.
+
+Telnyx handles its recognized STOP/START keywords and the carrier block list at the messaging
+profile. Do not add a second local opt-out implementation that could disagree with the provider.
+Configure the campaign's HELP reply through Telnyx Keyword Management before the first production
+message. A custom inbound webhook is unnecessary unless the application later adds inbound SMS
+features; if one is added, verify Telnyx's signed webhook before processing its payload.
+
 Start the local service, then start or verify the relay in another terminal:
 
 ```bash
@@ -457,9 +476,9 @@ lead-agent remote-approval
 
 The service binds only to `127.0.0.1`. It checks the external `/health` route before creating an
 approval request or spending an SMS. Once the relay is healthy, it prepares new candidates and
-sends a single-segment alert containing a random review link. It never puts the Facebook post text
-or proposed response in the SMS; those remain on the Mac and are retrieved through the tokenized
-page. A second notification cycle does not resend the same approval.
+sends a branded, single-segment alert containing a random review link and STOP instruction. It never
+puts the Facebook post text or proposed response in the SMS; those remain on the Mac and are
+retrieved through the tokenized page. A second notification cycle does not resend the same approval.
 
 Provider failures are recorded without message contents, tokens, API keys, or phone numbers. They
 are not retried continuously. After fixing the provider configuration, permit one explicit retry

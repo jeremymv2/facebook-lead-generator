@@ -33,6 +33,10 @@ DEFAULT_SERVICES = [
     "general_home_repairs",
 ]
 
+# The production review token is 43 characters. This limit leaves enough room for the exact
+# registered brand name, review path, and required opt-out language in one 160-character SMS.
+MAX_REMOTE_APPROVAL_BASE_URL_LENGTH = 53
+
 
 class PostingDisabledError(RuntimeError):
     """Raised when code requests posting while a safety control is active."""
@@ -181,7 +185,7 @@ class Settings(BaseSettings):
             raise ValueError("REMOTE_APPROVAL_BASE_URL must be a plain HTTPS origin")
         if parts.path not in {"", "/"}:
             raise ValueError("REMOTE_APPROVAL_BASE_URL must not include a path")
-        if len(str(value).rstrip("/")) > 86:
+        if len(str(value).rstrip("/")) > MAX_REMOTE_APPROVAL_BASE_URL_LENGTH:
             raise ValueError("REMOTE_APPROVAL_BASE_URL is too long for one SMS segment")
         hostname = (parts.hostname or "").casefold()
         if hostname in {"localhost", "127.0.0.1", "::1"}:
