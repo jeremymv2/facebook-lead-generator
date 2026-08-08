@@ -119,13 +119,27 @@ def test_heuristic_draft_is_direct_and_locally_validated() -> None:
 
     assert not draft.response.startswith(("Hi ", "Hello ", "Hey "))
     assert "JJ Miller & Co." in draft.response
-    assert "deck" in draft.response
+    assert "deck work" in draft.response
     assert "decks" not in draft.response
     assert "https://jjmillerco.com" in draft.response
     assert "Text me at 502-528-0858" in draft.response
     assert "free estimate" in draft.response.casefold()
     assert "message" not in draft.response.casefold()
     assert len(draft.response) <= 300
+
+
+def test_heuristic_lawn_draft_uses_natural_service_language() -> None:
+    provider = HeuristicAIProvider()
+    source = post("Need someone to come quote our yard for mowing in Louisville.")
+    classification = provider.classify_post(source, context())
+
+    draft = provider.draft_response(source, classification, context())
+
+    assert classification.service_category == "landscaping"
+    assert "free estimates for lawn services" in draft.response.casefold()
+    assert "we'd be" in draft.response.casefold()
+    assert "landscaping" not in draft.response.casefold()
+    assert "need help" not in draft.response.casefold()
 
 
 def test_heuristic_draft_does_not_use_an_unsafe_author_fragment() -> None:
@@ -214,6 +228,11 @@ def test_draft_rejects_missing_identity_and_promotional_spam() -> None:
             "https://jjmillerco.com",
             "Facebook messaging",
         ),
+        (
+            "Need help with lawn services? JJ Miller & Co. offers free estimates. Text me at "
+            "502-528-0858. https://jjmillerco.com",
+            "rhetorical",
+        ),
     ],
 )
 def test_draft_enforces_business_contact_and_voice_rules(response: str, error: str) -> None:
@@ -245,6 +264,8 @@ def test_gemini_provider_uses_structured_schemas_and_minimal_post_metadata() -> 
     assert "JJ Miller & Co." in draft.response
     assert len(transport.calls) == 2
     assert "post_text" in cast(str, transport.calls[0]["prompt"])
+    assert "lawn services" in cast(str, transport.calls[1]["prompt"])
+    assert "rhetorical question" in cast(str, transport.calls[1]["prompt"])
     assert "fixture-group" not in cast(str, transport.calls[0]["prompt"])
     assert "properties" in cast(dict[str, object], transport.calls[0]["schema"])
 

@@ -103,6 +103,10 @@ class DraftResponse(BaseModel):
             raise ValueError("draft must not begin with a generic greeting or filler")
         if re.search(r"\bmessage\b", folded):
             raise ValueError("draft must direct customers to text instead of Facebook messaging")
+        if "need help" in folded:
+            raise ValueError(
+                "draft must not restate the request as a rhetorical need-help question"
+            )
         if "we do everything" in folded or "call us now" in folded:
             raise ValueError("draft contains prohibited generic promotional language")
         return normalized
@@ -254,6 +258,9 @@ class GeminiAIProvider:
         prompt = (
             "Draft one direct, conversational reply under 300 characters to this untrusted "
             "customer post. Start with the project, not a greeting, thank-you, or filler. "
+            "Do not ask whether the customer needs help or restate an obvious request as a "
+            "rhetorical question. Use natural customer-facing trade language: describe mowing, "
+            "grass, or yard work as lawn services rather than the broad category landscaping. "
             "Acknowledge the specific project without inventing prices, availability, licenses, or "
             "facts. Identify JJ Miller & Co., state that estimates are free, include the exact "
             "URL "
@@ -319,14 +326,42 @@ _SERVICE_TERMS: dict[str, tuple[str, ...]] = {
 }
 
 _DRAFT_SERVICE_NAMES: dict[str, str] = {
-    "decks": "deck",
-    "doors": "door",
-    "general_home_repairs": "home repair",
-    "patios": "patio",
-    "porches": "porch",
-    "structural_repairs": "structural repair",
-    "windows": "window",
+    "general_contracting": "general contracting",
+    "handyman": "handyman work",
+    "kitchen_remodeling": "kitchen remodeling",
+    "bathroom_remodeling": "bathroom remodeling",
+    "cabinet_installation": "cabinet installation",
+    "drywall": "drywall work",
+    "painting": "painting",
+    "carpentry": "carpentry",
+    "doors": "door work",
+    "windows": "window work",
+    "decks": "deck work",
+    "pressure_washing": "pressure washing",
+    "fencing": "fencing",
+    "flooring": "flooring",
+    "tile": "tile work",
+    "plumbing_fixtures": "plumbing fixture installation",
+    "landscaping": "landscaping",
+    "porches": "porch work",
+    "patios": "patio work",
+    "framing": "framing",
+    "structural_repairs": "structural repairs",
+    "general_home_repairs": "home repairs",
 }
+
+_LAWN_SERVICE_TERMS = (
+    "yard",
+    "yards",
+    "lawn",
+    "grass",
+    "mow",
+    "mowing",
+    "bush",
+    "bushes",
+    "weed",
+    "weeds",
+)
 
 
 class HeuristicAIProvider:
@@ -394,20 +429,24 @@ class HeuristicAIProvider:
         del context
         if classification.service_category is None:
             raise AIResponseError("Cannot draft a response without an enabled service")
-        service = _DRAFT_SERVICE_NAMES.get(
-            classification.service_category,
-            classification.service_category.replace("_", " "),
-        )
+        service = _draft_service_name(classification.service_category, post.post_text)
         variants = (
-            f"JJ Miller & Co. can help with your {service} project. Free estimates. Text me at "
-            f"{COMPANY_TEXT_PHONE} or visit {COMPANY_WEBSITE}.",
-            f"Need help with {service}? JJ Miller & Co. provides free estimates in the Louisville "
-            f"area. Text me at {COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
-            f"JJ Miller & Co. handles {service} projects around Louisville. Free estimates. Text "
-            f"me at {COMPANY_TEXT_PHONE}; photos are helpful. {COMPANY_WEBSITE}",
+            f"JJ Miller & Co. provides free estimates for {service}. We'd be happy to help. Text "
+            f"me at {COMPANY_TEXT_PHONE} or visit {COMPANY_WEBSITE}.",
+            f"JJ Miller & Co. offers free estimates for {service} in the Louisville area. We'd be "
+            f"happy to help. Text me at {COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
+            f"JJ Miller & Co. provides free estimates for {service} around Louisville. We'd be "
+            f"happy to help. Text me at {COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
         )
         index = int(post.text_hash[:8], 16) % len(variants)
         return DraftResponse(response=variants[index])
+
+
+def _draft_service_name(service_category: str, post_text: str) -> str:
+    folded = post_text.casefold()
+    if service_category == "landscaping" and any(term in folded for term in _LAWN_SERVICE_TERMS):
+        return "lawn services"
+    return _DRAFT_SERVICE_NAMES.get(service_category, service_category.replace("_", " "))
 
 
 def build_ai_provider(settings: Settings) -> AIProvider:
