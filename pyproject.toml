@@ -18,6 +18,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "mypy>=1.14,<2",
+  "pre-commit>=4.6,<5",
   "pytest>=8.3,<9",
   "pytest-cov>=6,<7",
   "ruff>=0.9,<1",
@@ -31,11 +32,12 @@ packages = ["src/lead_agent"]
 
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers -ra"
+pythonpath = ["."]
 testpaths = ["tests"]
 
 [tool.coverage.run]
 branch = true
-source = ["lead_agent"]
+source = ["lead_agent", "scripts"]
 
 [tool.coverage.report]
 show_missing = true
@@ -55,7 +57,7 @@ select = ["B", "E", "F", "I", "RUF", "SIM", "UP"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["src", "tests"]
+files = ["scripts", "src", "tests"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]

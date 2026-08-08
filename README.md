@@ -68,6 +68,7 @@ Or perform the same setup manually:
 python3.12 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/pre-commit install --hook-type pre-commit --hook-type pre-push
 cp .env.example .env
 .venv/bin/lead-agent init-db
 ```
@@ -133,12 +134,14 @@ Or run checks individually:
 ```bash
 ruff format --check .
 ruff check .
-mypy src tests
-pytest --cov=lead_agent --cov-report=term-missing
+mypy scripts src tests
+pytest --cov=lead_agent --cov=scripts --cov-report=term-missing
+pre-commit run --all-files --hook-stage pre-commit
+pre-commit run --all-files --hook-stage pre-push
 ```
 
-Pull requests run the same formatting, lint, type, and unit-test checks on Python 3.12. Live
-Facebook tests must never run in GitHub Actions.
+Pull requests run formatting, lint, type, unit-test, and independent full-history secret checks.
+Live Facebook tests must never run in GitHub Actions.
 
 ## Secrets and local data
 
@@ -153,6 +156,32 @@ Never commit:
 
 Use placeholders in `.env.example`. A later production hardening milestone can move long-lived
 secrets to macOS Keychain.
+
+### Credential leak prevention
+
+This repository uses layered controls because no single scanner catches every leak:
+
+- The pre-commit hook runs Gitleaks against staged content before a commit is created.
+- The pre-push hook runs Gitleaks with redaction against complete local Git history.
+- Private-key and large-file hooks catch common credential artifacts and accidental exports.
+- A repository-specific path guard rejects `.env`, cookies, browser profiles, authentication state,
+  screenshots, databases, logs, key files, and other private runtime artifacts even if force-added.
+- GitHub Actions performs an independent full-history scan on pushes, pull requests, a weekly
+  schedule, and manual requests. It does not upload a Gitleaks report artifact.
+- Third-party GitHub Actions are pinned to immutable commit SHAs.
+
+Install both versioned hooks after cloning:
+
+```bash
+pre-commit install --hook-type pre-commit --hook-type pre-push
+```
+
+Local hooks can be bypassed, so repository administrators should also enable GitHub Secret
+Protection and push protection when the account plan permits it. Protect `main`, disallow direct
+and force pushes, and require both `checks` and `Gitleaks full history` before merging.
+
+If a scanner reports a real credential, do not merely delete the file: revoke or rotate the
+credential first. Follow [SECURITY.md](SECURITY.md) for containment and Git-history cleanup.
 
 ## Facebook login and browser profile
 

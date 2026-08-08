@@ -1,0 +1,30 @@
+title = "JJ Miller & Co. secret detection"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "jjmiller-sensitive-assignment"
+description = "JJ Miller provider, Facebook, or approval credential"
+regex = '''(?i)(?:approval[_-]?signing[_-]?key|facebook[_-]?(?:access[_-]?token|cookie)|gemini[_-]?api[_-]?key|openai[_-]?api[_-]?key|twilio[_-]?(?:auth[_-]?token|api[_-]?key))\s*[:=]\s*["']?([a-z0-9_./+=-]{16,})'''
+secretGroup = 1
+entropy = 2.5
+keywords = [
+  "approval",
+  "facebook",
+  "gemini",
+  "openai",
+  "twilio",
+]
+
+  [[rules.allowlists]]
+  description = "Documented non-secret placeholders"
+  stopwords = [
+    "changeme",
+    "disabled",
+    "example",
+    "none",
+    "null",
+    "placeholder",
+    "replace_me",
+  ]
