@@ -78,6 +78,14 @@ class LeadIntent(StrEnum):
     UNRELATED = "unrelated"
 
 
+class ApprovalStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    EDITED = "edited"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
 @dataclass(slots=True)
 class FacebookPost:
     group_id: str
@@ -177,6 +185,32 @@ class Lead:
             raise ValueError("confidence must be between 0 and 1")
         if self.retry_count < 0:
             raise ValueError("retry_count cannot be negative")
+
+
+@dataclass(slots=True)
+class ApprovalRequest:
+    lead_id: int
+    draft_response: str
+    expires_at: datetime
+    status: ApprovalStatus = ApprovalStatus.PENDING
+    requested_at: datetime = field(default_factory=utc_now)
+    decided_at: datetime | None = None
+    decided_response: str | None = None
+    id: int | None = None
+
+    def __post_init__(self) -> None:
+        self.draft_response = self.draft_response.strip()
+        if not self.draft_response:
+            raise ValueError("draft_response cannot be empty")
+        if self.expires_at <= self.requested_at:
+            raise ValueError("approval expiration must follow its request time")
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalReview:
+    request: ApprovalRequest
+    lead: Lead
+    post: FacebookPost
 
 
 @dataclass(slots=True)

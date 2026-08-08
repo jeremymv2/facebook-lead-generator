@@ -11,6 +11,9 @@ from datetime import datetime
 from pathlib import Path
 
 from lead_agent.models import (
+    ApprovalRequest,
+    ApprovalReview,
+    ApprovalStatus,
     AuditEvent,
     FacebookPost,
     GroupScanState,
@@ -21,7 +24,7 @@ from lead_agent.models import (
     utc_now,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +147,24 @@ class Database:
 
                 CREATE INDEX IF NOT EXISTS idx_leads_status_score
                     ON leads(status, overall_score DESC);
+
+                CREATE TABLE IF NOT EXISTS approval_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    lead_id INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    draft_response TEXT NOT NULL,
+                    requested_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    decided_at TEXT,
+                    decided_response TEXT,
+                    FOREIGN KEY(lead_id) REFERENCES leads(id) ON DELETE RESTRICT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_approval_requests_status_expiration
+                    ON approval_requests(status, expires_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_requests_one_pending_per_lead
+                    ON approval_requests(lead_id)
+                    WHERE status = 'pending';
 
                 CREATE TABLE IF NOT EXISTS audit_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -537,6 +558,223 @@ class Database:
                 raise RuntimeError("Failed to retrieve updated lead")
             return _lead_from_row(row)
 
+    def list_candidate_leads(self, *, limit: int) -> list[Lead]:
+        """Return draft-bearing candidates that are ready to enter local review."""
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM leads
+                WHERE status = ? AND drafted_response IS NOT NULL
+                ORDER BY overall_score DESC, created_at, id
+                LIMIT ?
+                """,
+                (LeadStatus.CANDIDATE.value, limit),
+            ).fetchall()
+        return [_lead_from_row(row) for row in rows]
+
+    def create_approval_request(self, request: ApprovalRequest) -> ApprovalReview:
+        """Atomically snapshot a candidate draft and move its lead into pending review."""
+        if request.status is not ApprovalStatus.PENDING:
+            raise ValueError("New approval requests must be pending")
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            lead_row = connection.execute(
+                "SELECT * FROM leads WHERE id = ?", (request.lead_id,)
+            ).fetchone()
+            if lead_row is None:
+                raise LookupError(f"Lead {request.lead_id} does not exist")
+            lead = _lead_from_row(lead_row)
+            if lead.status is not LeadStatus.CANDIDATE or lead.drafted_response is None:
+                raise ValueError("Only draft-bearing candidate leads can enter approval")
+            existing = connection.execute(
+                "SELECT id FROM approval_requests WHERE lead_id = ? AND status = ?",
+                (request.lead_id, ApprovalStatus.PENDING.value),
+            ).fetchone()
+            if existing is not None:
+                raise ValueError("Lead already has a pending approval request")
+            cursor = connection.execute(
+                """
+                INSERT INTO approval_requests (
+                    lead_id, status, draft_response, requested_at, expires_at,
+                    decided_at, decided_response
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    request.lead_id,
+                    request.status.value,
+                    request.draft_response,
+                    _serialize_datetime(request.requested_at),
+                    _serialize_datetime(request.expires_at),
+                    _serialize_datetime(request.decided_at),
+                    request.decided_response,
+                ),
+            )
+            request_id = cursor.lastrowid
+            if request_id is None:  # pragma: no cover - SQLite insert contract
+                raise RuntimeError("Failed to retrieve approval request ID")
+            connection.execute(
+                """
+                UPDATE leads SET
+                    status = ?, updated_at = ?, approval_expires_at = ?,
+                    approval_timestamp = NULL, approved_response = NULL, error_state = NULL
+                WHERE id = ?
+                """,
+                (
+                    LeadStatus.PENDING_APPROVAL.value,
+                    _serialize_datetime(request.requested_at),
+                    _serialize_datetime(request.expires_at),
+                    request.lead_id,
+                ),
+            )
+            return _approval_review_from_connection(connection, int(request_id))
+
+    def get_approval_request(self, request_id: int) -> ApprovalRequest | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM approval_requests WHERE id = ?", (request_id,)
+            ).fetchone()
+        return _approval_request_from_row(row) if row is not None else None
+
+    def list_pending_approval_reviews(self) -> list[ApprovalReview]:
+        with self.connection() as connection:
+            request_ids = [
+                int(row["id"])
+                for row in connection.execute(
+                    """
+                    SELECT id FROM approval_requests
+                    WHERE status = ?
+                    ORDER BY expires_at, id
+                    """,
+                    (ApprovalStatus.PENDING.value,),
+                ).fetchall()
+            ]
+            return [
+                _approval_review_from_connection(connection, request_id)
+                for request_id in request_ids
+            ]
+
+    def decide_approval_request(
+        self,
+        request_id: int,
+        decision: ApprovalStatus,
+        *,
+        decided_at: datetime,
+        edited_response: str | None = None,
+    ) -> tuple[ApprovalReview, bool]:
+        """Apply one terminal review decision; return false when already terminal or expired."""
+        allowed = {ApprovalStatus.APPROVED, ApprovalStatus.EDITED, ApprovalStatus.REJECTED}
+        if decision not in allowed:
+            raise ValueError("Approval decision must be approved, edited, or rejected")
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM approval_requests WHERE id = ?", (request_id,)
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"Approval request {request_id} does not exist")
+            request = _approval_request_from_row(row)
+            if request.status is not ApprovalStatus.PENDING:
+                return _approval_review_from_connection(connection, request_id), False
+            if decided_at >= request.expires_at:
+                connection.execute(
+                    "UPDATE approval_requests SET status = ? WHERE id = ?",
+                    (ApprovalStatus.EXPIRED.value, request_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE leads SET status = ?, updated_at = ?
+                    WHERE id = ? AND status = ?
+                    """,
+                    (
+                        LeadStatus.EXPIRED.value,
+                        _serialize_datetime(decided_at),
+                        request.lead_id,
+                        LeadStatus.PENDING_APPROVAL.value,
+                    ),
+                )
+                return _approval_review_from_connection(connection, request_id), False
+            if decision is ApprovalStatus.EDITED:
+                decided_response = (edited_response or "").strip()
+                if not decided_response:
+                    raise ValueError("Edited approvals require a response")
+                lead_status = LeadStatus.EDITED
+            elif decision is ApprovalStatus.APPROVED:
+                decided_response = request.draft_response
+                lead_status = LeadStatus.APPROVED
+            else:
+                decided_response = None
+                lead_status = LeadStatus.REJECTED
+            connection.execute(
+                """
+                UPDATE approval_requests SET
+                    status = ?, decided_at = ?, decided_response = ?
+                WHERE id = ?
+                """,
+                (
+                    decision.value,
+                    _serialize_datetime(decided_at),
+                    decided_response,
+                    request_id,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE leads SET
+                    status = ?, approved_response = ?, approval_timestamp = ?,
+                    updated_at = ?, error_state = NULL
+                WHERE id = ?
+                """,
+                (
+                    lead_status.value,
+                    decided_response,
+                    _serialize_datetime(decided_at),
+                    _serialize_datetime(decided_at),
+                    request.lead_id,
+                ),
+            )
+            return _approval_review_from_connection(connection, request_id), True
+
+    def expire_approval_requests(self, *, expired_at: datetime) -> list[ApprovalReview]:
+        """Atomically expire every pending request whose review window has closed."""
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT id, lead_id FROM approval_requests
+                WHERE status = ? AND expires_at <= ?
+                ORDER BY expires_at, id
+                """,
+                (ApprovalStatus.PENDING.value, _serialize_datetime(expired_at)),
+            ).fetchall()
+            if not rows:
+                return []
+            request_ids = [int(row["id"]) for row in rows]
+            lead_ids = [int(row["lead_id"]) for row in rows]
+            request_placeholders = ",".join("?" for _ in request_ids)
+            lead_placeholders = ",".join("?" for _ in lead_ids)
+            connection.execute(
+                f"UPDATE approval_requests SET status = ? WHERE id IN ({request_placeholders})",
+                (ApprovalStatus.EXPIRED.value, *request_ids),
+            )
+            connection.execute(
+                f"""
+                UPDATE leads SET status = ?, updated_at = ?
+                WHERE id IN ({lead_placeholders}) AND status = ?
+                """,
+                (
+                    LeadStatus.EXPIRED.value,
+                    _serialize_datetime(expired_at),
+                    *lead_ids,
+                    LeadStatus.PENDING_APPROVAL.value,
+                ),
+            )
+            return [
+                _approval_review_from_connection(connection, request_id)
+                for request_id in request_ids
+            ]
+
     def record_audit_event(self, event: AuditEvent) -> AuditEvent:
         """Append an immutable structured event to the audit trail."""
         with self.connection() as connection:
@@ -805,6 +1043,44 @@ def _lead_from_row(row: sqlite3.Row) -> Lead:
         retry_count=row["retry_count"],
         screenshot_path=row["screenshot_path"],
     )
+
+
+def _approval_request_from_row(row: sqlite3.Row) -> ApprovalRequest:
+    expires_at = _parse_datetime(row["expires_at"])
+    if expires_at is None:  # pragma: no cover - database constraint
+        raise ValueError("Approval request is missing its expiration")
+    return ApprovalRequest(
+        id=row["id"],
+        lead_id=row["lead_id"],
+        status=ApprovalStatus(row["status"]),
+        draft_response=row["draft_response"],
+        requested_at=datetime.fromisoformat(row["requested_at"]),
+        expires_at=expires_at,
+        decided_at=_parse_datetime(row["decided_at"]),
+        decided_response=row["decided_response"],
+    )
+
+
+def _approval_review_from_connection(
+    connection: sqlite3.Connection,
+    request_id: int,
+) -> ApprovalReview:
+    request_row = connection.execute(
+        "SELECT * FROM approval_requests WHERE id = ?", (request_id,)
+    ).fetchone()
+    if request_row is None:  # pragma: no cover - protected by caller query
+        raise RuntimeError("Failed to retrieve approval request")
+    request = _approval_request_from_row(request_row)
+    lead_row = connection.execute("SELECT * FROM leads WHERE id = ?", (request.lead_id,)).fetchone()
+    if lead_row is None:  # pragma: no cover - foreign key constraint
+        raise RuntimeError("Approval request is missing its lead")
+    lead = _lead_from_row(lead_row)
+    post_row = connection.execute(
+        "SELECT * FROM facebook_posts WHERE id = ?", (lead.facebook_post_id,)
+    ).fetchone()
+    if post_row is None:  # pragma: no cover - foreign key constraint
+        raise RuntimeError("Approval request lead is missing its Facebook post")
+    return ApprovalReview(request=request, lead=lead, post=_post_from_row(post_row))
 
 
 def _audit_event_from_row(row: sqlite3.Row) -> AuditEvent:

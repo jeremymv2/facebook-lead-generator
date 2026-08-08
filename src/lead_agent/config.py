@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     )
 
     approval_expiration_minutes: int = Field(default=20, ge=1, le=120)
+    approval_local_port: int = Field(default=8765, ge=1024, le=65535)
     daily_posting_limit: int = Field(default=5, ge=1, le=100)
     per_group_daily_posting_limit: int = Field(default=2, ge=1, le=50)
     screenshot_retention_days: int = Field(default=14, ge=1, le=365)

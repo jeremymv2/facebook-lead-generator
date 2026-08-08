@@ -545,3 +545,8 @@ def test_initialize_migrates_v2_state_and_backfills_post_aliases(tmp_path: Path)
         ).fetchone()
     assert version is not None
     assert version["value"] == str(SCHEMA_VERSION)
+    with migrated.connection() as connection:
+        approval_table = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'approval_requests'"
+        ).fetchone()
+    assert approval_table is not None
