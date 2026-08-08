@@ -14,13 +14,24 @@ from lead_agent.ai import AIProviderError, build_ai_provider, classification_con
 from lead_agent.approval_web import run_local_approval_dashboard
 from lead_agent.approvals import ApprovalError, LocalApprovalService
 from lead_agent.classifier import ClassificationSummary, LeadClassificationService
-from lead_agent.config import Settings, UnsafeReadOnlyModeError, load_settings
+from lead_agent.config import (
+    NotificationConfigurationError,
+    Settings,
+    UnsafeReadOnlyModeError,
+    load_settings,
+)
 from lead_agent.database import Database
 from lead_agent.facebook import FacebookBrowserError, FacebookReadOnlyBrowser
 from lead_agent.facebook_state import FacebookSafetyStop
 from lead_agent.groups import FacebookGroup, GroupsConfigError, load_group_catalog
 from lead_agent.logging_config import configure_logging
 from lead_agent.models import GroupScanState
+from lead_agent.notifications import ApprovalNotificationService, build_sms_provider
+from lead_agent.remote_approval_web import (
+    RemoteApprovalController,
+    relay_is_healthy,
+    run_remote_approval_server,
+)
 from lead_agent.scanner import ReadOnlyScanService, ScanSummary
 
 
@@ -61,6 +72,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit",
         type=_positive_int,
         help="Maximum new candidates to prepare for review",
+    )
+    remote_parser = subparsers.add_parser(
+        "remote-approval",
+        help="Send Telnyx alerts and serve tokenized reviews through a secure relay",
+    )
+    remote_parser.add_argument(
+        "--port",
+        type=_local_port,
+        help="Loopback origin port (defaults to REMOTE_APPROVAL_PORT)",
+    )
+    remote_parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        help="Maximum candidates to prepare per notification cycle",
+    )
+    remote_parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Retry earlier failed SMS attempts once at startup using new review links",
     )
     subparsers.add_parser(
         "facebook-login",
@@ -124,6 +154,9 @@ def _doctor_payload(settings: Settings) -> dict[str, object]:
             and bool(settings.ai_model)
         ),
         "notifications_enabled": settings.notifications_enabled,
+        "sms_provider": settings.sms_provider,
+        "remote_approval_ready": settings.remote_approval_ready,
+        "remote_approval_port": settings.remote_approval_port,
     }
 
 
@@ -264,6 +297,70 @@ def main(argv: Sequence[str] | None = None) -> int:
                 candidate_limit=args.limit or settings.ai_max_posts_per_run,
             )
         except (ApprovalError, OSError, UnsafeReadOnlyModeError) as error:
+            print(f"Stopped safely: {error}", file=sys.stderr)
+            return 2
+        return 0
+
+    if args.command == "remote-approval":
+        try:
+            settings.require_read_only_mode()
+            settings.require_remote_approval_ready()
+            database = Database(settings.database_path)
+            database.initialize()
+            approvals = LocalApprovalService(
+                database,
+                expiration_minutes=settings.approval_expiration_minutes,
+            )
+            sms_provider = build_sms_provider(settings)
+            if settings.remote_approval_base_url is None:
+                raise RuntimeError("Validated remote approval URL is unexpectedly missing")
+            if settings.sms_recipient_number is None or settings.approval_signing_key is None:
+                raise RuntimeError("Validated remote approval secrets are unexpectedly missing")
+            notifier = ApprovalNotificationService(
+                database,
+                approvals,
+                sms_provider,
+                public_base_url=str(settings.remote_approval_base_url),
+                recipient_number=settings.sms_recipient_number,
+                relay_healthcheck=lambda: relay_is_healthy(
+                    str(settings.remote_approval_base_url),
+                    timeout_seconds=5,
+                ),
+            )
+            candidate_limit = args.limit or settings.ai_max_posts_per_run
+            controller = RemoteApprovalController(
+                approvals,
+                signing_key=settings.approval_signing_key.get_secret_value(),
+            )
+
+            retry_failed = args.retry_failed
+
+            def notify_cycle() -> None:
+                nonlocal retry_failed
+                summary = notifier.notify_candidates(
+                    limit=candidate_limit,
+                    retry_failed=retry_failed,
+                )
+                retry_failed = False
+                if summary.considered:
+                    print(
+                        f"notifications considered={summary.considered} "
+                        f"sent={summary.sent} failed={summary.failed}"
+                    )
+
+            run_remote_approval_server(
+                controller,
+                port=args.port or settings.remote_approval_port,
+                public_base_url=str(settings.remote_approval_base_url).rstrip("/"),
+                periodic_callback=notify_cycle,
+                callback_interval_seconds=settings.notification_poll_interval_seconds,
+            )
+        except (
+            ApprovalError,
+            NotificationConfigurationError,
+            OSError,
+            UnsafeReadOnlyModeError,
+        ) as error:
             print(f"Stopped safely: {error}", file=sys.stderr)
             return 2
         return 0

@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from lead_agent.models import (
+    ApprovalNotification,
     ApprovalRequest,
     ApprovalReview,
     ApprovalStatus,
@@ -20,11 +21,12 @@ from lead_agent.models import (
     Lead,
     LeadIntent,
     LeadStatus,
+    NotificationStatus,
     PostStatus,
     utc_now,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +159,7 @@ class Database:
                     expires_at TEXT NOT NULL,
                     decided_at TEXT,
                     decided_response TEXT,
+                    remote_token_hash TEXT,
                     FOREIGN KEY(lead_id) REFERENCES leads(id) ON DELETE RESTRICT
                 );
 
@@ -165,6 +168,22 @@ class Database:
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_requests_one_pending_per_lead
                     ON approval_requests(lead_id)
                     WHERE status = 'pending';
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_requests_remote_token
+                    ON approval_requests(remote_token_hash)
+                    WHERE remote_token_hash IS NOT NULL;
+
+                CREATE TABLE IF NOT EXISTS approval_notifications (
+                    approval_request_id INTEGER PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempt_count INTEGER NOT NULL CHECK(attempt_count >= 1),
+                    last_attempt_at TEXT NOT NULL,
+                    sent_at TEXT,
+                    provider_message_id TEXT,
+                    error_code TEXT,
+                    FOREIGN KEY(approval_request_id)
+                        REFERENCES approval_requests(id) ON DELETE RESTRICT
+                );
 
                 CREATE TABLE IF NOT EXISTS audit_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -229,6 +248,14 @@ class Database:
             _add_column_if_missing(connection, "leads", "ai_provider", "TEXT")
             _add_column_if_missing(connection, "leads", "ai_model", "TEXT")
             _add_column_if_missing(connection, "leads", "classification_version", "TEXT")
+            _add_column_if_missing(connection, "approval_requests", "remote_token_hash", "TEXT")
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_requests_remote_token
+                ON approval_requests(remote_token_hash)
+                WHERE remote_token_hash IS NOT NULL
+                """
+            )
             self._backfill_post_identity_aliases(connection)
             connection.execute(
                 """
@@ -655,6 +682,176 @@ class Database:
                 for request_id in request_ids
             ]
 
+    def list_notifiable_approval_reviews(
+        self,
+        *,
+        include_failed: bool = False,
+    ) -> list[ApprovalReview]:
+        """Return pending approvals that have not been sent by an SMS provider."""
+        with self.connection() as connection:
+            if include_failed:
+                notification_filter = (
+                    "notifications.approval_request_id IS NULL OR notifications.status = ?"
+                )
+                parameters: tuple[object, ...] = (
+                    ApprovalStatus.PENDING.value,
+                    NotificationStatus.FAILED.value,
+                )
+            else:
+                notification_filter = "notifications.approval_request_id IS NULL"
+                parameters = (ApprovalStatus.PENDING.value,)
+            rows = connection.execute(
+                f"""
+                SELECT requests.id
+                FROM approval_requests AS requests
+                LEFT JOIN approval_notifications AS notifications
+                    ON notifications.approval_request_id = requests.id
+                WHERE requests.status = ? AND ({notification_filter})
+                ORDER BY requests.expires_at, requests.id
+                """,
+                parameters,
+            ).fetchall()
+            return [_approval_review_from_connection(connection, int(row["id"])) for row in rows]
+
+    def claim_approval_notification(
+        self,
+        request_id: int,
+        *,
+        provider: str,
+        remote_token_hash: str,
+        attempted_at: datetime,
+        retry_failed: bool = False,
+    ) -> bool:
+        """Atomically claim one pending approval for a single outbound SMS attempt."""
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            request_row = connection.execute(
+                "SELECT * FROM approval_requests WHERE id = ?", (request_id,)
+            ).fetchone()
+            if request_row is None:
+                raise LookupError(f"Approval request {request_id} does not exist")
+            request = _approval_request_from_row(request_row)
+            if request.status is not ApprovalStatus.PENDING or attempted_at >= request.expires_at:
+                return False
+            notification_row = connection.execute(
+                "SELECT * FROM approval_notifications WHERE approval_request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if notification_row is None:
+                connection.execute(
+                    """
+                    INSERT INTO approval_notifications (
+                        approval_request_id, provider, status, attempt_count,
+                        last_attempt_at, sent_at, provider_message_id, error_code
+                    ) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL)
+                    """,
+                    (
+                        request_id,
+                        provider,
+                        NotificationStatus.SENDING.value,
+                        1,
+                        _serialize_datetime(attempted_at),
+                    ),
+                )
+            else:
+                notification = _approval_notification_from_row(notification_row)
+                if not retry_failed or notification.status is not NotificationStatus.FAILED:
+                    return False
+                connection.execute(
+                    """
+                    UPDATE approval_notifications SET
+                        provider = ?, status = ?, attempt_count = attempt_count + 1,
+                        last_attempt_at = ?, sent_at = NULL,
+                        provider_message_id = NULL, error_code = NULL
+                    WHERE approval_request_id = ?
+                    """,
+                    (
+                        provider,
+                        NotificationStatus.SENDING.value,
+                        _serialize_datetime(attempted_at),
+                        request_id,
+                    ),
+                )
+            connection.execute(
+                "UPDATE approval_requests SET remote_token_hash = ? WHERE id = ?",
+                (remote_token_hash, request_id),
+            )
+            return True
+
+    def complete_approval_notification(
+        self,
+        request_id: int,
+        *,
+        status: NotificationStatus,
+        completed_at: datetime,
+        provider_message_id: str | None = None,
+        error_code: str | None = None,
+    ) -> ApprovalNotification:
+        """Persist a claimed SMS attempt result without storing its body or phone number."""
+        if status not in {NotificationStatus.SENT, NotificationStatus.FAILED}:
+            raise ValueError("Notification completion must be sent or failed")
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM approval_notifications WHERE approval_request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"Approval notification {request_id} does not exist")
+            notification = _approval_notification_from_row(row)
+            if notification.status is not NotificationStatus.SENDING:
+                raise ValueError("Approval notification is not awaiting completion")
+            connection.execute(
+                """
+                UPDATE approval_notifications SET
+                    status = ?, sent_at = ?, provider_message_id = ?, error_code = ?
+                WHERE approval_request_id = ?
+                """,
+                (
+                    status.value,
+                    _serialize_datetime(completed_at)
+                    if status is NotificationStatus.SENT
+                    else None,
+                    provider_message_id,
+                    error_code,
+                    request_id,
+                ),
+            )
+            if status is NotificationStatus.FAILED:
+                connection.execute(
+                    "UPDATE approval_requests SET remote_token_hash = NULL WHERE id = ?",
+                    (request_id,),
+                )
+            completed_row = connection.execute(
+                "SELECT * FROM approval_notifications WHERE approval_request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if completed_row is None:  # pragma: no cover - protected by the transaction
+                raise RuntimeError("Failed to retrieve completed approval notification")
+            return _approval_notification_from_row(completed_row)
+
+    def get_approval_notification(self, request_id: int) -> ApprovalNotification | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM approval_notifications WHERE approval_request_id = ?",
+                (request_id,),
+            ).fetchone()
+        return _approval_notification_from_row(row) if row is not None else None
+
+    def get_approval_review_by_remote_token_hash(
+        self,
+        remote_token_hash: str,
+    ) -> ApprovalReview | None:
+        """Resolve one opaque remote token hash without exposing a list endpoint."""
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT id FROM approval_requests WHERE remote_token_hash = ?",
+                (remote_token_hash,),
+            ).fetchone()
+            if row is None:
+                return None
+            return _approval_review_from_connection(connection, int(row["id"]))
+
     def decide_approval_request(
         self,
         request_id: int,
@@ -1058,6 +1255,19 @@ def _approval_request_from_row(row: sqlite3.Row) -> ApprovalRequest:
         expires_at=expires_at,
         decided_at=_parse_datetime(row["decided_at"]),
         decided_response=row["decided_response"],
+    )
+
+
+def _approval_notification_from_row(row: sqlite3.Row) -> ApprovalNotification:
+    return ApprovalNotification(
+        approval_request_id=row["approval_request_id"],
+        provider=row["provider"],
+        status=NotificationStatus(row["status"]),
+        attempt_count=row["attempt_count"],
+        last_attempt_at=datetime.fromisoformat(row["last_attempt_at"]),
+        sent_at=_parse_datetime(row["sent_at"]),
+        provider_message_id=row["provider_message_id"],
+        error_code=row["error_code"],
     )
 
 

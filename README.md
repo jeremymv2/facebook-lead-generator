@@ -5,12 +5,14 @@ explicitly approved set of Louisville-area Facebook groups. The intended product
 
 > Detect → classify → score → draft → notify → human approve/edit/reject → validate → post once
 
-This repository is currently at **Phase 5: local human approval**. It includes safe
+This repository is currently at **Phase 6: tunneled mobile approval**. It includes safe
 configuration, a dedicated persistent Playwright profile, explicit group allowlisting, visible-post
 extraction, alias-based SQLite duplicate prevention, durable per-group scan health, synthetic
 selector fixtures, swappable structured lead providers, candidate-only response drafting,
-an expiring loopback-only approve/edit/reject dashboard, structured logging, tests, and CI. It does
-**not** include remote approvals, notifications, scheduling, or Facebook comment posting.
+an expiring loopback-only approve/edit/reject dashboard, a separately isolated tokenized mobile
+review origin, provider-independent SMS delivery with a Telnyx adapter, structured logging, tests,
+and CI. It does **not** include autonomous scheduling, inbound SMS commands, or Facebook comment
+posting.
 
 ## Safety status
 
@@ -29,6 +31,11 @@ The project fails closed:
 - The local approval dashboard binds only to `127.0.0.1`, validates CSRF and local Host/Origin
   headers, and remains incapable of Facebook submission.
 - Approval decisions are atomic, expire quickly, and can transition only once.
+- The tunneled mobile surface has no lead-listing route. Each link uses a 256-bit random token,
+  token-bound CSRF protection, strict Host/Origin validation, and no application request logging.
+- SMS is not attempted until the configured HTTPS relay successfully reaches the Mac health check.
+- Telnyx is isolated behind an `SmsProvider` protocol and is disabled unless every required local
+  setting is explicitly enabled.
 - Only groups explicitly marked `enabled: true` in the local allowlist can be scanned.
 - Login pages, CAPTCHA, checkpoints, off-domain redirects, missing posts, and unreadable UI stop the
   scan and produce at most one local diagnostic screenshot.
@@ -51,10 +58,18 @@ Mac
 ├── vendor-independent structured classifier/drafter
 │   ├── deterministic offline heuristic provider
 │   └── optional Gemini structured-output adapter
-├── SQLite-backed approval state and loopback-only local review dashboard
+├── SQLite-backed approval state
+├── loopback-only local review dashboard
+├── tokenized loopback origin for one tunneled mobile review at a time
+├── provider-independent SMS service
+│   └── Telnyx adapter (disabled by default)
 ├── JSON structured application logs
 ├── screenshots directory (gitignored)
 └── dedicated Playwright browser profile outside the repository (cookies; never committed)
+
+External, minimized
+├── HTTPS relay transports requests to 127.0.0.1; it stores no application approval state
+└── Telnyx delivers the SMS containing the expiring review link
 ```
 
 The Playwright adapter produces plain `FacebookPost` records and passes them to a browser-independent
@@ -110,6 +125,14 @@ Important settings include:
 | `SERVICE_AREA` | `Louisville, Kentucky` | Primary geographic target |
 | `APPROVAL_EXPIRATION_MINUTES` | `20` | Local review lifetime |
 | `APPROVAL_LOCAL_PORT` | `8765` | Loopback-only local review dashboard port |
+| `REMOTE_APPROVAL_PORT` | `8766` | Separate loopback origin intended for a secure relay |
+| `REMOTE_APPROVAL_BASE_URL` | empty | Stable HTTPS relay origin used in SMS links |
+| `NOTIFICATIONS_ENABLED` | `false` | Explicit remote-notification switch |
+| `SMS_PROVIDER` | `disabled` | `disabled` or `telnyx` |
+| `SMS_RECIPIENT_NUMBER` | empty | Reviewer's phone in E.164 format |
+| `TELNYX_FROM_NUMBER` | empty | Registered Telnyx sender in E.164 format |
+| `TELNYX_API_KEY` | empty | Local Telnyx secret; never printed or stored in SQLite |
+| `APPROVAL_SIGNING_KEY` | empty | Local secret for token-bound form protection |
 | `DAILY_POSTING_LIMIT` | `5` | Planned global daily cap |
 | `PER_GROUP_DAILY_POSTING_LIMIT` | `2` | Planned per-group cap |
 | `FACEBOOK_PROFILE_PATH` | `~/.jjmiller-lead-agent/facebook-profile` | Dedicated persistent profile |
@@ -151,7 +174,8 @@ group, author, and normalized text. Database constraints and identity aliases ma
 idempotent. A second uniqueness constraint permits only one lead per post. Schema version 4 adds
 intent, residential/spam flags, provider/model metadata, and a classification-contract version.
 Schema version 5 adds immutable approval draft snapshots, expiration, and one terminal local
-decision per request.
+decision per request. Schema version 6 adds hashed remote tokens and durable provider-delivery
+metadata without storing SMS bodies, destination numbers, or plaintext review tokens.
 
 The eventual posting workflow still requires posting-attempt records and final page validation;
 those will be implemented before any submission code exists.
@@ -183,7 +207,7 @@ Live Facebook tests must never run in GitHub Actions.
 Never commit:
 
 - Facebook credentials, cookies, browser storage, or profile contents
-- AI, cloud, notification, or approval signing keys
+- AI, relay, notification, or approval signing keys
 - `.env`
 - SQLite runtime databases
 - Screenshots or logs
@@ -382,6 +406,73 @@ The dashboard is intentionally local-only: it binds to `127.0.0.1`, has no confi
 uses an in-memory CSRF token, validates local Host/Origin headers, and imports no Facebook browser
 submission capability. Approval only updates SQLite; it cannot comment on Facebook.
 
+## Test tunneled mobile approval and Telnyx
+
+The remote design remains local-first. SQLite, drafts, decisions, token validation, and the mobile
+HTML are all served by the Mac. A relay carries HTTPS requests to the dedicated loopback port, and
+Telnyx delivers the SMS. The application has no Cloud Run service or cloud database.
+
+[Smee](https://smee.io/) is useful for one-way webhook POST delivery, but it cannot proxy an
+interactive browser request and return the local approval page. Use a browser-capable relay such as
+a named [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/),
+or a private [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve) URL when the Mac
+and phone are in the same tailnet. Do not use a temporary URL that changes after restart.
+
+Configure the selected relay to forward its stable HTTPS origin to
+`http://127.0.0.1:8766`. Keep relay credentials outside this repository. Then add these values only
+to the ignored `.env` file:
+
+```dotenv
+POSTING_ENABLED=false
+DRY_RUN=true
+
+NOTIFICATIONS_ENABLED=true
+SMS_PROVIDER=telnyx
+REMOTE_APPROVAL_BASE_URL=https://YOUR-STABLE-RELAY-HOST
+APPROVAL_SIGNING_KEY=
+SMS_RECIPIENT_NUMBER=+1XXXXXXXXXX
+TELNYX_API_KEY=
+TELNYX_FROM_NUMBER=+1XXXXXXXXXX
+```
+
+Generate the signing key locally without putting it in terminal history as a literal:
+
+```bash
+python -c 'import secrets; print(secrets.token_urlsafe(48))'
+```
+
+Paste that output after `APPROVAL_SIGNING_KEY=` in `.env`, and paste the key created in the Telnyx
+portal after `TELNYX_API_KEY=`. Never put either value in `.env.example` or this README.
+
+The Telnyx sender and recipient must use E.164 notation. The recipient is the reviewer's phone; it
+does not have to be the business's published customer text number. Complete the applicable Telnyx
+sender registration and assign the number to a messaging profile before testing.
+
+Start the local service, then start or verify the relay in another terminal:
+
+```bash
+lead-agent doctor
+lead-agent remote-approval
+```
+
+The service binds only to `127.0.0.1`. It checks the external `/health` route before creating an
+approval request or spending an SMS. Once the relay is healthy, it prepares new candidates and
+sends a single-segment alert containing a random review link. It never puts the Facebook post text
+or proposed response in the SMS; those remain on the Mac and are retrieved through the tokenized
+page. A second notification cycle does not resend the same approval.
+
+Provider failures are recorded without message contents, tokens, API keys, or phone numbers. They
+are not retried continuously. After fixing the provider configuration, permit one explicit retry
+with a newly rotated review token:
+
+```bash
+lead-agent remote-approval --retry-failed
+```
+
+The tokenized service deliberately has no `/` dashboard or lead-list endpoint. A token expires with
+the 20-minute approval window and can produce only one approve, edit, or reject transition. Approval
+still cannot post anything to Facebook.
+
 ## Runtime and troubleshooting
 
 The scanner runs manually. A later reliability milestone will supply a `launchd` service with
@@ -400,9 +491,10 @@ is idempotent.
    candidates, deduplicate changing Facebook identities, and persist recoverable group health.
 4. **Swappable AI classification/scoring and drafting:** validate structured
    classifications, draft only strong candidates, and remain incapable of Facebook submission.
-5. **Loopback-only local human approval (this milestone):** snapshot drafts and support expiring,
+5. **Loopback-only local human approval:** snapshot drafts and support expiring,
    one-time approve/edit/reject decisions with no Facebook posting capability.
-6. Secure remote/mobile approval with per-request cryptographic tokens and outbound Mac polling.
+6. **Tunneled remote/mobile approval (this milestone):** keep state on the Mac, send Telnyx alerts,
+   and expose only per-request cryptographic review URLs through an outbound HTTPS relay.
 7. Idempotent approved posting with final validation, limits, screenshots, and stop-on-uncertainty.
 8. Notifications, `launchd`, retention, and operational health.
 

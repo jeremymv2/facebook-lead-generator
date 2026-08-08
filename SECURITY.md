@@ -32,6 +32,11 @@ first containment action.
 - Real Facebook credentials remain in the local persistent browser profile, outside this repository.
 - Gemini credentials remain only in the ignored local `.env`; the application never logs or stores
   the key in SQLite.
+- Telnyx API keys, approval signing keys, recipient/sender phone numbers, and relay credentials
+  remain in ignored local configuration or provider-owned directories. The application stores only
+  a hash of each active remote approval token.
+- The public relay must forward only to the dedicated loopback remote-approval port. Never publish
+  the local dashboard, Facebook profile, database, logs, screenshots, or another Mac service.
 
 Repository administrators should also enable GitHub Secret Protection and push protection when the
 account plan permits it, protect `main`, disallow direct and force pushes, and require the

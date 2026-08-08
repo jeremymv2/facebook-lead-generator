@@ -18,6 +18,7 @@ from scripts.check_sensitive_paths import main, sensitive_path_reason
         "secrets/client_secret_google.json",
         "network/session.har",
         "storage-state-jeremy.json",
+        ".cloudflared/fixture-tunnel.json",
     ],
 )
 def test_sensitive_paths_are_rejected(path: str) -> None:
