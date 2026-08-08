@@ -122,6 +122,30 @@ def test_configured_threshold_controls_drafting(database: Database) -> None:
     assert lead.drafted_response is None
 
 
+def test_resolved_yard_request_is_landscaping_but_never_drafted(database: Database) -> None:
+    source = save_post(
+        database,
+        "resolved-yard-work",
+        (
+            "Need someone to mow two yards today, trim bushes, and remove weeds along the fence. "
+            "Update: I have found someone."
+        ),
+    )
+    service = LeadClassificationService(database, HeuristicAIProvider(), context())
+
+    summary = service.classify_posts(limit=10)
+
+    lead = database.get_lead_for_post(source.id or 0)
+    assert summary.candidates == ()
+    assert len(summary.ignored) == 1
+    assert lead is not None
+    assert lead.status is LeadStatus.IGNORED
+    assert lead.service_category == "landscaping"
+    assert lead.intent is LeadIntent.RESOLVED
+    assert lead.overall_score is not None and lead.overall_score <= 10
+    assert lead.drafted_response is None
+
+
 def test_provider_failure_records_only_safe_error_type(database: Database) -> None:
     source = save_post(
         database,

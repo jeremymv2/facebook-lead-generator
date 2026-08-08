@@ -157,6 +157,7 @@ def test_heuristic_drafts_vary_by_stable_post_content() -> None:
     "overrides",
     [
         {"intent": "competitor_advertisement", "overall_score": 80},
+        {"intent": "resolved", "overall_score": 80},
         {"intent": "advice", "overall_score": 60},
         {"is_residential": False, "overall_score": 70},
         {"service_category": None, "relevance_score": 90},

@@ -31,6 +31,8 @@ STORY_MESSAGE_SELECTOR = (
     '[data-ad-preview="message"], '
     '[data-ad-comet-preview="message"]'
 )
+SEE_MORE_SUFFIX_PATTERN = re.compile(r"(?:\s*(?:…|\.\.\.)?\s*see more)+\s*$", re.IGNORECASE)
+REPEATED_MESSAGE_PREFIX_LENGTH = 80
 
 
 class FacebookBrowserError(RuntimeError):
@@ -54,6 +56,18 @@ def is_facebook_comment_label(label: str | None) -> bool:
     """Identify Facebook's semantic labels for comment and reply articles."""
     normalized = normalize_post_text(label or "").casefold()
     return normalized.startswith(("comment by ", "reply by "))
+
+
+def clean_facebook_message_text(value: str) -> str:
+    """Remove Facebook expansion controls and duplicated collapsed-message prefixes."""
+    normalized = normalize_post_text(value)
+    normalized = SEE_MORE_SUFFIX_PATTERN.sub("", normalized).strip()
+    if len(normalized) >= REPEATED_MESSAGE_PREFIX_LENGTH * 2:
+        prefix = normalized[:REPEATED_MESSAGE_PREFIX_LENGTH]
+        repeated_at = normalized.find(prefix, REPEATED_MESSAGE_PREFIX_LENGTH)
+        if repeated_at >= REPEATED_MESSAGE_PREFIX_LENGTH:
+            normalized = normalized[:repeated_at].rstrip(" …")
+    return normalize_post_text(normalized)
 
 
 def extract_post_id(url: str) -> str | None:
@@ -113,7 +127,7 @@ def select_message_text(
         valid: list[str] = []
         seen: set[str] = set()
         for value in values:
-            normalized = normalize_post_text(value)
+            normalized = clean_facebook_message_text(value)
             if len(normalized) >= min_length and normalized not in seen:
                 seen.add(normalized)
                 valid.append(normalized)
@@ -428,7 +442,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
             )
             if is_facebook_comment_label(comment_label):
                 continue
-            post_text = normalize_post_text(await message.inner_text(timeout=1000))
+            post_text = clean_facebook_message_text(await message.inner_text(timeout=1000))
             hrefs = await self._nearest_post_hrefs(message)
             post = build_facebook_post(
                 FacebookPostCandidate(

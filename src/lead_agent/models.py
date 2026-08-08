@@ -72,6 +72,7 @@ class LeadIntent(StrEnum):
     HIRING = "hiring"
     RECOMMENDATION = "recommendation"
     ADVICE = "advice"
+    RESOLVED = "resolved"
     SELLING = "selling"
     COMPETITOR_ADVERTISEMENT = "competitor_advertisement"
     UNRELATED = "unrelated"
