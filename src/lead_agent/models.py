@@ -68,6 +68,15 @@ class LeadStatus(StrEnum):
     NEEDS_ATTENTION = "needs_attention"
 
 
+class LeadIntent(StrEnum):
+    HIRING = "hiring"
+    RECOMMENDATION = "recommendation"
+    ADVICE = "advice"
+    SELLING = "selling"
+    COMPETITOR_ADVERTISEMENT = "competitor_advertisement"
+    UNRELATED = "unrelated"
+
+
 @dataclass(slots=True)
 class FacebookPost:
     group_id: str
@@ -133,6 +142,9 @@ class Lead:
     status: LeadStatus = LeadStatus.DISCOVERED
     service_category: str | None = None
     location: str | None = None
+    intent: LeadIntent | None = None
+    is_residential: bool | None = None
+    is_spam: bool | None = None
     relevance_score: int | None = None
     geographic_score: int | None = None
     urgency_score: int | None = None
@@ -140,6 +152,9 @@ class Lead:
     confidence: float | None = None
     reasoning_summary: str | None = None
     drafted_response: str | None = None
+    ai_provider: str | None = None
+    ai_model: str | None = None
+    classification_version: str | None = None
     approved_response: str | None = None
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)

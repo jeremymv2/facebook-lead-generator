@@ -15,12 +15,13 @@ from lead_agent.models import (
     FacebookPost,
     GroupScanState,
     Lead,
+    LeadIntent,
     LeadStatus,
     PostStatus,
     utc_now,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +29,14 @@ class SaveResult:
     """The persisted post and whether this call inserted it."""
 
     post: FacebookPost
+    created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class LeadSaveResult:
+    """The persisted lead and whether this call inserted it."""
+
+    lead: Lead
     created: bool
 
 
@@ -107,6 +116,9 @@ class Database:
                     status TEXT NOT NULL,
                     service_category TEXT,
                     location TEXT,
+                    intent TEXT,
+                    is_residential INTEGER CHECK(is_residential IN (0, 1)),
+                    is_spam INTEGER CHECK(is_spam IN (0, 1)),
                     relevance_score INTEGER CHECK(relevance_score BETWEEN 0 AND 100),
                     geographic_score INTEGER CHECK(geographic_score BETWEEN 0 AND 100),
                     urgency_score INTEGER CHECK(urgency_score BETWEEN 0 AND 100),
@@ -114,6 +126,9 @@ class Database:
                     confidence REAL CHECK(confidence BETWEEN 0 AND 1),
                     reasoning_summary TEXT,
                     drafted_response TEXT,
+                    ai_provider TEXT,
+                    ai_model TEXT,
+                    classification_version TEXT,
                     approved_response TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -177,6 +192,22 @@ class Database:
                 "last_failure_at",
                 "TEXT",
             )
+            _add_column_if_missing(connection, "leads", "intent", "TEXT")
+            _add_column_if_missing(
+                connection,
+                "leads",
+                "is_residential",
+                "INTEGER CHECK(is_residential IN (0, 1))",
+            )
+            _add_column_if_missing(
+                connection,
+                "leads",
+                "is_spam",
+                "INTEGER CHECK(is_spam IN (0, 1))",
+            )
+            _add_column_if_missing(connection, "leads", "ai_provider", "TEXT")
+            _add_column_if_missing(connection, "leads", "ai_model", "TEXT")
+            _add_column_if_missing(connection, "leads", "classification_version", "TEXT")
             self._backfill_post_identity_aliases(connection)
             connection.execute(
                 """
@@ -283,6 +314,41 @@ class Database:
             rows = connection.execute(
                 "SELECT * FROM facebook_posts ORDER BY discovered_at DESC LIMIT ?", (limit,)
             ).fetchall()
+        return [_post_from_row(row) for row in rows]
+
+    def list_unclassified_posts(
+        self,
+        *,
+        limit: int,
+        post_id: int | None = None,
+    ) -> list[FacebookPost]:
+        """Return posts that do not yet have a persisted lead classification."""
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        with self.connection() as connection:
+            if post_id is None:
+                rows = connection.execute(
+                    """
+                    SELECT posts.*
+                    FROM facebook_posts AS posts
+                    LEFT JOIN leads ON leads.facebook_post_id = posts.id
+                    WHERE leads.id IS NULL
+                    ORDER BY posts.discovered_at DESC, posts.id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT posts.*
+                    FROM facebook_posts AS posts
+                    LEFT JOIN leads ON leads.facebook_post_id = posts.id
+                    WHERE leads.id IS NULL AND posts.id = ?
+                    LIMIT 1
+                    """,
+                    (post_id,),
+                ).fetchall()
         return [_post_from_row(row) for row in rows]
 
     def update_post_status(
@@ -418,47 +484,25 @@ class Database:
     def create_lead(self, lead: Lead) -> Lead:
         """Create at most one lead per Facebook post."""
         with self.connection() as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO leads (
-                    facebook_post_id, status, service_category, location,
-                    relevance_score, geographic_score, urgency_score, overall_score,
-                    confidence, reasoning_summary, drafted_response, approved_response,
-                    created_at, updated_at, approval_timestamp, approval_expires_at,
-                    posting_timestamp, facebook_reply_url, error_state, retry_count,
-                    screenshot_path
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    lead.facebook_post_id,
-                    lead.status.value,
-                    lead.service_category,
-                    lead.location,
-                    lead.relevance_score,
-                    lead.geographic_score,
-                    lead.urgency_score,
-                    lead.overall_score,
-                    lead.confidence,
-                    lead.reasoning_summary,
-                    lead.drafted_response,
-                    lead.approved_response,
-                    _serialize_datetime(lead.created_at),
-                    _serialize_datetime(lead.updated_at),
-                    _serialize_datetime(lead.approval_timestamp),
-                    _serialize_datetime(lead.approval_expires_at),
-                    _serialize_datetime(lead.posting_timestamp),
-                    lead.facebook_reply_url,
-                    lead.error_state,
-                    lead.retry_count,
-                    lead.screenshot_path,
-                ),
-            )
+            return _insert_lead(connection, lead)
+
+    def save_classified_lead(self, lead: Lead) -> LeadSaveResult:
+        """Atomically save one classification and mark its source post processed."""
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT * FROM leads WHERE id = ?", (cursor.lastrowid,)
+                "SELECT * FROM leads WHERE facebook_post_id = ?", (lead.facebook_post_id,)
             ).fetchone()
-            if row is None:  # pragma: no cover - protected by the transaction
-                raise RuntimeError("Failed to retrieve created lead")
-            return _lead_from_row(row)
+            if row is not None:
+                return LeadSaveResult(lead=_lead_from_row(row), created=False)
+            persisted = _insert_lead(connection, lead)
+            cursor = connection.execute(
+                "UPDATE facebook_posts SET status = ?, error_state = NULL WHERE id = ?",
+                (PostStatus.PROCESSED.value, lead.facebook_post_id),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(f"Post {lead.facebook_post_id} does not exist")
+            return LeadSaveResult(lead=persisted, created=True)
 
     def get_lead(self, lead_id: int) -> Lead | None:
         with self.connection() as connection:
@@ -537,6 +581,59 @@ class Database:
                     (lead_id,),
                 ).fetchall()
         return [_audit_event_from_row(row) for row in rows]
+
+
+def _insert_lead(connection: sqlite3.Connection, lead: Lead) -> Lead:
+    cursor = connection.execute(
+        """
+        INSERT INTO leads (
+            facebook_post_id, status, service_category, location,
+            intent, is_residential, is_spam,
+            relevance_score, geographic_score, urgency_score, overall_score,
+            confidence, reasoning_summary, drafted_response, ai_provider, ai_model,
+            classification_version, approved_response,
+            created_at, updated_at, approval_timestamp, approval_expires_at,
+            posting_timestamp, facebook_reply_url, error_state, retry_count,
+            screenshot_path
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?
+        )
+        """,
+        (
+            lead.facebook_post_id,
+            lead.status.value,
+            lead.service_category,
+            lead.location,
+            lead.intent.value if lead.intent is not None else None,
+            lead.is_residential,
+            lead.is_spam,
+            lead.relevance_score,
+            lead.geographic_score,
+            lead.urgency_score,
+            lead.overall_score,
+            lead.confidence,
+            lead.reasoning_summary,
+            lead.drafted_response,
+            lead.ai_provider,
+            lead.ai_model,
+            lead.classification_version,
+            lead.approved_response,
+            _serialize_datetime(lead.created_at),
+            _serialize_datetime(lead.updated_at),
+            _serialize_datetime(lead.approval_timestamp),
+            _serialize_datetime(lead.approval_expires_at),
+            _serialize_datetime(lead.posting_timestamp),
+            lead.facebook_reply_url,
+            lead.error_state,
+            lead.retry_count,
+            lead.screenshot_path,
+        ),
+    )
+    row = connection.execute("SELECT * FROM leads WHERE id = ?", (cursor.lastrowid,)).fetchone()
+    if row is None:  # pragma: no cover - protected by the transaction
+        raise RuntimeError("Failed to retrieve created lead")
+    return _lead_from_row(row)
 
 
 def _add_column_if_missing(
@@ -654,6 +751,10 @@ def _parse_datetime(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value is not None else None
 
 
+def _parse_optional_bool(value: int | None) -> bool | None:
+    return bool(value) if value is not None else None
+
+
 def _post_from_row(row: sqlite3.Row) -> FacebookPost:
     return FacebookPost(
         id=row["id"],
@@ -680,6 +781,9 @@ def _lead_from_row(row: sqlite3.Row) -> Lead:
         status=LeadStatus(row["status"]),
         service_category=row["service_category"],
         location=row["location"],
+        intent=LeadIntent(row["intent"]) if row["intent"] is not None else None,
+        is_residential=_parse_optional_bool(row["is_residential"]),
+        is_spam=_parse_optional_bool(row["is_spam"]),
         relevance_score=row["relevance_score"],
         geographic_score=row["geographic_score"],
         urgency_score=row["urgency_score"],
@@ -687,6 +791,9 @@ def _lead_from_row(row: sqlite3.Row) -> Lead:
         confidence=row["confidence"],
         reasoning_summary=row["reasoning_summary"],
         drafted_response=row["drafted_response"],
+        ai_provider=row["ai_provider"],
+        ai_model=row["ai_model"],
+        classification_version=row["classification_version"],
         approved_response=row["approved_response"],
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
