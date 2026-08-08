@@ -210,7 +210,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         *,
         max_posts: int,
     ) -> list[FacebookPost]:
-        """Read currently visible articles from one allowlisted group."""
+        """Wait for and read visible posts from one allowlisted group."""
         page = await self._page()
         try:
             await page.goto(group.url, wait_until="domcontentloaded")
@@ -222,8 +222,6 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                     FacebookPageState.UNEXPECTED,
                     "Facebook navigated outside the configured group",
                 )
-            articles = page.get_by_role("article")
-            await articles.first.wait_for(state="visible")
         except FacebookSafetyStop:
             raise
         except PlaywrightTimeoutError:
@@ -242,24 +240,74 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 "Facebook could not be opened safely",
             )
 
-        count = min(await articles.count(), max_posts)
-        posts: list[FacebookPost] = []
-        for index in range(count):
+        return await self._wait_for_readable_posts(page, group, max_posts=max_posts)
+
+    async def _wait_for_readable_posts(
+        self,
+        page: Page,
+        group: FacebookGroup,
+        *,
+        max_posts: int,
+    ) -> list[FacebookPost]:
+        """Retry through Facebook placeholders and transient feed re-renders."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.settings.facebook_post_load_timeout_seconds
+        visible_article_seen = False
+
+        while loop.time() < deadline:
+            await self._require_normal_page(page, group_id=group.id)
             try:
-                article = articles.nth(index)
-                if not await article.is_visible():
-                    continue
-                post = await self._extract_article(article, group)
+                articles = await self._post_articles(page)
+                count = min(await articles.count(), max(max_posts * 5, 50))
             except Error:
-                await self._stop(
-                    page,
-                    group.id,
-                    FacebookPageState.UNEXPECTED,
-                    "A visible Facebook post could not be read safely",
-                )
-            if post is not None:
-                posts.append(post)
-        return posts
+                await page.wait_for_timeout(250)
+                continue
+
+            posts: list[FacebookPost] = []
+            identities: set[str] = set()
+            for index in range(count):
+                try:
+                    article = articles.nth(index)
+                    if not await article.is_visible(timeout=1000):
+                        continue
+                    visible_article_seen = True
+                    if await self._is_nested_article(article):
+                        continue
+                    post = await self._extract_article(article, group)
+                except Error:
+                    # Facebook commonly replaces placeholder nodes while the feed hydrates.
+                    continue
+                if post is not None and post.identity_key not in identities:
+                    identities.add(post.identity_key)
+                    posts.append(post)
+                    if len(posts) >= max_posts:
+                        break
+            if posts:
+                return posts
+            await page.wait_for_timeout(250)
+
+        await self._require_normal_page(page, group_id=group.id)
+        reason = (
+            "Facebook displayed post containers, but no readable post text loaded"
+            if visible_article_seen
+            else "No visible Facebook posts appeared before the safety timeout"
+        )
+        await self._stop(page, group.id, FacebookPageState.UNEXPECTED, reason)
+
+    async def _post_articles(self, page: Page) -> Locator:
+        """Prefer the visible feed so sidebar cards do not become candidate posts."""
+        feeds = page.get_by_role("feed")
+        for index in range(min(await feeds.count(), 5)):
+            feed = feeds.nth(index)
+            if await feed.is_visible(timeout=1000):
+                return feed.get_by_role("article")
+        return page.get_by_role("article")
+
+    async def _is_nested_article(self, article: Locator) -> bool:
+        """Exclude comment articles nested inside a top-level post article."""
+        return bool(
+            await article.evaluate("node => node.parentElement?.closest('[role=article]') !== null")
+        )
 
     async def _page(self) -> Page:
         if self._context is None:
@@ -273,7 +321,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         article: Locator,
         group: FacebookGroup,
     ) -> FacebookPost | None:
-        full_text = await article.inner_text()
+        full_text = await article.inner_text(timeout=1000)
         semantic_messages = await article.locator(
             '[data-ad-preview="message"], [data-ad-comet-preview="message"]'
         ).all_inner_texts()
@@ -292,11 +340,11 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         author_name: str | None = None
         for index in range(min(await links.count(), 50)):
             link = links.nth(index)
-            href = await link.get_attribute("href")
+            href = await link.get_attribute("href", timeout=1000)
             if href:
                 hrefs.append(href)
             if author_name is None:
-                candidate = normalize_post_text(await link.inner_text())
+                candidate = normalize_post_text(await link.inner_text(timeout=1000))
                 if candidate and candidate != group.name and 1 < len(candidate) <= 100:
                     author_name = candidate
 

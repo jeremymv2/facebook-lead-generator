@@ -242,6 +242,10 @@ lead-agent scan-facebook --group-id louisville-homeowners-example --max-posts 10
 The browser remains open until you return to the terminal and press Enter. The pause does not enable
 clicking, typing, commenting, or any other automated Facebook write action.
 
+The scanner waits through Facebook's initial placeholder rendering and requires at least one
+text-bearing post. If containers appear but readable post text never loads, the run stops safely and
+captures a local screenshot instead of recording a misleading successful zero-post scan.
+
 To scan every enabled group sequentially, omit `--group-id`. The current proof of concept is manual;
 it does not yet run every five minutes.
 
