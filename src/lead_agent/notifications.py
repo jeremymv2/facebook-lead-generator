@@ -24,6 +24,8 @@ from lead_agent.models import (
 
 TELNYX_MESSAGES_URL = "https://api.telnyx.com/v2/messages"
 E164_PATTERN = re.compile(r"^\+[1-9]\d{7,14}$")
+SMS_BRAND_NAME = "JJ Miller & Co LLC"
+SMS_OPT_OUT_INSTRUCTION = "Reply STOP to opt out."
 
 
 class SmsProviderError(RuntimeError):
@@ -297,10 +299,12 @@ def _approval_sms_body(review: ApprovalReview, review_url: str) -> str:
     score = review.lead.overall_score if review.lead.overall_score is not None else "new"
     service = (review.lead.service_category or "project").replace("_", " ")
     service = re.sub(r"[^A-Za-z0-9 /&-]", "", service)[:30].strip() or "project"
-    body = f"JJ Miller lead {score}: {service}. Review: {review_url}"
+    body = (
+        f"{SMS_BRAND_NAME} lead {score}: {service}. Review: {review_url} {SMS_OPT_OUT_INSTRUCTION}"
+    )
     if len(body) <= 160:
         return body
-    fallback = f"JJ Miller lead. Review: {review_url}"
+    fallback = f"{SMS_BRAND_NAME} lead. Review: {review_url} {SMS_OPT_OUT_INSTRUCTION}"
     if len(fallback) > 160:
         raise ValueError("REMOTE_APPROVAL_BASE_URL is too long for a single SMS segment")
     return fallback

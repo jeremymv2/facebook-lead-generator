@@ -90,7 +90,10 @@ def test_telnyx_adapter_isolated_behind_sms_contract() -> None:
     receipt = provider.send(
         SmsMessage(
             to="+15025550101",
-            body="JJ Miller lead. Review: https://approve.example/review/token",
+            body=(
+                "JJ Miller & Co LLC lead. Review: https://approve.example/review/token "
+                "Reply STOP to opt out."
+            ),
             idempotency_key="approval:1",
         )
     )
@@ -102,7 +105,10 @@ def test_telnyx_adapter_isolated_behind_sms_contract() -> None:
     assert transport.payload == {
         "from": "+15025550100",
         "to": "+15025550101",
-        "text": "JJ Miller lead. Review: https://approve.example/review/token",
+        "text": (
+            "JJ Miller & Co LLC lead. Review: https://approve.example/review/token "
+            "Reply STOP to opt out."
+        ),
     }
     assert transport.timeout_seconds == 12
 
@@ -134,8 +140,12 @@ def test_notification_sends_one_tokenized_single_segment_sms(tmp_path: Path) -> 
     assert len(provider.messages) == 1
     message = provider.messages[0]
     assert message.to == "+15025550101"
-    assert f"https://approve.example/review/{token}" in message.body
+    assert message.body == (
+        "JJ Miller & Co LLC lead 95: decks. Review: "
+        f"https://approve.example/review/{token} Reply STOP to opt out."
+    )
     assert len(message.body) <= 160
+    assert message.body.isascii()
     assert "Looking for someone" not in message.body
     review = database.get_approval_review_by_remote_token_hash(remote_token_hash(token))
     assert review is not None
@@ -147,6 +157,32 @@ def test_notification_sends_one_tokenized_single_segment_sms(tmp_path: Path) -> 
         "approval.requested",
         "approval.sms",
     ]
+
+
+def test_notification_uses_compliant_fallback_at_maximum_origin_length(tmp_path: Path) -> None:
+    database = Database(tmp_path / "fallback.sqlite3")
+    database.initialize()
+    create_candidate(database)
+    approvals = LocalApprovalService(database, expiration_minutes=20)
+    provider = FakeSmsProvider()
+    token = "A" * 43
+    public_base_url = f"https://{'a' * 41}.com"
+    notifier = ApprovalNotificationService(
+        database,
+        approvals,
+        provider,
+        public_base_url=public_base_url,
+        recipient_number="+15025550101",
+        token_factory=lambda: token,
+    )
+
+    summary = notifier.notify_candidates(limit=1)
+
+    assert summary.sent == 1
+    assert provider.messages[0].body == (
+        f"JJ Miller & Co LLC lead. Review: {public_base_url}/review/{token} Reply STOP to opt out."
+    )
+    assert len(provider.messages[0].body) == 160
 
 
 def test_failed_send_clears_link_and_requires_explicit_retry(tmp_path: Path) -> None:
