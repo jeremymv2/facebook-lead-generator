@@ -110,17 +110,20 @@ def test_heuristic_provider_matches_classification_fixtures() -> None:
             )
 
 
-def test_heuristic_draft_is_personalized_and_locally_validated() -> None:
+def test_heuristic_draft_is_direct_and_locally_validated() -> None:
     provider = HeuristicAIProvider()
     source = post("Looking for someone in Louisville to repair our deck this week.")
     classification = provider.classify_post(source, context())
 
     draft = provider.draft_response(source, classification, context())
 
-    assert draft.response.startswith("Hi Sarah,")
+    assert not draft.response.startswith(("Hi ", "Hello ", "Hey "))
     assert "JJ Miller & Co." in draft.response
-    assert "jjmillerco.com" in draft.response
-    assert "message" in draft.response
+    assert "https://jjmillerco.com" in draft.response
+    assert "Text me at 502-528-0858" in draft.response
+    assert "free estimate" in draft.response.casefold()
+    assert "message" not in draft.response.casefold()
+    assert len(draft.response) <= 300
 
 
 def test_heuristic_draft_does_not_use_an_unsafe_author_fragment() -> None:
@@ -133,7 +136,7 @@ def test_heuristic_draft_does_not_use_an_unsafe_author_fragment() -> None:
 
     draft = provider.draft_response(source, classification, context())
 
-    assert draft.response.startswith("Hi there,")
+    assert "Hi there" not in draft.response
     assert "<script>" not in draft.response
 
 
@@ -164,14 +167,50 @@ def test_classification_rejects_semantically_unsafe_scores(overrides: dict[str, 
 
 def test_draft_rejects_missing_identity_and_promotional_spam() -> None:
     with pytest.raises(ValidationError, match="identify"):
-        DraftResponse(response="Please send me a message and visit jjmillerco.com for information.")
+        DraftResponse(
+            response=("Free estimates. Text me at 502-528-0858 or visit https://jjmillerco.com.")
+        )
     with pytest.raises(ValidationError, match="promotional"):
         DraftResponse(
             response=(
-                "JJ Miller & Co. — WE DO EVERYTHING CALL US NOW. Visit jjmillerco.com and send "
-                "me a message."
+                "JJ Miller & Co. — WE DO EVERYTHING CALL US NOW. Free estimates. Text me at "
+                "502-528-0858 or visit https://jjmillerco.com."
             )
         )
+
+
+@pytest.mark.parametrize(
+    ("response", "error"),
+    [
+        (
+            "JJ Miller & Co. offers free estimates. Text me at 502-528-0858 or visit "
+            "jjmillerco.com.",
+            "fully qualified",
+        ),
+        (
+            "JJ Miller & Co. offers free estimates. Message me or visit "
+            "https://jjmillerco.com for details.",
+            "company phone number",
+        ),
+        (
+            "JJ Miller & Co. can help. Text me at 502-528-0858 or visit https://jjmillerco.com.",
+            "estimates are free",
+        ),
+        (
+            "Hi there, JJ Miller & Co. offers free estimates. Text me at 502-528-0858 or visit "
+            "https://jjmillerco.com.",
+            "generic greeting",
+        ),
+        (
+            "JJ Miller & Co. offers free estimates. Text me at 502-528-0858 or send me a message. "
+            "https://jjmillerco.com",
+            "Facebook messaging",
+        ),
+    ],
+)
+def test_draft_enforces_business_contact_and_voice_rules(response: str, error: str) -> None:
+    with pytest.raises(ValidationError, match=error):
+        DraftResponse(response=response)
 
 
 def test_gemini_provider_uses_structured_schemas_and_minimal_post_metadata() -> None:
@@ -181,8 +220,8 @@ def test_gemini_provider_uses_structured_schemas_and_minimal_post_metadata() -> 
             json.dumps(
                 {
                     "response": (
-                        "Hi Sarah, JJ Miller & Co. can help with your deck project. Visit "
-                        "jjmillerco.com and send me a message with a few photos."
+                        "JJ Miller & Co. can help with your deck project. Free estimates. Text me "
+                        "at 502-528-0858 or visit https://jjmillerco.com."
                     )
                 }
             ),

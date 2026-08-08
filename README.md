@@ -325,6 +325,10 @@ Only posts without an existing lead row are processed. Run the same command agai
 Ignored posts are counted but their source text is not printed. No command in this phase can approve
 or submit the draft to Facebook.
 
+Drafts are intentionally brief and direct. Every locally validated draft identifies JJ Miller &
+Co., states that estimates are free, links to `https://jjmillerco.com`, and asks the customer to text
+`502-528-0858`. Generic greetings, filler, and requests to message through Facebook are rejected.
+
 To classify one saved post during focused testing:
 
 ```bash
