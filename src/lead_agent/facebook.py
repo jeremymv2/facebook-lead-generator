@@ -25,10 +25,21 @@ from lead_agent.models import FacebookPost, canonicalize_facebook_url, normalize
 FACEBOOK_HOME = "https://www.facebook.com/"
 POST_PATH_PATTERN = re.compile(r"/(?:posts|permalink)/([^/?#]+)", re.IGNORECASE)
 SAFE_FILENAME_PATTERN = re.compile(r"[^a-zA-Z0-9_-]+")
+STORY_MESSAGE_SELECTOR = (
+    '[data-ad-rendering-role="story_message"], '
+    '[data-ad-preview="message"], '
+    '[data-ad-comet-preview="message"]'
+)
 
 
 class FacebookBrowserError(RuntimeError):
     """Raised when the dedicated Playwright browser cannot be started safely."""
+
+
+def is_facebook_comment_label(label: str | None) -> bool:
+    """Identify Facebook's semantic labels for comment and reply articles."""
+    normalized = normalize_post_text(label or "").casefold()
+    return normalized.startswith(("comment by ", "reply by "))
 
 
 def extract_post_id(url: str) -> str | None:
@@ -268,6 +279,12 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         while loop.time() < deadline:
             await self._require_normal_page(page, group_id=group.id)
             try:
+                story_posts = await self._extract_story_posts(page, group, max_posts=max_posts)
+            except Error:
+                story_posts = []
+            if story_posts:
+                return story_posts
+            try:
                 articles = await self._post_articles(page)
                 count = min(await articles.count(), max(max_posts * 5, 50))
             except Error:
@@ -282,6 +299,10 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                     if not await article.is_visible(timeout=1000):
                         continue
                     visible_article_seen = True
+                    if is_facebook_comment_label(
+                        await article.get_attribute("aria-label", timeout=1000)
+                    ):
+                        continue
                     if await self._is_nested_article(article):
                         continue
                     post = await self._extract_article(article, group)
@@ -304,6 +325,78 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
             else "No visible Facebook posts appeared before the safety timeout"
         )
         await self._stop(page, group.id, FacebookPageState.UNEXPECTED, reason)
+
+    async def _extract_story_posts(
+        self,
+        page: Page,
+        group: FacebookGroup,
+        *,
+        max_posts: int,
+    ) -> list[FacebookPost]:
+        """Extract current Facebook story-message nodes and their nearest post permalinks."""
+        messages = page.locator(STORY_MESSAGE_SELECTOR)
+        count = min(await messages.count(), max(max_posts * 3, 20))
+        posts: list[FacebookPost] = []
+        identities: set[str] = set()
+        expected_group_key = facebook_group_key(group.url)
+
+        for index in range(count):
+            message = messages.nth(index)
+            if not await message.is_visible(timeout=1000):
+                continue
+            comment_label = cast(
+                str | None,
+                await message.evaluate(
+                    "node => node.closest('article, [role=article]')?.getAttribute('aria-label')"
+                ),
+            )
+            if is_facebook_comment_label(comment_label):
+                continue
+            post_text = normalize_post_text(await message.inner_text(timeout=1000))
+            if len(post_text) < self.settings.min_post_text_length:
+                continue
+            hrefs = await self._nearest_post_hrefs(message)
+            post_url = select_facebook_permalink(hrefs, group.url)
+            if post_url is None or facebook_group_key(post_url) != expected_group_key:
+                continue
+            post = FacebookPost(
+                external_post_id=extract_post_id(post_url),
+                post_url=post_url,
+                group_id=group.id,
+                group_name=group.name,
+                post_text=post_text,
+            )
+            if post.identity_key in identities:
+                continue
+            identities.add(post.identity_key)
+            posts.append(post)
+            if len(posts) >= max_posts:
+                break
+        return posts
+
+    async def _nearest_post_hrefs(self, message: Locator) -> list[str]:
+        """Find permalink candidates on the smallest ancestor that owns the story message."""
+        values = await message.evaluate(
+            r"""
+            node => {
+                let owner = node;
+                let depth = 0;
+                while (owner && depth < 24) {
+                    const hrefs = Array.from(owner.querySelectorAll('a[href]'))
+                        .map(link => link.href)
+                        .filter(href => (
+                            /\/groups\/[^/]+\/(posts|permalink)\//i.test(href)
+                            || /[?&](story_fbid|multi_permalinks)=/i.test(href)
+                        ));
+                    if (hrefs.length) return hrefs;
+                    owner = owner.parentElement;
+                    depth += 1;
+                }
+                return [];
+            }
+            """
+        )
+        return cast(list[str], values)
 
     async def _post_articles(self, page: Page) -> Locator:
         """Prefer the visible feed so sidebar cards do not become candidate posts."""
@@ -359,12 +452,12 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         article: Locator,
         group: FacebookGroup,
     ) -> FacebookPost | None:
+        if is_facebook_comment_label(await article.get_attribute("aria-label", timeout=1000)):
+            return None
         full_text = await self._article_text_without_comments(article)
         semantic_messages = await self._owned_article_texts(
             article,
-            '[data-ad-rendering-role="story_message"], '
-            '[data-ad-preview="message"], '
-            '[data-ad-comet-preview="message"]',
+            STORY_MESSAGE_SELECTOR,
         )
         automatic_texts = await self._owned_article_texts(article, '[dir="auto"]')
         post_text = select_message_text(

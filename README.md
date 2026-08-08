@@ -246,7 +246,10 @@ The scanner waits through Facebook's initial placeholder rendering and requires 
 text-bearing post. If containers appear but readable post text never loads, the run stops safely and
 captures a local screenshot instead of recording a misleading successful zero-post scan.
 Top-level post text is isolated from nested comment articles so a long reply is never paired with
-the parent post's permalink.
+the parent post's permalink. Facebook comment and reply articles are also rejected by their
+semantic `aria-label`, including when Facebook exposes them outside the parent article subtree.
+Current Facebook group feeds are read from semantic `story_message` nodes and paired with the
+nearest owning group-post permalink; role-based article extraction remains a guarded fallback.
 
 To scan every enabled group sequentially, omit `--group-id`. The current proof of concept is manual;
 it does not yet run every five minutes.

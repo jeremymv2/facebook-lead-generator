@@ -8,6 +8,7 @@ from lead_agent.facebook import (
     cleanup_old_screenshots,
     extract_post_id,
     facebook_group_key,
+    is_facebook_comment_label,
     select_facebook_permalink,
     select_message_text,
 )
@@ -34,6 +35,19 @@ def test_group_key_is_scoped_to_the_group_path() -> None:
     assert facebook_group_key("https://www.facebook.com/login") is None
 
 
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [
+        ("Comment by Billy Herdt a day ago", True),
+        ("Reply by Example Person 2 hours ago", True),
+        ("Post by Example Person", False),
+        (None, False),
+    ],
+)
+def test_comment_article_labels_are_rejected(label: str | None, expected: bool) -> None:
+    assert is_facebook_comment_label(label) is expected
+
+
 def test_permalink_selection_ignores_external_and_tracking_urls() -> None:
     selected = select_facebook_permalink(
         [
@@ -52,6 +66,15 @@ def test_permalink_selection_prefers_post_path_over_photo_identifier() -> None:
             "/photo/?fbid=999",
             "/groups/111/posts/222/?ref=share",
         ],
+        "https://www.facebook.com/groups/111",
+    )
+
+    assert selected == "https://www.facebook.com/groups/111/posts/222"
+
+
+def test_permalink_selection_removes_comment_identity_from_parent_post_url() -> None:
+    selected = select_facebook_permalink(
+        ["/groups/111/posts/222/?comment_id=333&ref=share"],
         "https://www.facebook.com/groups/111",
     )
 
