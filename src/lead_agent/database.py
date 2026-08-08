@@ -10,9 +10,17 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from lead_agent.models import AuditEvent, FacebookPost, Lead, LeadStatus, PostStatus, utc_now
+from lead_agent.models import (
+    AuditEvent,
+    FacebookPost,
+    GroupScanState,
+    Lead,
+    LeadStatus,
+    PostStatus,
+    utc_now,
+)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +54,7 @@ class Database:
 
     def initialize(self) -> None:
         """Create runtime directories and apply the initial idempotent schema."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with self.connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(
@@ -125,6 +133,18 @@ class Database:
                     ON audit_events(occurred_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_audit_events_lead
                     ON audit_events(lead_id, occurred_at DESC);
+
+                CREATE TABLE IF NOT EXISTS group_scan_state (
+                    group_id TEXT PRIMARY KEY,
+                    group_name TEXT NOT NULL,
+                    group_url TEXT NOT NULL,
+                    last_attempt_at TEXT NOT NULL,
+                    last_success_at TEXT,
+                    last_known_post_identity TEXT,
+                    last_error TEXT,
+                    posts_seen INTEGER NOT NULL DEFAULT 0 CHECK(posts_seen >= 0),
+                    posts_new INTEGER NOT NULL DEFAULT 0 CHECK(posts_new >= 0)
+                );
                 """
             )
             connection.execute(
@@ -134,6 +154,7 @@ class Database:
                 """,
                 (str(SCHEMA_VERSION),),
             )
+        self.path.chmod(0o600)
 
     def save_post(self, post: FacebookPost) -> SaveResult:
         """Insert a post once, returning the existing row on duplicate discovery."""
@@ -208,6 +229,94 @@ class Database:
             if row is None:  # pragma: no cover - protected by rowcount check and transaction
                 raise RuntimeError("Failed to retrieve updated post")
             return _post_from_row(row)
+
+    def record_group_scan_success(
+        self,
+        *,
+        group_id: str,
+        group_name: str,
+        group_url: str,
+        posts_seen: int,
+        posts_new: int,
+        last_known_post_identity: str | None,
+        occurred_at: datetime | None = None,
+    ) -> GroupScanState:
+        """Record a successful group scan while preserving a durable last-known post."""
+        timestamp = occurred_at or utc_now()
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO group_scan_state (
+                    group_id, group_name, group_url, last_attempt_at, last_success_at,
+                    last_known_post_identity, last_error, posts_seen, posts_new
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                ON CONFLICT(group_id) DO UPDATE SET
+                    group_name = excluded.group_name,
+                    group_url = excluded.group_url,
+                    last_attempt_at = excluded.last_attempt_at,
+                    last_success_at = excluded.last_success_at,
+                    last_known_post_identity = COALESCE(
+                        excluded.last_known_post_identity,
+                        group_scan_state.last_known_post_identity
+                    ),
+                    last_error = NULL,
+                    posts_seen = excluded.posts_seen,
+                    posts_new = excluded.posts_new
+                """,
+                (
+                    group_id,
+                    group_name,
+                    group_url,
+                    _serialize_datetime(timestamp),
+                    _serialize_datetime(timestamp),
+                    last_known_post_identity,
+                    posts_seen,
+                    posts_new,
+                ),
+            )
+        state = self.get_group_scan_state(group_id)
+        if state is None:  # pragma: no cover - protected by the upsert
+            raise RuntimeError("Failed to retrieve successful group scan state")
+        return state
+
+    def record_group_scan_failure(
+        self,
+        *,
+        group_id: str,
+        group_name: str,
+        group_url: str,
+        error: str,
+        occurred_at: datetime | None = None,
+    ) -> GroupScanState:
+        """Record a failed scan without erasing the last successful scan metadata."""
+        timestamp = occurred_at or utc_now()
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO group_scan_state (
+                    group_id, group_name, group_url, last_attempt_at, last_error
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(group_id) DO UPDATE SET
+                    group_name = excluded.group_name,
+                    group_url = excluded.group_url,
+                    last_attempt_at = excluded.last_attempt_at,
+                    last_error = excluded.last_error,
+                    posts_seen = 0,
+                    posts_new = 0
+                """,
+                (group_id, group_name, group_url, _serialize_datetime(timestamp), error),
+            )
+        state = self.get_group_scan_state(group_id)
+        if state is None:  # pragma: no cover - protected by the upsert
+            raise RuntimeError("Failed to retrieve failed group scan state")
+        return state
+
+    def get_group_scan_state(self, group_id: str) -> GroupScanState | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM group_scan_state WHERE group_id = ?", (group_id,)
+            ).fetchone()
+        return _group_scan_state_from_row(row) if row is not None else None
 
     def create_lead(self, lead: Lead) -> Lead:
         """Create at most one lead per Facebook post."""
@@ -403,4 +512,18 @@ def _audit_event_from_row(row: sqlite3.Row) -> AuditEvent:
         post_id=row["post_id"],
         group_id=row["group_id"],
         details=details,
+    )
+
+
+def _group_scan_state_from_row(row: sqlite3.Row) -> GroupScanState:
+    return GroupScanState(
+        group_id=row["group_id"],
+        group_name=row["group_name"],
+        group_url=row["group_url"],
+        last_attempt_at=datetime.fromisoformat(row["last_attempt_at"]),
+        last_success_at=_parse_datetime(row["last_success_at"]),
+        last_known_post_identity=row["last_known_post_identity"],
+        last_error=row["last_error"],
+        posts_seen=row["posts_seen"],
+        posts_new=row["posts_new"],
     )

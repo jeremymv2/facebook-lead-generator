@@ -1,5 +1,5 @@
-# Copy this file to config/groups.yaml, which is intentionally ignored if it contains
-# private group details. The read-only scanner will consume this in a later milestone.
+# Copy this file to config/groups.yaml, which is intentionally ignored because it can contain
+# private group details. Replace the example URL, then explicitly enable only approved groups.
 groups:
   - id: louisville-homeowners-example
     name: Louisville Homeowners (example only)

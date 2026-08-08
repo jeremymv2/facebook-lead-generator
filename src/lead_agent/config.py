@@ -36,6 +36,10 @@ class PostingDisabledError(RuntimeError):
     """Raised when code requests posting while a safety control is active."""
 
 
+class UnsafeReadOnlyModeError(RuntimeError):
+    """Raised when a read-only command is run with unsafe feature flags."""
+
+
 class Settings(BaseSettings):
     """Validated settings loaded from environment variables or ``.env``."""
 
@@ -67,6 +71,12 @@ class Settings(BaseSettings):
     screenshot_dir: Path = Path("screenshots")
     groups_config_path: Path = Path("config/groups.yaml")
     facebook_profile_path: Path = Path("~/.jjmiller-lead-agent/facebook-profile")
+    browser_channel: str | None = None
+    browser_headless: bool = False
+    facebook_navigation_timeout_seconds: int = Field(default=30, ge=10, le=120)
+    facebook_post_load_timeout_seconds: int = Field(default=15, ge=5, le=60)
+    max_posts_per_group: int = Field(default=20, ge=1, le=50)
+    min_post_text_length: int = Field(default=15, ge=1, le=500)
 
     ai_provider: str = "disabled"
     ai_model: str = ""
@@ -103,6 +113,21 @@ class Settings(BaseSettings):
             raise ValueError("FACEBOOK_PROFILE_PATH must be outside the repository")
         return resolved
 
+    @field_validator("browser_channel", mode="before")
+    @classmethod
+    def normalize_browser_channel(cls, value: object) -> object:
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
+
+    @field_validator("approval_api_url", mode="before")
+    @classmethod
+    def normalize_optional_url(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @field_validator("log_level")
     @classmethod
     def normalize_log_level(cls, value: str) -> str:
@@ -122,6 +147,15 @@ class Settings(BaseSettings):
             raise PostingDisabledError("Posting is disabled by POSTING_ENABLED=false")
         if self.dry_run:
             raise PostingDisabledError("Posting is disabled while DRY_RUN=true")
+
+    def require_read_only_mode(self) -> None:
+        """Require both safe defaults before browser-based discovery can run."""
+        if self.posting_enabled:
+            raise UnsafeReadOnlyModeError(
+                "Read-only Facebook commands require POSTING_ENABLED=false"
+            )
+        if not self.dry_run:
+            raise UnsafeReadOnlyModeError("Read-only Facebook commands require DRY_RUN=true")
 
 
 def load_settings() -> Settings:

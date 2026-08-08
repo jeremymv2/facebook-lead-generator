@@ -153,3 +153,16 @@ class AuditEvent:
     details: dict[str, object] = field(default_factory=dict)
     occurred_at: datetime = field(default_factory=utc_now)
     id: int | None = None
+
+
+@dataclass(slots=True)
+class GroupScanState:
+    group_id: str
+    group_name: str
+    group_url: str
+    last_attempt_at: datetime
+    last_success_at: datetime | None = None
+    last_known_post_identity: str | None = None
+    last_error: str | None = None
+    posts_seen: int = 0
+    posts_new: int = 0

@@ -11,8 +11,10 @@ requires-python = ">=3.12"
 license = { text = "Proprietary" }
 authors = [{ name = "JJ Miller & Co. LLC" }]
 dependencies = [
+  "playwright>=1.61,<2",
   "pydantic>=2.10,<3",
   "pydantic-settings>=2.7,<3",
+  "pyyaml>=6,<7",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +24,7 @@ dev = [
   "pytest>=8.3,<9",
   "pytest-cov>=6,<7",
   "ruff>=0.9,<1",
+  "types-pyyaml>=6,<7",
 ]
 
 [project.scripts]
