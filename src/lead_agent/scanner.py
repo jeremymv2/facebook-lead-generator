@@ -63,8 +63,10 @@ class ReadOnlyScanService:
             raise
 
         new_posts: list[FacebookPost] = []
+        persisted_posts: list[FacebookPost] = []
         for post in discovered:
             result = self.database.save_post(post)
+            persisted_posts.append(result.post)
             if result.created:
                 new_posts.append(result.post)
                 self.database.record_audit_event(
@@ -78,7 +80,7 @@ class ReadOnlyScanService:
                     )
                 )
 
-        last_identity = discovered[0].identity_key if discovered else None
+        last_identity = persisted_posts[0].identity_key if persisted_posts else None
         self.database.record_group_scan_success(
             group_id=group.id,
             group_name=group.name,

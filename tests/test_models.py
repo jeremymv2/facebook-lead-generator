@@ -47,6 +47,24 @@ def test_content_identity_is_stable_when_facebook_url_is_unavailable() -> None:
     assert first.identity_key == second.identity_key
 
 
+def test_post_exposes_stable_and_content_identity_aliases() -> None:
+    post = FacebookPost(
+        external_post_id="456",
+        post_url="https://www.facebook.com/groups/123/posts/456/?ref=share",
+        group_id="GROUP-ONE",
+        group_name="Group One",
+        author_name="Sarah Smith",
+        post_text="Need drywall repair in Louisville.",
+    )
+
+    assert post.identity_aliases() == (
+        "facebook-id:456",
+        "facebook-url:https://www.facebook.com/groups/123/posts/456",
+        f"content:group-one:sarah smith:{post.text_hash}",
+        f"content-text:group-one:{post.text_hash}",
+    )
+
+
 def test_empty_post_text_is_rejected() -> None:
     with pytest.raises(ValueError, match="post_text"):
         FacebookPost(group_id="group", group_name="Group", post_text=" \n ")

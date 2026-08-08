@@ -5,10 +5,11 @@ explicitly approved set of Louisville-area Facebook groups. The intended product
 
 > Detect → classify → score → draft → notify → human approve/edit/reject → validate → post once
 
-This repository is currently at **Phase 2: read-only Facebook proof of concept**. It includes safe
+This repository is currently at **Phase 3: read-only scanner hardening**. It includes safe
 configuration, a dedicated persistent Playwright profile, explicit group allowlisting, visible-post
-extraction, SQLite persistence and duplicate prevention, structured logging, tests, and CI. It does
-**not** include AI calls, remote approvals, notifications, scheduling, or Facebook comment posting.
+extraction, alias-based SQLite duplicate prevention, durable per-group scan health, synthetic
+selector fixtures, structured logging, tests, and CI. It does **not** include AI calls, remote
+approvals, notifications, scheduling, or Facebook comment posting.
 
 ## Safety status
 
@@ -253,7 +254,10 @@ semantic `aria-label`, including when Facebook exposes them outside the parent a
 Current Facebook group feeds are read from semantic `story_message` nodes and paired with the
 nearest owning group-post permalink; role-based article extraction remains a guarded fallback.
 When Facebook exposes no post permalink, the scanner leaves the URL empty and uses the normalized
-top-level text hash for deduplication; it never substitutes a comment, photo, or unrelated URL.
+top-level text hash for deduplication; it never substitutes a comment, photo, or unrelated URL. If
+Facebook exposes the permalink or post ID on a later scan, the database attaches those identifiers
+to the original content discovery instead of inserting another row. Distinct Facebook post IDs are
+never merged solely because their text matches.
 `--max-posts` is a target and hard cap: the scanner accumulates unique posts across bounded
 sub-viewport scrolls until it reaches the target, its scroll limit, or its load timeout. It rechecks
 login, CAPTCHA, checkpoint, redirect, and page state after every scroll.
@@ -265,6 +269,22 @@ If the scan stops safely, do not automate around the challenge. Review the termi
 single PNG in `screenshots/` if one was captured, then resolve login, MFA, CAPTCHA, or checkpoint
 manually. Screenshots are local, ignored by Git, and cleaned up according to
 `SCREENSHOT_RETENTION_DAYS`.
+
+Inspect persisted group health without opening Facebook or printing post text:
+
+```bash
+lead-agent scan-status
+lead-agent scan-status --group-id louisville-homeowners-example
+```
+
+The JSON output reports the last attempt and success, latest safe error type, post counts, and
+consecutive failure count. A successful recovery resets the failure streak while retaining the
+historical last-failure timestamp. `lead-agent init-db`, scanning, and `scan-status` all apply the
+idempotent schema upgrade from earlier databases automatically.
+
+Synthetic candidate fixtures under `tests/fixtures/` cover each supported semantic message selector,
+comment and nested-reply rejection, cross-group permalink rejection, short placeholders, and
+no-permalink rendering. They contain no captured Facebook content or account data.
 
 ## Runtime and troubleshooting
 
@@ -278,9 +298,10 @@ is idempotent.
 ## Roadmap
 
 1. **Repository bootstrap:** config, models, SQLite, logging, tests, CI.
-2. **Read-only Playwright proof of concept (this milestone):** manually log in, scan configured
+2. **Read-only Playwright proof of concept:** manually log in, scan configured
    groups, extract visible posts and URLs, save only new posts, and never comment.
-3. Selector fixture expansion, deduplication edge cases, and group scan state hardening.
+3. **Selector fixtures and scanner hardening (this milestone):** regression-test sanitized DOM
+   candidates, deduplicate changing Facebook identities, and persist recoverable group health.
 4. Swappable AI classification/scoring and drafting providers.
 5. Local then remote human approval with expiring one-time tokens.
 6. Idempotent approved posting with final validation, limits, screenshots, and stop-on-uncertainty.

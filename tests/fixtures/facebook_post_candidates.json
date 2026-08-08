@@ -1,0 +1,117 @@
+[
+  {
+    "name": "current_story_message_with_permalink",
+    "selector": "[data-ad-rendering-role=\"story_message\"]",
+    "candidate": {
+      "full_text": "Synthetic author Need a deck contractor in Louisville. Like Comment Share",
+      "semantic_messages": ["Need a deck contractor in Louisville this month."],
+      "automatic_texts": ["Synthetic author", "Need a deck contractor in Louisville."],
+      "hrefs": [
+        "/groups/111/posts/222/?comment_id=999&ref=share",
+        "https://example.test/not-facebook"
+      ],
+      "article_label": "Post by Synthetic Person",
+      "author_name": "Synthetic Person",
+      "is_nested_article": false
+    },
+    "expected": {
+      "accepted": true,
+      "text": "Need a deck contractor in Louisville this month.",
+      "post_url": "https://www.facebook.com/groups/111/posts/222",
+      "external_post_id": "222"
+    }
+  },
+  {
+    "name": "preview_message_variant_without_permalink",
+    "selector": "[data-ad-preview=\"message\"]",
+    "candidate": {
+      "full_text": "Looking for drywall repair near Louisville next week.",
+      "semantic_messages": ["Looking for drywall repair near Louisville next week."],
+      "automatic_texts": [],
+      "hrefs": [],
+      "article_label": "Post by Fixture Account",
+      "is_nested_article": false
+    },
+    "expected": {
+      "accepted": true,
+      "text": "Looking for drywall repair near Louisville next week.",
+      "post_url": null,
+      "external_post_id": null
+    }
+  },
+  {
+    "name": "comet_preview_variant_uses_automatic_fallback",
+    "selector": "[data-ad-comet-preview=\"message\"]",
+    "candidate": {
+      "full_text": "Fixture Account Looking for a painter for two rooms. Like Comment",
+      "semantic_messages": [],
+      "automatic_texts": ["Fixture Account", "Looking for a painter for two rooms."],
+      "hrefs": ["/groups/111/permalink/333/?tracking=ignored"],
+      "article_label": "Post by Fixture Account",
+      "author_name": "Fixture Account",
+      "is_nested_article": false
+    },
+    "expected": {
+      "accepted": true,
+      "text": "Looking for a painter for two rooms.",
+      "post_url": "https://www.facebook.com/groups/111/permalink/333",
+      "external_post_id": "333"
+    }
+  },
+  {
+    "name": "comment_article_is_rejected",
+    "selector": "[data-ad-rendering-role=\"story_message\"]",
+    "candidate": {
+      "full_text": "This is a long synthetic comment and must never become a post.",
+      "semantic_messages": ["This is a long synthetic comment and must never become a post."],
+      "automatic_texts": [],
+      "hrefs": ["/groups/111/posts/222/?comment_id=444"],
+      "article_label": "Comment by Fixture Commenter 2 hours ago",
+      "is_nested_article": true
+    },
+    "expected": {"accepted": false}
+  },
+  {
+    "name": "nested_reply_is_rejected_even_without_label",
+    "selector": null,
+    "candidate": {
+      "full_text": "This nested reply is deliberately long enough to pass the text threshold.",
+      "semantic_messages": [],
+      "automatic_texts": [
+        "This nested reply is deliberately long enough to pass the text threshold."
+      ],
+      "hrefs": [],
+      "article_label": null,
+      "is_nested_article": true
+    },
+    "expected": {"accepted": false}
+  },
+  {
+    "name": "cross_group_permalink_is_rejected",
+    "selector": "[data-ad-rendering-role=\"story_message\"]",
+    "candidate": {
+      "full_text": "This otherwise valid synthetic post points at a different group.",
+      "semantic_messages": [
+        "This otherwise valid synthetic post points at a different group."
+      ],
+      "automatic_texts": [],
+      "hrefs": ["/groups/999/posts/555"],
+      "article_label": "Post by Fixture Account",
+      "is_nested_article": false
+    },
+    "expected": {"accepted": false}
+  },
+  {
+    "name": "short_placeholder_is_rejected",
+    "selector": "[data-ad-preview=\"message\"]",
+    "candidate": {
+      "full_text": "Loading",
+      "semantic_messages": ["Loading"],
+      "automatic_texts": [],
+      "hrefs": [],
+      "article_label": null,
+      "is_nested_article": false
+    },
+    "expected": {"accepted": false}
+  }
+]

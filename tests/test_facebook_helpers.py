@@ -1,10 +1,15 @@
+import json
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from lead_agent.facebook import (
+    STORY_MESSAGE_SELECTOR,
+    FacebookPostCandidate,
+    build_facebook_post,
     cleanup_old_screenshots,
     extract_post_id,
     facebook_group_key,
@@ -12,6 +17,9 @@ from lead_agent.facebook import (
     select_facebook_permalink,
     select_message_text,
 )
+from lead_agent.groups import FacebookGroup
+
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "facebook_post_candidates.json"
 
 
 @pytest.mark.parametrize(
@@ -127,6 +135,41 @@ def test_message_selection_chooses_the_most_complete_owned_post_text() -> None:
     )
 
     assert selected == "The complete top-level post text that should be retained by the extractor."
+
+
+def test_sanitized_candidate_fixtures_cover_supported_selector_shapes() -> None:
+    fixtures = cast(list[dict[str, object]], json.loads(FIXTURE_PATH.read_text(encoding="utf-8")))
+    group = FacebookGroup(
+        id="fixture-group",
+        name="Synthetic Fixture Group",
+        url="https://www.facebook.com/groups/111",
+        enabled=True,
+    )
+
+    for fixture in fixtures:
+        selector = cast(str | None, fixture["selector"])
+        if selector is not None:
+            assert selector in STORY_MESSAGE_SELECTOR, cast(str, fixture["name"])
+        raw = cast(dict[str, object], fixture["candidate"])
+        candidate = FacebookPostCandidate(
+            full_text=cast(str, raw["full_text"]),
+            semantic_messages=tuple(cast(list[str], raw["semantic_messages"])),
+            automatic_texts=tuple(cast(list[str], raw["automatic_texts"])),
+            hrefs=tuple(cast(list[str], raw["hrefs"])),
+            article_label=cast(str | None, raw["article_label"]),
+            author_name=cast(str | None, raw.get("author_name")),
+            is_nested_article=cast(bool, raw["is_nested_article"]),
+        )
+        expected = cast(dict[str, object], fixture["expected"])
+        post = build_facebook_post(candidate, group, min_length=15)
+
+        if not cast(bool, expected["accepted"]):
+            assert post is None, cast(str, fixture["name"])
+            continue
+        assert post is not None, cast(str, fixture["name"])
+        assert post.post_text == expected["text"]
+        assert post.post_url == expected["post_url"]
+        assert post.external_post_id == expected["external_post_id"]
 
 
 def test_screenshot_cleanup_deletes_only_expired_png_files(tmp_path: Path) -> None:
