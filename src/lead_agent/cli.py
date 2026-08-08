@@ -8,6 +8,7 @@ import json
 import logging
 import sys
 from collections.abc import Sequence
+from contextlib import suppress
 
 from lead_agent.config import Settings, UnsafeReadOnlyModeError, load_settings
 from lead_agent.database import Database
@@ -39,6 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-posts",
         type=_positive_int,
         help="Maximum visible posts per group (defaults to MAX_POSTS_PER_GROUP)",
+    )
+    scan_parser.add_argument(
+        "--pause-after-scan",
+        action="store_true",
+        help="Keep the browser open for inspection until Enter is pressed",
     )
     return parser
 
@@ -78,15 +84,22 @@ async def _scan_groups(
     groups: Sequence[FacebookGroup],
     *,
     max_posts: int,
+    pause_after_scan: bool,
 ) -> list[ScanSummary]:
     settings.require_read_only_mode()
     database = Database(settings.database_path)
     database.initialize()
     summaries: list[ScanSummary] = []
     async with FacebookReadOnlyBrowser(settings) as browser:
-        scanner = ReadOnlyScanService(database, browser)
-        for group in groups:
-            summaries.append(await scanner.scan_group(group, max_posts=max_posts))
+        try:
+            scanner = ReadOnlyScanService(database, browser)
+            for group in groups:
+                summaries.append(await scanner.scan_group(group, max_posts=max_posts))
+        finally:
+            if pause_after_scan:
+                print("Browser paused for inspection. No Facebook actions will be taken.")
+                with suppress(EOFError):
+                    await asyncio.to_thread(input, "Press Enter to close the browser... ")
     return summaries
 
 
@@ -143,7 +156,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_posts = args.max_posts or settings.max_posts_per_group
             if max_posts > 50:
                 raise GroupsConfigError("--max-posts cannot exceed the read-only safety cap of 50")
-            summaries = asyncio.run(_scan_groups(settings, groups, max_posts=max_posts))
+            summaries = asyncio.run(
+                _scan_groups(
+                    settings,
+                    groups,
+                    max_posts=max_posts,
+                    pause_after_scan=args.pause_after_scan,
+                )
+            )
         except (
             FacebookBrowserError,
             FacebookSafetyStop,

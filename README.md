@@ -233,6 +233,15 @@ Keep your normal browser out of this workflow. Playwright uses the separate dire
 5. Run the same command again. A successful deduplication check reports `new=0` for unchanged posts
    and does not add duplicate rows.
 
+If the browser closes before you can inspect what Facebook rendered, pause it explicitly:
+
+```bash
+lead-agent scan-facebook --group-id louisville-homeowners-example --max-posts 10 --pause-after-scan
+```
+
+The browser remains open until you return to the terminal and press Enter. The pause does not enable
+clicking, typing, commenting, or any other automated Facebook write action.
+
 To scan every enabled group sequentially, omit `--group-id`. The current proof of concept is manual;
 it does not yet run every five minutes.
 

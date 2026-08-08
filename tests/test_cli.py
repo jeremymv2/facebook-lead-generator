@@ -45,6 +45,14 @@ def test_scan_parser_rejects_non_positive_max_posts() -> None:
         parser.parse_args(["scan-facebook", "--max-posts", "0"])
 
 
+def test_scan_parser_accepts_pause_for_visual_inspection() -> None:
+    args = build_parser().parse_args(
+        ["scan-facebook", "--group-id", "approved-group", "--pause-after-scan"]
+    )
+
+    assert args.pause_after_scan is True
+
+
 def test_scan_command_fails_closed_when_no_group_is_enabled(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
