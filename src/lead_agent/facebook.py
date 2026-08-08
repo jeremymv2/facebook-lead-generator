@@ -7,7 +7,7 @@ import re
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, cast
 from urllib.parse import parse_qs, urljoin, urlsplit
 
 from playwright.async_api import BrowserContext, Error, Locator, Page, Playwright, async_playwright
@@ -85,13 +85,24 @@ def select_message_text(
     """Prefer Facebook's semantic message nodes, with conservative visible fallbacks."""
 
     def candidates(values: Sequence[str]) -> list[str]:
-        normalized = {normalize_post_text(value) for value in values}
-        return [value for value in normalized if len(value) >= min_length]
+        valid: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            normalized = normalize_post_text(value)
+            if len(normalized) >= min_length and normalized not in seen:
+                seen.add(normalized)
+                valid.append(normalized)
+        return valid
 
-    for source in (semantic_messages, automatic_texts, [full_text]):
-        valid = candidates(source)
-        if valid:
-            return max(valid, key=len)
+    semantic = candidates(semantic_messages)
+    if semantic:
+        return max(semantic, key=len)
+    automatic = candidates(automatic_texts)
+    if automatic:
+        return max(automatic, key=len)
+    fallback = candidates([full_text])
+    if fallback:
+        return fallback[0]
     return None
 
 
@@ -306,8 +317,35 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
     async def _is_nested_article(self, article: Locator) -> bool:
         """Exclude comment articles nested inside a top-level post article."""
         return bool(
-            await article.evaluate("node => node.parentElement?.closest('[role=article]') !== null")
+            await article.evaluate(
+                "node => Boolean(node.parentElement?.closest('article, [role=article]'))"
+            )
         )
+
+    async def _owned_article_texts(self, article: Locator, selector: str) -> list[str]:
+        """Read matching text owned by this post while excluding nested comment articles."""
+        values = await article.evaluate(
+            """
+            (root, selector) => Array.from(root.querySelectorAll(selector))
+                .filter(node => node.closest('article, [role=article]') === root)
+                .map(node => node.innerText || '')
+            """,
+            selector,
+        )
+        return cast(list[str], values)
+
+    async def _article_text_without_comments(self, article: Locator) -> str:
+        """Build a final text fallback after removing nested comment articles."""
+        value = await article.evaluate(
+            """
+            root => {
+                const clone = root.cloneNode(true);
+                clone.querySelectorAll('article, [role=article]').forEach(node => node.remove());
+                return clone.textContent || '';
+            }
+            """
+        )
+        return cast(str, value)
 
     async def _page(self) -> Page:
         if self._context is None:
@@ -321,11 +359,14 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         article: Locator,
         group: FacebookGroup,
     ) -> FacebookPost | None:
-        full_text = await article.inner_text(timeout=1000)
-        semantic_messages = await article.locator(
-            '[data-ad-preview="message"], [data-ad-comet-preview="message"]'
-        ).all_inner_texts()
-        automatic_texts = await article.locator('[dir="auto"]').all_inner_texts()
+        full_text = await self._article_text_without_comments(article)
+        semantic_messages = await self._owned_article_texts(
+            article,
+            '[data-ad-rendering-role="story_message"], '
+            '[data-ad-preview="message"], '
+            '[data-ad-comet-preview="message"]',
+        )
+        automatic_texts = await self._owned_article_texts(article, '[dir="auto"]')
         post_text = select_message_text(
             full_text,
             semantic_messages,

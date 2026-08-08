@@ -245,6 +245,8 @@ clicking, typing, commenting, or any other automated Facebook write action.
 The scanner waits through Facebook's initial placeholder rendering and requires at least one
 text-bearing post. If containers appear but readable post text never loads, the run stops safely and
 captures a local screenshot instead of recording a misleading successful zero-post scan.
+Top-level post text is isolated from nested comment articles so a long reply is never paired with
+the parent post's permalink.
 
 To scan every enabled group sequentially, omit `--group-id`. The current proof of concept is manual;
 it does not yet run every five minutes.

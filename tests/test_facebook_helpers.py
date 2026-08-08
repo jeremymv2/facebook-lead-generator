@@ -92,6 +92,20 @@ def test_message_selection_falls_back_and_rejects_short_text() -> None:
     assert select_message_text("Like", [], [], min_length=15) is None
 
 
+def test_message_selection_chooses_the_most_complete_owned_post_text() -> None:
+    selected = select_message_text(
+        "Top-level article text with comments removed.",
+        [],
+        [
+            "Short top-level post preview.",
+            "The complete top-level post text that should be retained by the extractor.",
+        ],
+        min_length=15,
+    )
+
+    assert selected == "The complete top-level post text that should be retained by the extractor."
+
+
 def test_screenshot_cleanup_deletes_only_expired_png_files(tmp_path: Path) -> None:
     now = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
     expired = tmp_path / "expired.png"
