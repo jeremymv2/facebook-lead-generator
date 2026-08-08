@@ -83,6 +83,44 @@ def test_service_persists_candidate_and_ignored_results_with_audit_history(
     assert actions.count("response.drafted") == 1
 
 
+@pytest.mark.parametrize(
+    ("external_id", "text", "expected_service", "expected_intent"),
+    [
+        (
+            "structural-crawl-space",
+            "Need estimates for structural repairs in crawl space",
+            "structural_repairs",
+            LeadIntent.HIRING,
+        ),
+        (
+            "investor-paint-flooring",
+            "INVESTORS: Who are you using for interior paint jobs and flooring installation?",
+            "flooring",
+            LeadIntent.RECOMMENDATION,
+        ),
+    ],
+)
+def test_realistic_service_requests_become_candidates(
+    database: Database,
+    external_id: str,
+    text: str,
+    expected_service: str,
+    expected_intent: LeadIntent,
+) -> None:
+    source = save_post(database, external_id, text)
+    service = LeadClassificationService(database, HeuristicAIProvider(), context())
+
+    summary = service.classify_posts(limit=1)
+
+    lead = database.get_lead_for_post(source.id or 0)
+    assert len(summary.candidates) == 1
+    assert lead is not None
+    assert lead.status is LeadStatus.CANDIDATE
+    assert lead.service_category == expected_service
+    assert lead.intent is expected_intent
+    assert lead.drafted_response is not None
+
+
 def test_classification_is_idempotent_and_does_not_redraft(database: Database) -> None:
     save_post(
         database,

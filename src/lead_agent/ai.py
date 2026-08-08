@@ -321,7 +321,14 @@ _SERVICE_TERMS: dict[str, tuple[str, ...]] = {
     "porches": ("porch",),
     "patios": ("patio",),
     "framing": ("framing", "frame a wall"),
-    "structural_repairs": ("structural repair", "load bearing", "foundation repair"),
+    "structural_repairs": (
+        "structural repair",
+        "structural repairs",
+        "crawl space repair",
+        "crawlspace repair",
+        "load bearing",
+        "foundation repair",
+    ),
     "general_home_repairs": ("home repair", "house repair", "repairs around the house"),
 }
 
@@ -380,7 +387,13 @@ class HeuristicAIProvider:
         intent = _infer_intent(folded, service)
         location, geographic_score = _infer_location(folded, context.service_area)
         is_residential = not any(
-            term in folded for term in ("commercial building", "warehouse", "industrial site")
+            term in folded
+            for term in (
+                "commercial building",
+                "commercial property",
+                "warehouse",
+                "industrial site",
+            )
         )
         is_spam = any(term in folded for term in ("click this link", "guaranteed income", "crypto"))
         relevance_score = 95 if service is not None else 10
@@ -531,7 +544,7 @@ def _infer_intent(text: str, service: str | None) -> LeadIntent:
         return LeadIntent.ADVICE
     if any(term in text for term in ("looking for someone", "need someone", "need a ", "estimate")):
         return LeadIntent.HIRING
-    if any(term in text for term in ("recommend", "anyone know", "who does")):
+    if any(term in text for term in ("recommend", "anyone know", "who does", "who are you using")):
         return LeadIntent.RECOMMENDATION
     return LeadIntent.UNRELATED if service is None else LeadIntent.ADVICE
 

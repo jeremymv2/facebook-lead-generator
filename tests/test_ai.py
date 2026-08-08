@@ -142,6 +142,44 @@ def test_heuristic_lawn_draft_uses_natural_service_language() -> None:
     assert "need help" not in draft.response.casefold()
 
 
+def test_heuristic_matches_plural_structural_repairs_in_crawl_space() -> None:
+    provider = HeuristicAIProvider()
+
+    classification = provider.classify_post(
+        post("Need estimates for structural repairs in crawl space"),
+        context(),
+    )
+
+    assert classification.service_category == "structural_repairs"
+    assert classification.intent is LeadIntent.HIRING
+    assert classification.overall_score >= context().lead_threshold
+
+
+def test_heuristic_recognizes_who_are_you_using_as_recommendation() -> None:
+    provider = HeuristicAIProvider()
+
+    classification = provider.classify_post(
+        post("INVESTORS: Who are you using for interior paint jobs and flooring installation?"),
+        context(),
+    )
+
+    assert classification.service_category == "flooring"
+    assert classification.intent is LeadIntent.RECOMMENDATION
+    assert classification.overall_score >= context().lead_threshold
+
+
+def test_heuristic_rejects_commercial_property_request() -> None:
+    provider = HeuristicAIProvider()
+
+    classification = provider.classify_post(
+        post("Need someone for a landscape permit on a commercial property."),
+        context(),
+    )
+
+    assert classification.is_residential is False
+    assert classification.overall_score <= 40
+
+
 def test_heuristic_draft_does_not_use_an_unsafe_author_fragment() -> None:
     provider = HeuristicAIProvider()
     source = post(
