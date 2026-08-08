@@ -16,6 +16,7 @@ from lead_agent.facebook import FacebookBrowserError, FacebookReadOnlyBrowser
 from lead_agent.facebook_state import FacebookSafetyStop
 from lead_agent.groups import FacebookGroup, GroupsConfigError, load_group_catalog
 from lead_agent.logging_config import configure_logging
+from lead_agent.models import GroupScanState
 from lead_agent.scanner import ReadOnlyScanService, ScanSummary
 
 
@@ -24,6 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("init-db", help="Create or upgrade the local SQLite database")
     subparsers.add_parser("doctor", help="Validate configuration and show safety state")
+    status_parser = subparsers.add_parser(
+        "scan-status",
+        help="Show persisted per-group scan health without post content",
+    )
+    status_parser.add_argument("--group-id", help="Show health for one previously scanned group")
     subparsers.add_parser(
         "facebook-login",
         help="Open the dedicated browser profile for a manual Facebook login",
@@ -70,6 +76,21 @@ def _doctor_payload(settings: Settings) -> dict[str, object]:
         "groups_config_path": str(settings.groups_config_path),
         "ai_provider": settings.ai_provider,
         "notifications_enabled": settings.notifications_enabled,
+    }
+
+
+def _scan_state_payload(state: GroupScanState) -> dict[str, object]:
+    return {
+        "group_id": state.group_id,
+        "group_name": state.group_name,
+        "health": "healthy" if state.last_error is None else "degraded",
+        "consecutive_failures": state.consecutive_failures,
+        "last_attempt_at": state.last_attempt_at.isoformat(),
+        "last_success_at": state.last_success_at.isoformat() if state.last_success_at else None,
+        "last_failure_at": state.last_failure_at.isoformat() if state.last_failure_at else None,
+        "last_error": state.last_error,
+        "posts_seen": state.posts_seen,
+        "posts_new": state.posts_new,
     }
 
 
@@ -132,6 +153,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "doctor":
         print(json.dumps(_doctor_payload(settings), indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "scan-status":
+        database = Database(settings.database_path)
+        database.initialize()
+        if args.group_id:
+            selected_state = database.get_group_scan_state(args.group_id)
+            states = [selected_state] if selected_state is not None else []
+        else:
+            states = database.list_group_scan_states()
+        print(json.dumps([_scan_state_payload(state) for state in states], indent=2))
         return 0
 
     if args.command == "facebook-login":

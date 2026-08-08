@@ -76,6 +76,32 @@ def test_second_scan_reports_duplicate_without_reinserting(
     assert state.posts_new == 0
 
 
+def test_scan_state_keeps_persisted_identity_when_permalink_hydrates(
+    database: Database,
+    group: FacebookGroup,
+) -> None:
+    text = "Looking for a deck contractor in Louisville."
+    content_only = FacebookPost(
+        group_id=group.id,
+        group_name=group.name,
+        post_text=text,
+    )
+    first = asyncio.run(
+        ReadOnlyScanService(database, FakeReader([content_only])).scan_group(group, max_posts=20)
+    )
+    hydrated = post(group)
+    second = asyncio.run(
+        ReadOnlyScanService(database, FakeReader([hydrated])).scan_group(group, max_posts=20)
+    )
+
+    state = database.get_group_scan_state(group.id)
+    assert len(first.new_posts) == 1
+    assert len(second.new_posts) == 0
+    assert len(database.list_posts()) == 1
+    assert state is not None
+    assert state.last_known_post_identity == content_only.identity_key
+
+
 def test_safety_stop_is_recorded_and_re_raised(
     database: Database,
     group: FacebookGroup,
@@ -96,6 +122,7 @@ def test_safety_stop_is_recorded_and_re_raised(
     state = database.get_group_scan_state(group.id)
     assert state is not None
     assert state.last_error == "FacebookSafetyStop:checkpoint"
+    assert state.consecutive_failures == 1
     assert database.list_audit_events()[0].result == "stopped"
 
 

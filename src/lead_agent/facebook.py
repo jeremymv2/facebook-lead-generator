@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NoReturn, cast
@@ -34,6 +35,19 @@ STORY_MESSAGE_SELECTOR = (
 
 class FacebookBrowserError(RuntimeError):
     """Raised when the dedicated Playwright browser cannot be started safely."""
+
+
+@dataclass(frozen=True, slots=True)
+class FacebookPostCandidate:
+    """Sanitized semantic fields collected from one possible top-level story."""
+
+    full_text: str
+    semantic_messages: tuple[str, ...] = ()
+    automatic_texts: tuple[str, ...] = ()
+    hrefs: tuple[str, ...] = ()
+    article_label: str | None = None
+    author_name: str | None = None
+    is_nested_article: bool = False
 
 
 def is_facebook_comment_label(label: str | None) -> bool:
@@ -115,6 +129,36 @@ def select_message_text(
     if fallback:
         return fallback[0]
     return None
+
+
+def build_facebook_post(
+    candidate: FacebookPostCandidate,
+    group: FacebookGroup,
+    *,
+    min_length: int,
+) -> FacebookPost | None:
+    """Convert sanitized DOM semantics into a group-scoped post or reject them safely."""
+    if candidate.is_nested_article or is_facebook_comment_label(candidate.article_label):
+        return None
+    post_text = select_message_text(
+        candidate.full_text,
+        candidate.semantic_messages,
+        candidate.automatic_texts,
+        min_length=min_length,
+    )
+    if post_text is None:
+        return None
+    post_url = select_facebook_permalink(candidate.hrefs, group.url)
+    if post_url is not None and facebook_group_key(post_url) != facebook_group_key(group.url):
+        return None
+    return FacebookPost(
+        external_post_id=extract_post_id(post_url) if post_url else None,
+        post_url=post_url,
+        group_id=group.id,
+        group_name=group.name,
+        author_name=candidate.author_name,
+        post_text=post_text,
+    )
 
 
 def cleanup_old_screenshots(
@@ -371,7 +415,6 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         count = min(await messages.count(), max(max_posts * 3, 20))
         posts: list[FacebookPost] = []
         identities: set[str] = set()
-        expected_group_key = facebook_group_key(group.url)
 
         for index in range(count):
             message = messages.nth(index)
@@ -386,19 +429,19 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
             if is_facebook_comment_label(comment_label):
                 continue
             post_text = normalize_post_text(await message.inner_text(timeout=1000))
-            if len(post_text) < self.settings.min_post_text_length:
-                continue
             hrefs = await self._nearest_post_hrefs(message)
-            post_url = select_facebook_permalink(hrefs, group.url)
-            if post_url is not None and facebook_group_key(post_url) != expected_group_key:
-                continue
-            post = FacebookPost(
-                external_post_id=extract_post_id(post_url) if post_url else None,
-                post_url=post_url,
-                group_id=group.id,
-                group_name=group.name,
-                post_text=post_text,
+            post = build_facebook_post(
+                FacebookPostCandidate(
+                    full_text=post_text,
+                    semantic_messages=(post_text,),
+                    hrefs=tuple(hrefs),
+                    article_label=comment_label,
+                ),
+                group,
+                min_length=self.settings.min_post_text_length,
             )
+            if post is None:
+                continue
             if post.identity_key in identities:
                 continue
             identities.add(post.identity_key)
@@ -485,23 +528,13 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         article: Locator,
         group: FacebookGroup,
     ) -> FacebookPost | None:
-        if is_facebook_comment_label(await article.get_attribute("aria-label", timeout=1000)):
-            return None
+        article_label = await article.get_attribute("aria-label", timeout=1000)
         full_text = await self._article_text_without_comments(article)
         semantic_messages = await self._owned_article_texts(
             article,
             STORY_MESSAGE_SELECTOR,
         )
         automatic_texts = await self._owned_article_texts(article, '[dir="auto"]')
-        post_text = select_message_text(
-            full_text,
-            semantic_messages,
-            automatic_texts,
-            min_length=self.settings.min_post_text_length,
-        )
-        if post_text is None:
-            return None
-
         links = article.get_by_role("link")
         hrefs: list[str] = []
         author_name: str | None = None
@@ -515,14 +548,17 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 if candidate and candidate != group.name and 1 < len(candidate) <= 100:
                     author_name = candidate
 
-        post_url = select_facebook_permalink(hrefs, group.url)
-        return FacebookPost(
-            external_post_id=extract_post_id(post_url) if post_url else None,
-            post_url=post_url,
-            group_id=group.id,
-            group_name=group.name,
-            author_name=author_name,
-            post_text=post_text,
+        return build_facebook_post(
+            FacebookPostCandidate(
+                full_text=full_text,
+                semantic_messages=tuple(semantic_messages),
+                automatic_texts=tuple(automatic_texts),
+                hrefs=tuple(hrefs),
+                article_label=article_label,
+                author_name=author_name,
+            ),
+            group,
+            min_length=self.settings.min_post_text_length,
         )
 
     async def _require_normal_page(self, page: Page, *, group_id: str) -> None:

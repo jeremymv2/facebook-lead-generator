@@ -105,6 +105,27 @@ class FacebookPost:
         author = (self.author_name or "unknown").strip().casefold()
         return f"content:{self.group_id.casefold()}:{author}:{self.text_hash}"
 
+    def identity_aliases(self) -> tuple[str, ...]:
+        """Return every durable identity currently visible for this post.
+
+        Facebook can expose a story before its permalink has hydrated. Keeping the content
+        identities alongside later IDs and URLs lets persistence join those renderings without
+        changing the post's original primary identity.
+        """
+        aliases = [self.identity_key]
+        if self.external_post_id:
+            aliases.append(f"facebook-id:{self.external_post_id.strip()}")
+        if self.post_url:
+            aliases.append(f"facebook-url:{canonicalize_facebook_url(self.post_url)}")
+        author = (self.author_name or "unknown").strip().casefold()
+        aliases.extend(
+            (
+                f"content:{self.group_id.casefold()}:{author}:{self.text_hash}",
+                f"content-text:{self.group_id.casefold()}:{self.text_hash}",
+            )
+        )
+        return tuple(dict.fromkeys(aliases))
+
 
 @dataclass(slots=True)
 class Lead:
@@ -166,3 +187,5 @@ class GroupScanState:
     last_error: str | None = None
     posts_seen: int = 0
     posts_new: int = 0
+    consecutive_failures: int = 0
+    last_failure_at: datetime | None = None

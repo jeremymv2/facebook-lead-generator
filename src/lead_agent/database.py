@@ -20,7 +20,7 @@ from lead_agent.models import (
     utc_now,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +86,21 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_facebook_posts_text_hash
                     ON facebook_posts(text_hash);
 
+                CREATE TABLE IF NOT EXISTS facebook_post_identity_aliases (
+                    identity_key TEXT NOT NULL,
+                    facebook_post_id INTEGER NOT NULL,
+                    identity_kind TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(identity_key, facebook_post_id),
+                    FOREIGN KEY(facebook_post_id) REFERENCES facebook_posts(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_facebook_post_aliases_post
+                    ON facebook_post_identity_aliases(facebook_post_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_facebook_post_aliases_stable
+                    ON facebook_post_identity_aliases(identity_key)
+                    WHERE identity_kind IN ('facebook_id', 'facebook_url');
+
                 CREATE TABLE IF NOT EXISTS leads (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     facebook_post_id INTEGER NOT NULL UNIQUE,
@@ -143,10 +158,26 @@ class Database:
                     last_known_post_identity TEXT,
                     last_error TEXT,
                     posts_seen INTEGER NOT NULL DEFAULT 0 CHECK(posts_seen >= 0),
-                    posts_new INTEGER NOT NULL DEFAULT 0 CHECK(posts_new >= 0)
+                    posts_new INTEGER NOT NULL DEFAULT 0 CHECK(posts_new >= 0),
+                    consecutive_failures INTEGER NOT NULL DEFAULT 0
+                        CHECK(consecutive_failures >= 0),
+                    last_failure_at TEXT
                 );
                 """
             )
+            _add_column_if_missing(
+                connection,
+                "group_scan_state",
+                "consecutive_failures",
+                "INTEGER NOT NULL DEFAULT 0 CHECK(consecutive_failures >= 0)",
+            )
+            _add_column_if_missing(
+                connection,
+                "group_scan_state",
+                "last_failure_at",
+                "TEXT",
+            )
+            self._backfill_post_identity_aliases(connection)
             connection.execute(
                 """
                 INSERT INTO schema_metadata(key, value) VALUES('schema_version', ?)
@@ -156,37 +187,83 @@ class Database:
             )
         self.path.chmod(0o600)
 
-    def save_post(self, post: FacebookPost) -> SaveResult:
-        """Insert a post once, returning the existing row on duplicate discovery."""
-        with self.connection() as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO facebook_posts (
-                    identity_key, external_post_id, post_url, group_id, group_name,
-                    author_name, post_text, text_hash, discovered_at, posted_at,
-                    status, error_state, screenshot_path
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(identity_key) DO NOTHING
-                """,
-                (
-                    post.identity_key,
-                    post.external_post_id,
-                    post.post_url,
-                    post.group_id,
-                    post.group_name,
-                    post.author_name,
-                    post.post_text,
-                    post.text_hash,
-                    _serialize_datetime(post.discovered_at),
-                    _serialize_datetime(post.posted_at),
-                    post.status.value,
-                    post.error_state,
-                    post.screenshot_path,
-                ),
+    def _backfill_post_identity_aliases(self, connection: sqlite3.Connection) -> None:
+        """Populate schema-v3 aliases for posts written by earlier schema versions."""
+        rows = connection.execute("SELECT * FROM facebook_posts ORDER BY id").fetchall()
+        for row in rows:
+            persisted = _post_from_row(row)
+            if persisted.id is None:  # pragma: no cover - persisted rows always have IDs
+                raise RuntimeError("Saved post is missing its database ID")
+            _insert_identity_aliases(
+                connection,
+                post_id=persisted.id,
+                aliases=persisted.identity_aliases(),
+                created_at=persisted.discovered_at,
             )
-            created = cursor.rowcount == 1
+
+    def save_post(self, post: FacebookPost) -> SaveResult:
+        """Insert a post once across IDs, URLs, and unambiguous content aliases."""
+        with self.connection() as connection:
+            # Serialize the alias lookup and insert across scanner processes.
+            connection.execute("BEGIN IMMEDIATE")
+            aliases = post.identity_aliases()
+            existing_post_id = _find_duplicate_post_id(connection, post, aliases)
+            created = existing_post_id is None
+            if existing_post_id is None:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO facebook_posts (
+                        identity_key, external_post_id, post_url, group_id, group_name,
+                        author_name, post_text, text_hash, discovered_at, posted_at,
+                        status, error_state, screenshot_path
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        post.identity_key,
+                        post.external_post_id,
+                        post.post_url,
+                        post.group_id,
+                        post.group_name,
+                        post.author_name,
+                        post.post_text,
+                        post.text_hash,
+                        _serialize_datetime(post.discovered_at),
+                        _serialize_datetime(post.posted_at),
+                        post.status.value,
+                        post.error_state,
+                        post.screenshot_path,
+                    ),
+                )
+                inserted_post_id = cursor.lastrowid
+                if inserted_post_id is None:  # pragma: no cover - SQLite insert contract
+                    raise RuntimeError("Failed to retrieve inserted post ID")
+                existing_post_id = inserted_post_id
+            else:
+                connection.execute(
+                    """
+                    UPDATE facebook_posts SET
+                        external_post_id = COALESCE(external_post_id, ?),
+                        post_url = COALESCE(post_url, ?),
+                        author_name = COALESCE(author_name, ?),
+                        posted_at = COALESCE(posted_at, ?)
+                    WHERE id = ?
+                    """,
+                    (
+                        post.external_post_id,
+                        post.post_url,
+                        post.author_name,
+                        _serialize_datetime(post.posted_at),
+                        existing_post_id,
+                    ),
+                )
+            _insert_identity_aliases(
+                connection,
+                post_id=existing_post_id,
+                aliases=aliases,
+                created_at=post.discovered_at,
+            )
             row = connection.execute(
-                "SELECT * FROM facebook_posts WHERE identity_key = ?", (post.identity_key,)
+                "SELECT * FROM facebook_posts WHERE id = ?", (existing_post_id,)
             ).fetchone()
             if row is None:  # pragma: no cover - protected by the insert/select transaction
                 raise RuntimeError("Failed to retrieve saved post")
@@ -248,8 +325,9 @@ class Database:
                 """
                 INSERT INTO group_scan_state (
                     group_id, group_name, group_url, last_attempt_at, last_success_at,
-                    last_known_post_identity, last_error, posts_seen, posts_new
-                ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                    last_known_post_identity, last_error, posts_seen, posts_new,
+                    consecutive_failures
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, 0)
                 ON CONFLICT(group_id) DO UPDATE SET
                     group_name = excluded.group_name,
                     group_url = excluded.group_url,
@@ -261,7 +339,8 @@ class Database:
                     ),
                     last_error = NULL,
                     posts_seen = excluded.posts_seen,
-                    posts_new = excluded.posts_new
+                    posts_new = excluded.posts_new,
+                    consecutive_failures = 0
                 """,
                 (
                     group_id,
@@ -294,17 +373,27 @@ class Database:
             connection.execute(
                 """
                 INSERT INTO group_scan_state (
-                    group_id, group_name, group_url, last_attempt_at, last_error
-                ) VALUES (?, ?, ?, ?, ?)
+                    group_id, group_name, group_url, last_attempt_at, last_error,
+                    consecutive_failures, last_failure_at
+                ) VALUES (?, ?, ?, ?, ?, 1, ?)
                 ON CONFLICT(group_id) DO UPDATE SET
                     group_name = excluded.group_name,
                     group_url = excluded.group_url,
                     last_attempt_at = excluded.last_attempt_at,
                     last_error = excluded.last_error,
                     posts_seen = 0,
-                    posts_new = 0
+                    posts_new = 0,
+                    consecutive_failures = group_scan_state.consecutive_failures + 1,
+                    last_failure_at = excluded.last_failure_at
                 """,
-                (group_id, group_name, group_url, _serialize_datetime(timestamp), error),
+                (
+                    group_id,
+                    group_name,
+                    group_url,
+                    _serialize_datetime(timestamp),
+                    error,
+                    _serialize_datetime(timestamp),
+                ),
             )
         state = self.get_group_scan_state(group_id)
         if state is None:  # pragma: no cover - protected by the upsert
@@ -317,6 +406,14 @@ class Database:
                 "SELECT * FROM group_scan_state WHERE group_id = ?", (group_id,)
             ).fetchone()
         return _group_scan_state_from_row(row) if row is not None else None
+
+    def list_group_scan_states(self) -> list[GroupScanState]:
+        """Return persisted group health without exposing discovered post content."""
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM group_scan_state ORDER BY group_name, group_id"
+            ).fetchall()
+        return [_group_scan_state_from_row(row) for row in rows]
 
     def create_lead(self, lead: Lead) -> Lead:
         """Create at most one lead per Facebook post."""
@@ -442,6 +539,113 @@ class Database:
         return [_audit_event_from_row(row) for row in rows]
 
 
+def _add_column_if_missing(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _identity_kind(identity_key: str) -> str:
+    if identity_key.startswith("facebook-id:"):
+        return "facebook_id"
+    if identity_key.startswith("facebook-url:"):
+        return "facebook_url"
+    if identity_key.startswith("content-text:"):
+        return "content_text"
+    if identity_key.startswith("content:"):
+        return "content_author"
+    return "primary"
+
+
+def _alias_post_ids(
+    connection: sqlite3.Connection,
+    aliases: tuple[str, ...],
+    *,
+    without_stable_identity: bool = False,
+) -> set[int]:
+    if not aliases:
+        return set()
+    placeholders = ",".join("?" for _ in aliases)
+    stable_filter = (
+        """
+        AND NOT EXISTS (
+            SELECT 1
+            FROM facebook_post_identity_aliases AS stable
+            WHERE stable.facebook_post_id = posts.id
+              AND stable.identity_kind IN ('facebook_id', 'facebook_url')
+        )
+        """
+        if without_stable_identity
+        else ""
+    )
+    rows = connection.execute(
+        f"""
+        SELECT DISTINCT aliases.facebook_post_id
+        FROM facebook_post_identity_aliases AS aliases
+        JOIN facebook_posts AS posts ON posts.id = aliases.facebook_post_id
+        WHERE aliases.identity_key IN ({placeholders}) {stable_filter}
+        """,
+        aliases,
+    ).fetchall()
+    return {int(row["facebook_post_id"]) for row in rows}
+
+
+def _find_duplicate_post_id(
+    connection: sqlite3.Connection,
+    post: FacebookPost,
+    aliases: tuple[str, ...],
+) -> int | None:
+    direct = connection.execute(
+        "SELECT id FROM facebook_posts WHERE identity_key = ?", (post.identity_key,)
+    ).fetchone()
+    if direct is not None:
+        return int(direct["id"])
+
+    stable_aliases = tuple(
+        alias for alias in aliases if _identity_kind(alias) in {"facebook_id", "facebook_url"}
+    )
+    stable_matches = _alias_post_ids(connection, stable_aliases)
+    if len(stable_matches) > 1:
+        raise RuntimeError("Facebook post ID and URL resolve to conflicting saved posts")
+    if stable_matches:
+        return next(iter(stable_matches))
+
+    content_aliases = tuple(
+        alias for alias in aliases if _identity_kind(alias) in {"content_author", "content_text"}
+    )
+    content_matches = _alias_post_ids(
+        connection,
+        content_aliases,
+        without_stable_identity=bool(stable_aliases),
+    )
+    return next(iter(content_matches)) if len(content_matches) == 1 else None
+
+
+def _insert_identity_aliases(
+    connection: sqlite3.Connection,
+    *,
+    post_id: int,
+    aliases: tuple[str, ...],
+    created_at: datetime,
+) -> None:
+    connection.executemany(
+        """
+        INSERT OR IGNORE INTO facebook_post_identity_aliases (
+            identity_key, facebook_post_id, identity_kind, created_at
+        ) VALUES (?, ?, ?, ?)
+        """,
+        (
+            (alias, post_id, _identity_kind(alias), _serialize_datetime(created_at))
+            for alias in aliases
+        ),
+    )
+
+
 def _serialize_datetime(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
@@ -526,4 +730,6 @@ def _group_scan_state_from_row(row: sqlite3.Row) -> GroupScanState:
         last_error=row["last_error"],
         posts_seen=row["posts_seen"],
         posts_new=row["posts_new"],
+        consecutive_failures=row["consecutive_failures"],
+        last_failure_at=_parse_datetime(row["last_failure_at"]),
     )

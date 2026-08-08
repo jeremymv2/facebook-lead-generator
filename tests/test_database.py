@@ -71,6 +71,104 @@ def test_content_fallback_deduplicates_posts_without_ids_or_urls(database: Datab
     assert second.post.id == first.post.id
 
 
+def test_permalink_hydration_enriches_one_content_discovery(database: Database) -> None:
+    first = database.save_post(
+        make_post(
+            external_post_id=None,
+            post_url=None,
+            author_name=None,
+            post_text="Need a fence estimate in Louisville.",
+        )
+    )
+    hydrated = database.save_post(
+        make_post(
+            external_post_id="post-456",
+            post_url="https://www.facebook.com/groups/group-123/posts/post-456",
+            author_name="Fixture Account",
+            post_text="Need a fence estimate in Louisville.",
+        )
+    )
+
+    assert first.created is True
+    assert hydrated.created is False
+    assert hydrated.post.id == first.post.id
+    assert hydrated.post.identity_key == first.post.identity_key
+    assert hydrated.post.external_post_id == "post-456"
+    assert hydrated.post.post_url == ("https://www.facebook.com/groups/group-123/posts/post-456")
+    assert hydrated.post.author_name == "Fixture Account"
+    assert len(database.list_posts()) == 1
+
+    distinct_stable_post = database.save_post(
+        make_post(
+            external_post_id="post-999",
+            post_url="https://www.facebook.com/groups/group-123/posts/post-999",
+            author_name="Another Fixture Account",
+            post_text="Need a fence estimate in Louisville.",
+        )
+    )
+    assert distinct_stable_post.created is True
+    assert len(database.list_posts()) == 2
+
+
+def test_content_only_rendering_matches_one_stable_post(database: Database) -> None:
+    stable = database.save_post(
+        make_post(post_text="Looking for a painter in Louisville next week.")
+    )
+    content_only = database.save_post(
+        make_post(
+            external_post_id=None,
+            post_url=None,
+            author_name=None,
+            post_text="Looking for a painter in Louisville next week.",
+        )
+    )
+
+    assert content_only.created is False
+    assert content_only.post.id == stable.post.id
+
+
+def test_distinct_stable_ids_are_not_merged_only_because_text_matches(
+    database: Database,
+) -> None:
+    first = database.save_post(make_post(post_text="Synthetic repeated group announcement."))
+    second = database.save_post(
+        make_post(
+            external_post_id="post-456",
+            post_url="https://www.facebook.com/groups/123/posts/post-456",
+            post_text="Synthetic repeated group announcement.",
+        )
+    )
+
+    assert first.created is True
+    assert second.created is True
+    assert second.post.id != first.post.id
+    assert len(database.list_posts()) == 2
+
+
+def test_content_aliases_never_cross_group_boundaries(database: Database) -> None:
+    first = database.save_post(
+        make_post(
+            external_post_id=None,
+            post_url=None,
+            author_name=None,
+            post_text="Need a deck repair estimate.",
+        )
+    )
+    second = database.save_post(
+        make_post(
+            external_post_id=None,
+            post_url=None,
+            group_id="another-group",
+            group_name="Another Group",
+            author_name=None,
+            post_text="Need a deck repair estimate.",
+        )
+    )
+
+    assert first.created is True
+    assert second.created is True
+
+
 def test_saved_post_survives_new_database_instance(database: Database) -> None:
     saved = database.save_post(make_post()).post
 
@@ -199,6 +297,8 @@ def test_group_scan_state_preserves_success_across_failure(database: Database) -
     assert failed.last_error == "FacebookSafetyStop:checkpoint"
     assert failed.posts_seen == 0
     assert failed.posts_new == 0
+    assert failed.consecutive_failures == 1
+    assert failed.last_failure_at == failure_at
 
 
 def test_empty_success_preserves_last_known_post(database: Database) -> None:
@@ -222,3 +322,133 @@ def test_empty_success_preserves_last_known_post(database: Database) -> None:
 
     assert state.last_known_post_identity == "facebook-id:123"
     assert state.last_error is None
+
+
+def test_group_scan_failure_streak_resets_after_recovery(database: Database) -> None:
+    first_failure = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
+    second_failure = datetime(2026, 8, 7, 12, 5, tzinfo=UTC)
+    recovery = datetime(2026, 8, 7, 12, 10, tzinfo=UTC)
+    for occurred_at in (first_failure, second_failure):
+        failed = database.record_group_scan_failure(
+            group_id="group-123",
+            group_name="Louisville Homeowners",
+            group_url="https://www.facebook.com/groups/123",
+            error="FacebookBrowserError",
+            occurred_at=occurred_at,
+        )
+
+    assert failed.consecutive_failures == 2
+    assert failed.last_failure_at == second_failure
+
+    recovered = database.record_group_scan_success(
+        group_id="group-123",
+        group_name="Louisville Homeowners",
+        group_url="https://www.facebook.com/groups/123",
+        posts_seen=10,
+        posts_new=0,
+        last_known_post_identity="facebook-id:123",
+        occurred_at=recovery,
+    )
+
+    assert recovered.consecutive_failures == 0
+    assert recovered.last_failure_at == second_failure
+    assert recovered.last_error is None
+    assert database.list_group_scan_states() == [recovered]
+
+
+def test_initialize_migrates_v2_state_and_backfills_post_aliases(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.sqlite3"
+    legacy_post = make_post(
+        external_post_id=None,
+        post_url=None,
+        author_name=None,
+        post_text="Need a synthetic fence estimate.",
+    )
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE facebook_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                identity_key TEXT NOT NULL UNIQUE,
+                external_post_id TEXT,
+                post_url TEXT,
+                group_id TEXT NOT NULL,
+                group_name TEXT NOT NULL,
+                author_name TEXT,
+                post_text TEXT NOT NULL,
+                text_hash TEXT NOT NULL,
+                discovered_at TEXT NOT NULL,
+                posted_at TEXT,
+                status TEXT NOT NULL,
+                error_state TEXT,
+                screenshot_path TEXT
+            );
+            CREATE TABLE group_scan_state (
+                group_id TEXT PRIMARY KEY,
+                group_name TEXT NOT NULL,
+                group_url TEXT NOT NULL,
+                last_attempt_at TEXT NOT NULL,
+                last_success_at TEXT,
+                last_known_post_identity TEXT,
+                last_error TEXT,
+                posts_seen INTEGER NOT NULL DEFAULT 0 CHECK(posts_seen >= 0),
+                posts_new INTEGER NOT NULL DEFAULT 0 CHECK(posts_new >= 0)
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO facebook_posts (
+                identity_key, group_id, group_name, post_text, text_hash,
+                discovered_at, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                legacy_post.identity_key,
+                legacy_post.group_id,
+                legacy_post.group_name,
+                legacy_post.post_text,
+                legacy_post.text_hash,
+                legacy_post.discovered_at.isoformat(),
+                legacy_post.status.value,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO group_scan_state (
+                group_id, group_name, group_url, last_attempt_at, posts_seen, posts_new
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "group-123",
+                "Louisville Homeowners",
+                "https://www.facebook.com/groups/123",
+                datetime(2026, 8, 7, 12, 0, tzinfo=UTC).isoformat(),
+                1,
+                1,
+            ),
+        )
+
+    migrated = Database(path)
+    migrated.initialize()
+    state = migrated.get_group_scan_state("group-123")
+    hydrated = migrated.save_post(
+        make_post(
+            external_post_id="post-789",
+            post_url="https://www.facebook.com/groups/123/posts/post-789",
+            author_name="Fixture Account",
+            post_text=legacy_post.post_text,
+        )
+    )
+
+    assert state is not None
+    assert state.consecutive_failures == 0
+    assert state.last_failure_at is None
+    assert hydrated.created is False
+    assert len(migrated.list_posts()) == 1
+    with migrated.connection() as connection:
+        version = connection.execute(
+            "SELECT value FROM schema_metadata WHERE key = 'schema_version'"
+        ).fetchone()
+    assert version is not None
+    assert version["value"] == str(SCHEMA_VERSION)
