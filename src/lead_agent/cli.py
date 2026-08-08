@@ -16,17 +16,20 @@ from lead_agent.approvals import ApprovalError, LocalApprovalService
 from lead_agent.classifier import ClassificationSummary, LeadClassificationService
 from lead_agent.config import (
     NotificationConfigurationError,
+    PostingDisabledError,
     Settings,
     UnsafeReadOnlyModeError,
     load_settings,
 )
 from lead_agent.database import Database
 from lead_agent.facebook import FacebookBrowserError, FacebookReadOnlyBrowser
+from lead_agent.facebook_posting import FacebookCommentBrowser
 from lead_agent.facebook_state import FacebookSafetyStop
 from lead_agent.groups import FacebookGroup, GroupsConfigError, load_group_catalog
 from lead_agent.logging_config import configure_logging
 from lead_agent.models import GroupScanState
 from lead_agent.notifications import ApprovalNotificationService, build_sms_provider
+from lead_agent.posting import ApprovedPostingService, PostingError, PostingExecutionResult
 from lead_agent.remote_approval_web import (
     RemoteApprovalController,
     relay_is_healthy,
@@ -114,6 +117,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Keep the browser open for inspection until Enter is pressed",
     )
+    posting_parser = subparsers.add_parser(
+        "post-approved",
+        help="Validate one approved lead; submit only with --submit and both safety flags",
+    )
+    posting_parser.add_argument(
+        "--lead-id",
+        type=_positive_int,
+        required=True,
+        help="Approved or edited lead to validate against its exact Facebook post",
+    )
+    posting_parser.add_argument(
+        "--submit",
+        action="store_true",
+        help="Submit once; requires POSTING_ENABLED=true and DRY_RUN=false",
+    )
     return parser
 
 
@@ -157,6 +175,10 @@ def _doctor_payload(settings: Settings) -> dict[str, object]:
         "sms_provider": settings.sms_provider,
         "remote_approval_ready": settings.remote_approval_ready,
         "remote_approval_port": settings.remote_approval_port,
+        "posting_approval_max_age_minutes": settings.posting_approval_max_age_minutes,
+        "daily_posting_limit": settings.daily_posting_limit,
+        "per_group_daily_posting_limit": settings.per_group_daily_posting_limit,
+        "business_timezone": settings.business_timezone,
     }
 
 
@@ -228,6 +250,17 @@ def _print_classification_results(summary: ClassificationSummary) -> None:
         )
         if lead.drafted_response:
             print(f"DRAFT {lead.drafted_response}")
+
+
+async def _execute_approved_posting(
+    settings: Settings,
+    service: ApprovedPostingService,
+    *,
+    lead_id: int,
+    dry_run: bool,
+) -> PostingExecutionResult:
+    async with FacebookCommentBrowser(settings) as browser:
+        return await service.execute(lead_id, browser, dry_run=dry_run)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -406,6 +439,61 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"Diagnostic screenshot: {error.screenshot_path}", file=sys.stderr)
             return 2
         _print_scan_results(summaries)
+        return 0
+
+    if args.command == "post-approved":
+        dry_run = not args.submit
+        try:
+            if dry_run:
+                settings.require_read_only_mode()
+            else:
+                settings.require_posting_allowed()
+            catalog = load_group_catalog(settings.groups_config_path)
+            enabled_group_ids = {group.id for group in catalog.enabled_groups()}
+            if not enabled_group_ids:
+                raise GroupsConfigError("No Facebook groups are enabled in the group allowlist")
+            database = Database(settings.database_path)
+            database.initialize()
+            posting_service = ApprovedPostingService(
+                database,
+                settings,
+                enabled_group_ids=enabled_group_ids,
+            )
+            result = asyncio.run(
+                _execute_approved_posting(
+                    settings,
+                    posting_service,
+                    lead_id=args.lead_id,
+                    dry_run=dry_run,
+                )
+            )
+        except (
+            FacebookBrowserError,
+            FacebookSafetyStop,
+            GroupsConfigError,
+            PostingDisabledError,
+            PostingError,
+            UnsafeReadOnlyModeError,
+        ) as error:
+            print(f"Stopped safely: {error}", file=sys.stderr)
+            screenshot_path = getattr(error, "screenshot_path", None)
+            if screenshot_path is not None:
+                print(f"Diagnostic screenshot: {screenshot_path}", file=sys.stderr)
+            return 2
+        attempt = result.work.attempt
+        if not result.created:
+            print(
+                f"No action taken: live posting attempt already exists "
+                f"with status={attempt.status.value}"
+            )
+            return 0 if attempt.status.value == "posted" else 2
+        if dry_run:
+            print(
+                f"DRY RUN lead={args.lead_id} validated; "
+                "no Facebook comment was entered or submitted"
+            )
+        else:
+            print(f"POSTED lead={args.lead_id} exactly once")
         return 0
 
     raise AssertionError(f"Unhandled command: {args.command}")
