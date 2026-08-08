@@ -32,6 +32,21 @@ DEFAULT_SERVICES = [
     "framing",
     "structural_repairs",
     "general_home_repairs",
+    "roof_repair",
+    "masonry",
+    "exterior_repairs",
+    "gutters_and_drainage",
+    "outdoor_structures",
+    "demolition",
+    "installations_and_mounting",
+    "insulation_and_air_sealing",
+    "minor_plumbing_repairs",
+    "appliance_installation",
+    "electrical_fixtures",
+    "ventilation",
+    "property_maintenance",
+    "cleanup_and_hauling",
+    "project_coordination",
 ]
 
 # The production review token is 43 characters. This limit leaves enough room for the exact

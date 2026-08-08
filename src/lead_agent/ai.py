@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from lead_agent.config import Settings
 from lead_agent.models import FacebookPost, LeadIntent, normalize_post_text
 
-CLASSIFICATION_VERSION = "2026-08-08.v2"
+CLASSIFICATION_VERSION = "2026-08-08.v3"
 COMPANY_NAME = "JJ Miller & Co."
 COMPANY_WEBSITE = "https://jjmillerco.com"
 COMPANY_TEXT_PHONE = "502-528-0858"
@@ -60,6 +60,7 @@ class LeadClassification(BaseModel):
     def enforce_fail_closed_score_caps(self) -> LeadClassification:
         low_value_intents = {
             LeadIntent.RESOLVED,
+            LeadIntent.PRIVATE_CONTACT_ONLY,
             LeadIntent.SELLING,
             LeadIntent.COMPETITOR_ADVERTISEMENT,
             LeadIntent.UNRELATED,
@@ -219,8 +220,10 @@ class GeminiAIProvider:
             "service_category unless it exactly matches enabled_services. Hiring and "
             "recommendation requests may score highly. Posts that say the author already found "
             "or hired someone, is all set, or is no longer looking must use resolved intent and "
-            "score at most 10. Advice-only posts must score at most 40. Sales, competitor "
-            "advertisements, spam, and unrelated posts must score at most 10. Explicit locations "
+            "score at most 10. Posts that prohibit comments or require private messages must use "
+            "private_contact_only intent and score at most 10. Advice-only posts must score at "
+            "most 40. Sales, competitor advertisements, spam, and unrelated posts must score at "
+            "most 10. Explicit locations "
             "outside the service area need a geographic score of 20 or less.\n\n"
             + json.dumps(payload, sort_keys=True)
         )
@@ -286,22 +289,131 @@ class GeminiAIProvider:
 
 
 _SERVICE_TERMS: dict[str, tuple[str, ...]] = {
-    "general_contracting": ("general contractor", "renovation", "remodel"),
-    "handyman": ("handyman", "odd jobs"),
-    "kitchen_remodeling": ("kitchen remodel", "kitchen renovation"),
-    "bathroom_remodeling": ("bathroom remodel", "bath remodel", "shower remodel"),
-    "cabinet_installation": ("cabinet", "cabinets"),
-    "drywall": ("drywall", "sheetrock"),
-    "painting": ("painter", "painting", "paint ", "stain color"),
-    "carpentry": ("carpenter", "carpentry", "woodwork"),
-    "doors": ("door repair", "install a door", "replace a door"),
-    "windows": ("window repair", "install windows", "replace windows"),
+    "general_contracting": (
+        "general contractor",
+        "renovation",
+        "renovations",
+        "remodel",
+        "remodeling",
+        "garage finishing",
+        "whole-home renovation",
+        "whole home renovation",
+    ),
+    "handyman": (
+        "handyman",
+        "odd jobs",
+        "punch-list",
+        "punch list",
+        "minor carpentry repair",
+        "furniture assembly",
+    ),
+    "kitchen_remodeling": (
+        "kitchen remodel",
+        "kitchen remodeling",
+        "kitchen renovation",
+    ),
+    "bathroom_remodeling": (
+        "bathroom remodel",
+        "bathroom remodeling",
+        "bath remodel",
+        "shower remodel",
+    ),
+    "cabinet_installation": ("cabinet", "cabinets", "drawer pull installation"),
+    "drywall": ("drywall", "sheetrock", "plaster repair", "ceiling repair"),
+    "painting": (
+        "painter",
+        "painting",
+        "paint ",
+        "stain color",
+        "wallpaper removal",
+        "paint touch-up",
+        "priming",
+    ),
+    "carpentry": (
+        "carpenter",
+        "carpentry",
+        "woodwork",
+        "baseboard",
+        "crown molding",
+        "window casing",
+        "door casing",
+        "decorative trim",
+        "chair rail",
+        "wainscoting",
+        "shiplap",
+        "built-in shelving",
+        "attic walkway",
+    ),
+    "doors": (
+        "door",
+        "entryway repair",
+        "exterior threshold",
+        "lockset",
+        "deadbolt",
+        "exterior lock and hardware installation",
+    ),
+    "windows": ("window", "replacement window"),
     "decks": ("deck", "decking"),
-    "pressure_washing": ("pressure wash", "power wash"),
-    "fencing": ("fence", "fencing", "fence repair", "fence installation"),
-    "flooring": ("flooring", "floor install", "lvp", "hardwood floor"),
-    "tile": ("tile", "backsplash"),
-    "plumbing_fixtures": ("faucet", "toilet", "sink install", "plumbing fixture"),
+    "pressure_washing": (
+        "pressure wash",
+        "pressure washing",
+        "power wash",
+        "power washing",
+        "house washing",
+        "driveway cleaning",
+        "sidewalk cleaning",
+        "fence cleaning",
+        "exterior surface preparation",
+    ),
+    "fencing": (
+        "fence",
+        "fencing",
+        "fence repair",
+        "fence installation",
+        "gate installation",
+        "gate repair",
+    ),
+    "flooring": (
+        "flooring",
+        "floor install",
+        "lvp",
+        "hardwood floor",
+        "luxury vinyl plank",
+        "laminate floor",
+        "engineered floor",
+        "floor repair",
+        "subfloor",
+        "floor leveling",
+        "transition strip",
+        "quarter-round",
+        "quarter round",
+    ),
+    "tile": (
+        "tile",
+        "backsplash",
+        "grout",
+        "shower surround",
+        "tub surround",
+    ),
+    "plumbing_fixtures": (
+        "faucet",
+        "toilet",
+        "sink install",
+        "plumbing fixture",
+        "vanity installation",
+        "vanity replacement",
+        "vanity-top installation",
+        "vanity top installation",
+        "showerhead",
+        "handheld shower",
+        "shower fixture",
+        "tub fixture",
+        "utility sink installation",
+        "sink installation",
+        "tub and shower caulking",
+        "sink caulking",
+        "garbage disposal installation",
+    ),
     "landscaping": (
         "landscaping",
         "landscaper",
@@ -317,10 +429,25 @@ _SERVICE_TERMS: dict[str, tuple[str, ...]] = {
         "bushes",
         "weed",
         "weeds",
+        "landscape",
+        "mulch",
+        "decorative rock",
+        "shrub",
+        "plant installation",
+        "tree planting",
+        "property cleanup",
+        "rental property exterior cleanup",
     ),
     "porches": ("porch",),
     "patios": ("patio",),
-    "framing": ("framing", "frame a wall"),
+    "framing": (
+        "framing",
+        "frame a wall",
+        "partition wall",
+        "non-load-bearing wall",
+        "non load bearing wall",
+        "wood blocking",
+    ),
     "structural_repairs": (
         "structural repair",
         "structural repairs",
@@ -329,7 +456,200 @@ _SERVICE_TERMS: dict[str, tuple[str, ...]] = {
         "load bearing",
         "foundation repair",
     ),
-    "general_home_repairs": ("home repair", "house repair", "repairs around the house"),
+    "general_home_repairs": (
+        "home repair",
+        "house repair",
+        "repairs around the house",
+        "water-damage repair",
+        "water-damage repairs",
+        "water damage repair",
+        "water damage repairs",
+        "storm-damage repair",
+        "storm-damage repairs",
+        "storm damage repair",
+        "storm damage repairs",
+        "inspection-report repair",
+        "inspection-report repairs",
+        "inspection report repair",
+        "inspection report repairs",
+    ),
+    "roof_repair": (
+        "roof repair",
+        "roof repairs",
+        "roofing repair",
+        "roof leak",
+        "leaking roof",
+        "roof damage",
+        "missing shingle",
+        "damaged shingle",
+        "shingle repair",
+    ),
+    "masonry": (
+        "masonry",
+        "mason",
+        "brick repair",
+        "brickwork",
+        "tuckpoint",
+        "mortar repair",
+        "block repair",
+        "concrete block",
+        "stone repair",
+        "stonework",
+        "chimney repair",
+        "paver installation",
+        "retaining wall",
+    ),
+    "exterior_repairs": (
+        "exterior caulking",
+        "weatherproofing",
+        "wood rot",
+        "fascia repair",
+        "soffit repair",
+        "exterior trim repair",
+        "siding repair",
+        "entryway repairs",
+        "screen replacement",
+        "weatherstripping replacement",
+        "caulk replacement",
+        "trim repair",
+    ),
+    "gutters_and_drainage": (
+        "gutter cleaning",
+        "gutter repair",
+        "downspout repair",
+        "drainage improvement",
+        "drainage improvements",
+        "drainage solution",
+    ),
+    "outdoor_structures": (
+        "exterior stair",
+        "handrail installation",
+        "ramp construction",
+        "pergola",
+        "privacy screen",
+        "outdoor storage",
+        "shed repair",
+    ),
+    "demolition": (
+        "demolition",
+        "wall removal",
+        "remove a wall",
+    ),
+    "installations_and_mounting": (
+        "shelving",
+        "storage system",
+        "workbench installation",
+        "tv mounting",
+        "mount a tv",
+        "mirror installation",
+        "picture hanging",
+        "artwork hanging",
+        "curtain rod",
+        "window blind",
+        "grab bar",
+        "towel bar",
+        "toilet-paper holder",
+        "toilet paper holder",
+        "bathroom accessory",
+        "attic ladder",
+        "attic access improvements",
+        "mailbox installation",
+        "house-number installation",
+        "house number installation",
+    ),
+    "insulation_and_air_sealing": (
+        "insulation",
+        "air-sealing",
+        "air sealing",
+        "soundproofing",
+    ),
+    "minor_plumbing_repairs": (
+        "minor leak repair",
+        "minor leak repairs",
+        "supply-line replacement",
+        "supply line replacement",
+        "shutoff-valve replacement",
+        "shutoff valve replacement",
+        "drain repair",
+        "minor clog",
+        "drain cleaning for minor clogs",
+        "sink drain replacement",
+        "toilet flange repair",
+    ),
+    "appliance_installation": (
+        "appliance installation",
+        "dishwasher installation",
+        "washing-machine hookup",
+        "washing machine hookup",
+        "dryer installation",
+        "refrigerator water-line hookup",
+        "refrigerator water line hookup",
+        "range hood installation",
+        "microwave installation",
+    ),
+    "electrical_fixtures": (
+        "light fixture replacement",
+        "lighting fixture replacement",
+        "ceiling fan installation",
+        "switch replacement",
+        "outlet replacement",
+        "dimmer switch installation",
+        "smoke detector installation",
+        "carbon-monoxide detector installation",
+        "carbon monoxide detector installation",
+        "recessed lighting installation",
+        "under-cabinet lighting installation",
+        "under cabinet lighting installation",
+    ),
+    "ventilation": (
+        "exterior vent installation",
+        "dryer vent",
+        "bathroom exhaust",
+    ),
+    "property_maintenance": (
+        "rental turnover",
+        "rental property maintenance",
+        "airbnb property maintenance",
+        "property inspection repair",
+        "property inspection repairs",
+        "home-sale preparation",
+        "home sale preparation",
+        "preventive maintenance",
+        "seasonal maintenance",
+        "move-in repair",
+        "move-in repairs",
+        "move-out repair",
+        "move-out repairs",
+        "emergency property securing",
+    ),
+    "cleanup_and_hauling": (
+        "yard waste removal",
+        "construction debris removal",
+        "job-site cleanup",
+        "job site cleanup",
+        "construction cleanup",
+        "debris hauling",
+        "material pickup and delivery",
+    ),
+    "project_coordination": (
+        "countertop installation coordination",
+        "water-heater installation coordination",
+        "water heater installation coordination",
+        "electrical troubleshooting coordination",
+        "plumbing repair coordination",
+        "hvac installation coordination",
+        "mini-split installation coordination",
+        "mini split installation coordination",
+        "project planning",
+        "remodeling consultation",
+        "remodeling consultations",
+        "repair assessment",
+        "repair assessments",
+        "project management",
+        "subcontractor coordination",
+        "multi-trade renovation coordination",
+        "multi trade renovation coordination",
+    ),
 }
 
 _DRAFT_SERVICE_NAMES: dict[str, str] = {
@@ -355,6 +675,21 @@ _DRAFT_SERVICE_NAMES: dict[str, str] = {
     "framing": "framing",
     "structural_repairs": "structural repairs",
     "general_home_repairs": "home repairs",
+    "roof_repair": "roof repairs",
+    "masonry": "masonry work",
+    "exterior_repairs": "exterior repairs",
+    "gutters_and_drainage": "gutter and drainage work",
+    "outdoor_structures": "outdoor structures",
+    "demolition": "demolition work",
+    "installations_and_mounting": "installation and mounting work",
+    "insulation_and_air_sealing": "insulation and air sealing",
+    "minor_plumbing_repairs": "minor plumbing repairs",
+    "appliance_installation": "appliance installation",
+    "electrical_fixtures": "electrical fixture work",
+    "ventilation": "ventilation work",
+    "property_maintenance": "property maintenance",
+    "cleanup_and_hauling": "cleanup and hauling",
+    "project_coordination": "project planning and coordination",
 }
 
 _LAWN_SERVICE_TERMS = (
@@ -393,6 +728,10 @@ class HeuristicAIProvider:
                 "commercial property",
                 "warehouse",
                 "industrial site",
+                "subcontractor",
+                "sub the job",
+                "vendor network",
+                "contractors wanted",
             )
         )
         is_spam = any(term in folded for term in ("click this link", "guaranteed income", "crypto"))
@@ -409,6 +748,7 @@ class HeuristicAIProvider:
             overall_score = min(overall_score, 5)
         elif intent in {
             LeadIntent.RESOLVED,
+            LeadIntent.PRIVATE_CONTACT_ONLY,
             LeadIntent.SELLING,
             LeadIntent.COMPETITOR_ADVERTISEMENT,
             LeadIntent.UNRELATED,
@@ -499,9 +839,10 @@ def _infer_service(text: str, enabled_services: tuple[str, ...]) -> str | None:
         matches: list[tuple[int, int]] = []
         for term in terms:
             escaped_term = re.escape(term.strip()).replace(r"\ ", r"\s+")
-            match = re.search(rf"(?<!\w){escaped_term}(?!\w)", text)
-            if match is not None:
-                matches.append((match.start(), len(term.strip())))
+            matches.extend(
+                (match.start(), len(term.strip()))
+                for match in re.finditer(rf"(?<!\w){escaped_term}(?!\w)", text)
+            )
         if not matches:
             continue
         earliest_position = min(position for position, _ in matches)
@@ -532,21 +873,88 @@ def _infer_intent(text: str, service: str | None) -> LeadIntent:
         return LeadIntent.RESOLVED
     if any(
         term in text
-        for term in ("i'm a contractor", "i am a contractor", "we offer", "call me for a quote")
+        for term in (
+            "do not comment",
+            "don't comment",
+            "do not respond to comments",
+            "don't respond to comments",
+            "dm inquiries only",
+            "private message only",
+        )
     ):
+        return LeadIntent.PRIVATE_CONTACT_ONLY
+    if _is_competitor_advertisement(text, service):
         return LeadIntent.COMPETITOR_ADVERTISEMENT
-    if any(term in text for term in ("for sale", "selling", "price is $")):
+    if any(
+        term in text
+        for term in (
+            "for sale",
+            "selling",
+            "price is $",
+            "open house",
+            "price improvement",
+            "zillow.com/homedetails",
+        )
+    ):
         return LeadIntent.SELLING
     if any(
         term in text
-        for term in ("what color", "what stain color", "how do i", "should i", "any tips")
+        for term in (
+            "what color",
+            "what stain color",
+            "how do i",
+            "should i",
+            "any tips",
+            "need advice",
+            "looking for advice",
+        )
     ):
         return LeadIntent.ADVICE
-    if any(term in text for term in ("looking for someone", "need someone", "need a ", "estimate")):
-        return LeadIntent.HIRING
-    if any(term in text for term in ("recommend", "anyone know", "who does", "who are you using")):
+    if any(
+        term in text
+        for term in (
+            "recommend",
+            "anyone know",
+            "who does",
+            "who are you using",
+            "who do you have",
+            "referral",
+        )
+    ):
         return LeadIntent.RECOMMENDATION
+    if any(
+        term in text
+        for term in (
+            "looking for someone",
+            "need someone",
+            "need a ",
+            "need of a ",
+            "estimate",
+        )
+    ) or (
+        service is not None and re.search(r"\b(?:looking for|need|seeking|iso)\b", text) is not None
+    ):
+        return LeadIntent.HIRING
     return LeadIntent.UNRELATED if service is None else LeadIntent.ADVICE
+
+
+def _is_competitor_advertisement(text: str, service: str | None) -> bool:
+    if service is None:
+        return False
+    strong_patterns = (
+        r"\bi(?:['\u2019]m| am) (?:a |an )?(?:contractor|handyman|landscaper|painter)\b",
+        r"\bwe offer\b",
+        r"\bour services (?:include|are)\b",
+        r"\b(?:call|text) (?:me|us) for (?:a )?(?:free )?(?:quote|estimate)\b",
+        r"\b(?:give|contact|get with) us (?:a call|for (?:a )?(?:free )?(?:quote|estimate))\b",
+        r"\bcontact us to schedule\b",
+        r"\bschedule your (?:free )?estimate\b",
+        r"\b(?:i|we) can schedule your estimate\b",
+        r"\bwe(?:['\u2019]d| would) love (?:the opportunity )?to earn your business\b",
+        r"\bwe(?:['\u2019]ll| will) (?:build|install|repair|replace|paint|remodel)\b",
+        r"#(?:freeestimate|licensedandinsured|familyownedandoperated)\b",
+    )
+    return any(re.search(pattern, text) for pattern in strong_patterns)
 
 
 def _infer_location(text: str, service_area: str) -> tuple[str | None, int]:
@@ -566,7 +974,7 @@ def _infer_location(text: str, service_area: str) -> tuple[str | None, int]:
 
 
 def _infer_urgency(text: str, intent: LeadIntent) -> int:
-    if any(term in text for term in ("today", "asap", "urgent", "emergency")):
+    if any(term in text for term in ("today", "asap", "urgent", "emergency", "desperate")):
         return 95
     if "this week" in text:
         return 90
