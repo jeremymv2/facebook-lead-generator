@@ -17,6 +17,13 @@ build/
 .env.*
 !.env.example
 config/groups.yaml
+credentials*.json
+client_secret*.json
+service-account*.json
+.envrc
+.netrc
+.npmrc
+.pypirc
 
 # Runtime state
 data/*
@@ -28,11 +35,29 @@ logs/
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal
+*.har
+*.jks
+*.kdbx
+*.key
+*.keystore
+*.log
+*.mobileprovision
+*.ovpn
+*.p12
+*.p8
+*.pem
+*.pfx
 
 # Browser credentials and session data (defense in depth)
 facebook-profile/
 playwright/.auth/
 storage-state*.json
+cookies*.json
+storage_state*.json
+
+# Secret scanner reports can contain sensitive metadata
+gitleaks-report.*
+*.sarif
 
 # Editors and macOS
 .DS_Store
