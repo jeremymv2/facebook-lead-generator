@@ -1,0 +1,27 @@
+[
+  {
+    "name": "strong_local_deck_lead",
+    "text": "Looking for someone in Louisville to repair and stain our deck. Would like an estimate this week.",
+    "expected": {"service": "decks", "intent": "hiring", "minimum_score": 80}
+  },
+  {
+    "name": "weak_hiring_intent",
+    "text": "Does anyone know what stain color looks good on cedar?",
+    "expected": {"intent": "advice", "maximum_score": 40}
+  },
+  {
+    "name": "irrelevant_sale",
+    "text": "I have a pressure washer for sale.",
+    "expected": {"intent": "selling", "maximum_score": 10}
+  },
+  {
+    "name": "wrong_geography",
+    "text": "Need drywall repair in Nashville.",
+    "expected": {"service": "drywall", "maximum_geographic_score": 20}
+  },
+  {
+    "name": "competitor_advertisement",
+    "text": "I'm a contractor offering deck staining. Call me for a quote.",
+    "expected": {"intent": "competitor_advertisement", "maximum_score": 10}
+  }
+]
