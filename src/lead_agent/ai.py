@@ -96,7 +96,9 @@ class DraftResponse(BaseModel):
             raise ValueError("draft must invite a text to the company phone number")
         if "free estimate" not in folded:
             raise ValueError("draft must state that estimates are free")
-        if re.match(r"^(?:hi|hello|hey)\b", folded) or "thanks for sharing" in folded:
+        if re.match(r"^(?:hi|hello|hey)\b", folded) or re.search(
+            r"\b(?:thanks|thank you)\b", folded
+        ):
             raise ValueError("draft must not begin with a generic greeting or filler")
         if re.search(r"\bmessage\b", folded):
             raise ValueError("draft must direct customers to text instead of Facebook messaging")
@@ -299,6 +301,16 @@ _SERVICE_TERMS: dict[str, tuple[str, ...]] = {
     "general_home_repairs": ("home repair", "house repair", "repairs around the house"),
 }
 
+_DRAFT_SERVICE_NAMES: dict[str, str] = {
+    "decks": "deck",
+    "doors": "door",
+    "general_home_repairs": "home repair",
+    "patios": "patio",
+    "porches": "porch",
+    "structural_repairs": "structural repair",
+    "windows": "window",
+}
+
 
 class HeuristicAIProvider:
     """Deterministic offline provider for safe development and regression testing."""
@@ -364,7 +376,10 @@ class HeuristicAIProvider:
         del context
         if classification.service_category is None:
             raise AIResponseError("Cannot draft a response without an enabled service")
-        service = classification.service_category.replace("_", " ")
+        service = _DRAFT_SERVICE_NAMES.get(
+            classification.service_category,
+            classification.service_category.replace("_", " "),
+        )
         variants = (
             f"JJ Miller & Co. can help with your {service} project. Free estimates. Text me at "
             f"{COMPANY_TEXT_PHONE} or visit {COMPANY_WEBSITE}.",

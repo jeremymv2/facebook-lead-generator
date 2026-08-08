@@ -119,6 +119,8 @@ def test_heuristic_draft_is_direct_and_locally_validated() -> None:
 
     assert not draft.response.startswith(("Hi ", "Hello ", "Hey "))
     assert "JJ Miller & Co." in draft.response
+    assert "deck" in draft.response
+    assert "decks" not in draft.response
     assert "https://jjmillerco.com" in draft.response
     assert "Text me at 502-528-0858" in draft.response
     assert "free estimate" in draft.response.casefold()
@@ -199,6 +201,11 @@ def test_draft_rejects_missing_identity_and_promotional_spam() -> None:
         (
             "Hi there, JJ Miller & Co. offers free estimates. Text me at 502-528-0858 or visit "
             "https://jjmillerco.com.",
+            "generic greeting",
+        ),
+        (
+            "JJ Miller & Co. says thanks and offers free estimates. Text me at 502-528-0858. "
+            "https://jjmillerco.com",
             "generic greeting",
         ),
         (
