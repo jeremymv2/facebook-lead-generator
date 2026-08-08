@@ -26,6 +26,10 @@ def test_doctor_reports_safe_state(
     assert payload["dry_run"] is True
     assert payload["posting_allowed"] is False
     assert payload["read_only_mode_ready"] is True
+    assert payload["posting_approval_max_age_minutes"] == 20
+    assert payload["daily_posting_limit"] == 5
+    assert payload["per_group_daily_posting_limit"] == 2
+    assert payload["business_timezone"] == "America/New_York"
     assert payload["ai_provider"] == "disabled"
     assert payload["ai_ready"] is False
 
@@ -166,6 +170,27 @@ def test_remote_approval_parser_accepts_safe_runtime_options() -> None:
     assert args.port == 9877
     assert args.limit == 4
     assert args.retry_failed is True
+
+
+def test_post_approved_parser_defaults_to_validation_only() -> None:
+    args = build_parser().parse_args(["post-approved", "--lead-id", "12"])
+
+    assert args.lead_id == 12
+    assert args.submit is False
+
+
+def test_post_approved_submit_requires_both_live_safety_flags(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FACEBOOK_PROFILE_PATH", str(tmp_path.parent / "browser-profile"))
+
+    result = main(["post-approved", "--lead-id", "12", "--submit"])
+
+    assert result == 2
+    assert "POSTING_ENABLED=false" in capsys.readouterr().err
 
 
 def test_classify_command_fails_closed_when_provider_is_disabled(

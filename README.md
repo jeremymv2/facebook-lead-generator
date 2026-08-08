@@ -5,14 +5,14 @@ explicitly approved set of Louisville-area Facebook groups. The intended product
 
 > Detect → classify → score → draft → notify → human approve/edit/reject → validate → post once
 
-This repository is currently at **Phase 6: tunneled mobile approval**. It includes safe
+This repository is currently at **Phase 7: idempotent approved posting**. It includes safe
 configuration, a dedicated persistent Playwright profile, explicit group allowlisting, visible-post
 extraction, alias-based SQLite duplicate prevention, durable per-group scan health, synthetic
 selector fixtures, swappable structured lead providers, candidate-only response drafting,
 an expiring loopback-only approve/edit/reject dashboard, a separately isolated tokenized mobile
 review origin, provider-independent SMS delivery with a Telnyx adapter, structured logging, tests,
-and CI. It does **not** include autonomous scheduling, inbound SMS commands, or Facebook comment
-posting.
+and CI. It now includes a manually invoked, triple-gated Facebook commenting path, but it does
+**not** include autonomous scheduling, inbound SMS commands, or autonomous posting.
 
 ## Safety status
 
@@ -21,8 +21,10 @@ The project fails closed:
 - `POSTING_ENABLED=false` by default.
 - `DRY_RUN=true` by default.
 - Both controls are checked independently by `Settings.require_posting_allowed()`.
-- The browser adapter exposes navigation and reading only; no comment or other submission
-  implementation exists.
+- Read-only Facebook code remains isolated from the separate posting adapter. A dry-run posting
+  validation locates but never clicks or fills the comment composer.
+- Facebook submission requires `POSTING_ENABLED=true`, `DRY_RUN=false`, and the explicit
+  `post-approved --submit` command. Every layer rechecks the configuration before submission.
 - Read-only commands refuse to start unless `POSTING_ENABLED=false` and `DRY_RUN=true`.
 - AI access defaults to `AI_PROVIDER=disabled`; classification requires an explicit offline or
   Gemini provider choice.
@@ -39,6 +41,11 @@ The project fails closed:
 - Only groups explicitly marked `enabled: true` in the local allowlist can be scanned.
 - Login pages, CAPTCHA, checkpoints, off-domain redirects, missing posts, and unreadable UI stop the
   scan and produce at most one local diagnostic screenshot.
+- Posting additionally requires a fresh immutable approval, an exact post/group identifier,
+  substantially unchanged source text, one recognizable composer, no visible duplicate response,
+  available daily limits, and a durable one-live-attempt reservation.
+- Once browser submission begins, an uncertain result is never retried automatically; the lead is
+  moved to `needs_attention` for manual inspection.
 - Browser profiles, cookies, databases, screenshots, `.env`, and local group configuration are
   excluded from Git.
 - The browser never enters Facebook credentials, handles MFA, solves CAPTCHA, bypasses checkpoints,
@@ -63,6 +70,8 @@ Mac
 ├── tokenized loopback origin for one tunneled mobile review at a time
 ├── provider-independent SMS service
 │   └── Telnyx adapter (disabled by default)
+├── SQLite-backed posting-attempt ledger and daily limits
+├── exact-post validation and separately gated Playwright comment adapter
 ├── JSON structured application logs
 ├── screenshots directory (gitignored)
 └── dedicated Playwright browser profile outside the repository (cookies; never committed)
@@ -126,6 +135,7 @@ Important settings include:
 | `APPROVAL_EXPIRATION_MINUTES` | `20` | Local review lifetime |
 | `APPROVAL_LOCAL_PORT` | `8765` | Loopback-only local review dashboard port |
 | `REMOTE_APPROVAL_PORT` | `8766` | Separate loopback origin intended for a secure relay |
+| `POSTING_APPROVAL_MAX_AGE_MINUTES` | `20` | Maximum terminal-approval age at posting time |
 | `REMOTE_APPROVAL_BASE_URL` | empty | Stable HTTPS relay origin used in SMS links |
 | `NOTIFICATIONS_ENABLED` | `false` | Explicit remote-notification switch |
 | `SMS_PROVIDER` | `disabled` | `disabled` or `telnyx` |
@@ -133,8 +143,9 @@ Important settings include:
 | `TELNYX_FROM_NUMBER` | empty | Registered Telnyx sender in E.164 format |
 | `TELNYX_API_KEY` | empty | Local Telnyx secret; never printed or stored in SQLite |
 | `APPROVAL_SIGNING_KEY` | empty | Local secret for token-bound form protection |
-| `DAILY_POSTING_LIMIT` | `5` | Planned global daily cap |
-| `PER_GROUP_DAILY_POSTING_LIMIT` | `2` | Planned per-group cap |
+| `DAILY_POSTING_LIMIT` | `5` | Global live-attempt cap per local calendar day |
+| `PER_GROUP_DAILY_POSTING_LIMIT` | `2` | Per-group live-attempt cap per local calendar day |
+| `BUSINESS_TIMEZONE` | `America/New_York` | Local calendar used by posting limits |
 | `FACEBOOK_PROFILE_PATH` | `~/.jjmiller-lead-agent/facebook-profile` | Dedicated persistent profile |
 | `BROWSER_HEADLESS` | `false` | Keeps manual login and scan behavior visible |
 | `FACEBOOK_MAX_SCROLLS` | `12` | Maximum bounded lazy-load scrolls per group |
@@ -175,10 +186,10 @@ idempotent. A second uniqueness constraint permits only one lead per post. Schem
 intent, residential/spam flags, provider/model metadata, and a classification-contract version.
 Schema version 5 adds immutable approval draft snapshots, expiration, and one terminal local
 decision per request. Schema version 6 adds hashed remote tokens and durable provider-delivery
-metadata without storing SMS bodies, destination numbers, or plaintext review tokens.
-
-The eventual posting workflow still requires posting-attempt records and final page validation;
-those will be implemented before any submission code exists.
+metadata without storing SMS bodies, destination numbers, or plaintext review tokens. Schema
+version 7 adds immutable posting inputs, dry-run outcomes, the no-retry submission boundary,
+evidence paths, safe error codes, and a partial uniqueness constraint that permits only one live
+attempt per lead.
 
 ## Development commands
 
@@ -404,7 +415,8 @@ change is written to the audit trail without logging source text or approved res
 
 The dashboard is intentionally local-only: it binds to `127.0.0.1`, has no configurable public host,
 uses an in-memory CSRF token, validates local Host/Origin headers, and imports no Facebook browser
-submission capability. Approval only updates SQLite; it cannot comment on Facebook.
+submission capability. An approval only updates SQLite; the separate posting command must still
+pass every posting interlock and validation.
 
 ## Test tunneled mobile approval and Telnyx
 
@@ -490,7 +502,56 @@ lead-agent remote-approval --retry-failed
 
 The tokenized service deliberately has no `/` dashboard or lead-list endpoint. A token expires with
 the 20-minute approval window and can produce only one approve, edit, or reject transition. Approval
-still cannot post anything to Facebook.
+never directly posts anything to Facebook.
+
+## Test approved posting safely
+
+Keep the safe defaults in `.env`:
+
+```dotenv
+POSTING_ENABLED=false
+DRY_RUN=true
+```
+
+Within 20 minutes after approving or editing a lead, run the validation-only command with its lead
+ID:
+
+```bash
+lead-agent post-approved --lead-id 123
+```
+
+The command opens the exact saved permalink and requires all of the following before it succeeds:
+
+- the group is still enabled in `config/groups.yaml`;
+- the immutable approval snapshot is still fresh;
+- the Facebook post ID and group match the saved target;
+- the visible source text is unchanged except for tightly bounded rendering drift;
+- no newly added resolution language says the customer already found help;
+- the exact approved response is not already visible in the comments; and
+- exactly one recognizable comment composer is present.
+
+On success it prints `DRY RUN`, captures a local pre-posting screenshot, and records a schema-v7
+dry-run attempt. It does not click, focus, fill, or submit the composer. Dry runs can be repeated and
+do not change the approved lead status or consume a live posting slot.
+
+Live submission is intentionally harder and should be used only after reviewing a successful dry
+run. It requires all three explicit controls:
+
+```dotenv
+POSTING_ENABLED=true
+DRY_RUN=false
+```
+
+```bash
+lead-agent post-approved --lead-id 123 --submit
+```
+
+SQLite reserves the lead before the browser opens, enforces global and per-group daily limits, and
+allows only one live attempt for that lead. Immediately before Playwright presses Enter, the
+service durably records the no-retry submission boundary. It then succeeds only if the exact
+approved response becomes visible in a Facebook comment article. Any uncertainty after that
+boundary becomes `needs_attention` and is never retried automatically. Restore the safe defaults
+after any controlled live test.
 
 ## Runtime and troubleshooting
 
@@ -512,9 +573,10 @@ is idempotent.
    classifications, draft only strong candidates, and remain incapable of Facebook submission.
 5. **Loopback-only local human approval:** snapshot drafts and support expiring,
    one-time approve/edit/reject decisions with no Facebook posting capability.
-6. **Tunneled remote/mobile approval (this milestone):** keep state on the Mac, send Telnyx alerts,
+6. **Tunneled remote/mobile approval:** keep state on the Mac, send Telnyx alerts,
    and expose only per-request cryptographic review URLs through an outbound HTTPS relay.
-7. Idempotent approved posting with final validation, limits, screenshots, and stop-on-uncertainty.
+7. **Idempotent approved posting (this milestone):** final validation, limits, screenshots,
+   one live attempt, and stop-on-uncertainty behavior.
 8. Notifications, `launchd`, retention, and operational health.
 
 The first browser milestone is successful only when a second read-only run stores no duplicate

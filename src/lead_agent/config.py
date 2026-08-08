@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, HttpUrl, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -74,8 +75,10 @@ class Settings(BaseSettings):
     approval_expiration_minutes: int = Field(default=20, ge=1, le=120)
     approval_local_port: int = Field(default=8765, ge=1024, le=65535)
     remote_approval_port: int = Field(default=8766, ge=1024, le=65535)
+    posting_approval_max_age_minutes: int = Field(default=20, ge=1, le=120)
     daily_posting_limit: int = Field(default=5, ge=1, le=100)
     per_group_daily_posting_limit: int = Field(default=2, ge=1, le=50)
+    business_timezone: str = "America/New_York"
     screenshot_retention_days: int = Field(default=14, ge=1, le=365)
 
     data_dir: Path = Path("data")
@@ -218,6 +221,16 @@ class Settings(BaseSettings):
         normalized = value.upper()
         if normalized not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
             raise ValueError("LOG_LEVEL must be a standard Python logging level")
+        return normalized
+
+    @field_validator("business_timezone")
+    @classmethod
+    def validate_business_timezone(cls, value: str) -> str:
+        normalized = value.strip()
+        try:
+            ZoneInfo(normalized)
+        except ZoneInfoNotFoundError as error:
+            raise ValueError("BUSINESS_TIMEZONE must be a valid IANA timezone") from error
         return normalized
 
     @property

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from collections.abc import Iterator
@@ -22,11 +23,14 @@ from lead_agent.models import (
     LeadIntent,
     LeadStatus,
     NotificationStatus,
+    PostingAttempt,
+    PostingAttemptStatus,
+    PostingWorkItem,
     PostStatus,
     utc_now,
 )
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +46,14 @@ class LeadSaveResult:
     """The persisted lead and whether this call inserted it."""
 
     lead: Lead
+    created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PostingAttemptSaveResult:
+    """The claimed posting work and whether this call created its attempt."""
+
+    work: PostingWorkItem
     created: bool
 
 
@@ -184,6 +196,38 @@ class Database:
                     FOREIGN KEY(approval_request_id)
                         REFERENCES approval_requests(id) ON DELETE RESTRICT
                 );
+
+                CREATE TABLE IF NOT EXISTS posting_attempts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    lead_id INTEGER NOT NULL,
+                    approval_request_id INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    dry_run INTEGER NOT NULL CHECK(dry_run IN (0, 1)),
+                    approved_response TEXT NOT NULL,
+                    approved_response_hash TEXT NOT NULL,
+                    source_text_hash TEXT NOT NULL,
+                    post_url TEXT NOT NULL,
+                    group_id TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    validated_at TEXT,
+                    submission_started_at TEXT,
+                    completed_at TEXT,
+                    facebook_reply_url TEXT,
+                    before_screenshot_path TEXT,
+                    after_screenshot_path TEXT,
+                    error_code TEXT,
+                    FOREIGN KEY(lead_id) REFERENCES leads(id) ON DELETE RESTRICT,
+                    FOREIGN KEY(approval_request_id)
+                        REFERENCES approval_requests(id) ON DELETE RESTRICT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_posting_attempts_started
+                    ON posting_attempts(started_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_posting_attempts_group_started
+                    ON posting_attempts(group_id, started_at DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_posting_attempts_one_live_per_lead
+                    ON posting_attempts(lead_id)
+                    WHERE dry_run = 0;
 
                 CREATE TABLE IF NOT EXISTS audit_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -972,6 +1016,373 @@ class Database:
                 for request_id in request_ids
             ]
 
+    def begin_posting_attempt(
+        self,
+        lead_id: int,
+        *,
+        dry_run: bool,
+        started_at: datetime,
+        oldest_approval_at: datetime,
+        day_started_at: datetime,
+        next_day_started_at: datetime,
+        daily_limit: int,
+        per_group_daily_limit: int,
+    ) -> PostingAttemptSaveResult:
+        """Atomically snapshot approved work and reserve one live-attempt slot."""
+        if daily_limit < 1 or per_group_daily_limit < 1:
+            raise ValueError("posting limits must be positive")
+        if not day_started_at <= started_at < next_day_started_at:
+            raise ValueError("posting day bounds must contain the attempt timestamp")
+
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if not dry_run:
+                existing = connection.execute(
+                    """
+                    SELECT id FROM posting_attempts
+                    WHERE lead_id = ? AND dry_run = 0
+                    """,
+                    (lead_id,),
+                ).fetchone()
+                if existing is not None:
+                    return PostingAttemptSaveResult(
+                        work=_posting_work_from_connection(connection, int(existing["id"])),
+                        created=False,
+                    )
+
+            lead_row = connection.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
+            if lead_row is None:
+                raise LookupError(f"Lead {lead_id} does not exist")
+            lead = _lead_from_row(lead_row)
+            if lead.status not in {LeadStatus.APPROVED, LeadStatus.EDITED}:
+                raise ValueError("Only approved or edited leads can enter posting")
+            if lead.approved_response is None or lead.approval_timestamp is None:
+                raise ValueError("Approved posting requires a response and approval timestamp")
+            if lead.approval_timestamp < oldest_approval_at:
+                raise ValueError("Approval is stale; re-review is required before posting")
+
+            post_row = connection.execute(
+                "SELECT * FROM facebook_posts WHERE id = ?", (lead.facebook_post_id,)
+            ).fetchone()
+            if post_row is None:  # pragma: no cover - foreign key constraint
+                raise RuntimeError("Lead is missing its Facebook post")
+            post = _post_from_row(post_row)
+            if post.post_url is None:
+                raise ValueError("Approved posting requires an exact Facebook post URL")
+
+            approval_row = connection.execute(
+                """
+                SELECT * FROM approval_requests
+                WHERE lead_id = ? AND status IN (?, ?)
+                ORDER BY decided_at DESC, id DESC
+                LIMIT 1
+                """,
+                (
+                    lead_id,
+                    ApprovalStatus.APPROVED.value,
+                    ApprovalStatus.EDITED.value,
+                ),
+            ).fetchone()
+            if approval_row is None:
+                raise ValueError("Approved lead is missing its terminal approval request")
+            approval = _approval_request_from_row(approval_row)
+            if (
+                approval.id is None
+                or approval.decided_at != lead.approval_timestamp
+                or approval.decided_response != lead.approved_response
+            ):
+                raise ValueError("Lead approval does not match its immutable review decision")
+
+            if not dry_run:
+                live_today = connection.execute(
+                    """
+                    SELECT COUNT(*) AS total FROM posting_attempts
+                    WHERE dry_run = 0 AND started_at >= ? AND started_at < ?
+                    """,
+                    (
+                        _serialize_datetime(day_started_at),
+                        _serialize_datetime(next_day_started_at),
+                    ),
+                ).fetchone()
+                if live_today is None or int(live_today["total"]) >= daily_limit:
+                    raise ValueError("Global daily posting limit has been reached")
+                group_today = connection.execute(
+                    """
+                    SELECT COUNT(*) AS total FROM posting_attempts
+                    WHERE dry_run = 0 AND group_id = ?
+                      AND started_at >= ? AND started_at < ?
+                    """,
+                    (
+                        post.group_id,
+                        _serialize_datetime(day_started_at),
+                        _serialize_datetime(next_day_started_at),
+                    ),
+                ).fetchone()
+                if group_today is None or int(group_today["total"]) >= per_group_daily_limit:
+                    raise ValueError("Per-group daily posting limit has been reached")
+
+            response_hash = hashlib.sha256(lead.approved_response.encode("utf-8")).hexdigest()
+            cursor = connection.execute(
+                """
+                INSERT INTO posting_attempts (
+                    lead_id, approval_request_id, status, dry_run,
+                    approved_response, approved_response_hash, source_text_hash,
+                    post_url, group_id, started_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lead_id,
+                    approval.id,
+                    PostingAttemptStatus.VALIDATING.value,
+                    dry_run,
+                    lead.approved_response,
+                    response_hash,
+                    post.text_hash,
+                    post.post_url,
+                    post.group_id,
+                    _serialize_datetime(started_at),
+                ),
+            )
+            attempt_id = cursor.lastrowid
+            if attempt_id is None:  # pragma: no cover - SQLite insert contract
+                raise RuntimeError("Failed to retrieve posting attempt ID")
+            if not dry_run:
+                connection.execute(
+                    """
+                    UPDATE leads SET status = ?, posting_timestamp = ?, updated_at = ?,
+                        error_state = NULL
+                    WHERE id = ?
+                    """,
+                    (
+                        LeadStatus.POSTING.value,
+                        _serialize_datetime(started_at),
+                        _serialize_datetime(started_at),
+                        lead_id,
+                    ),
+                )
+            return PostingAttemptSaveResult(
+                work=_posting_work_from_connection(connection, int(attempt_id)),
+                created=True,
+            )
+
+    def get_posting_attempt(self, attempt_id: int) -> PostingAttempt | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM posting_attempts WHERE id = ?", (attempt_id,)
+            ).fetchone()
+        return _posting_attempt_from_row(row) if row is not None else None
+
+    def list_posting_attempts(self, *, lead_id: int | None = None) -> list[PostingAttempt]:
+        with self.connection() as connection:
+            if lead_id is None:
+                rows = connection.execute(
+                    "SELECT * FROM posting_attempts ORDER BY started_at, id"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM posting_attempts
+                    WHERE lead_id = ? ORDER BY started_at, id
+                    """,
+                    (lead_id,),
+                ).fetchall()
+        return [_posting_attempt_from_row(row) for row in rows]
+
+    def complete_posting_validation(
+        self,
+        attempt_id: int,
+        *,
+        validated_at: datetime,
+        before_screenshot_path: str | None,
+    ) -> PostingAttempt:
+        """Record exact-post and composer validation before any Facebook write action."""
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM posting_attempts WHERE id = ?", (attempt_id,)
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"Posting attempt {attempt_id} does not exist")
+            attempt = _posting_attempt_from_row(row)
+            if attempt.status is not PostingAttemptStatus.VALIDATING:
+                raise ValueError("Posting attempt is not awaiting validation")
+            status = (
+                PostingAttemptStatus.DRY_RUN_VALIDATED
+                if attempt.dry_run
+                else PostingAttemptStatus.VALIDATING
+            )
+            connection.execute(
+                """
+                UPDATE posting_attempts SET status = ?, validated_at = ?,
+                    completed_at = ?, before_screenshot_path = ?
+                WHERE id = ?
+                """,
+                (
+                    status.value,
+                    _serialize_datetime(validated_at),
+                    _serialize_datetime(validated_at) if attempt.dry_run else None,
+                    before_screenshot_path,
+                    attempt_id,
+                ),
+            )
+            updated = connection.execute(
+                "SELECT * FROM posting_attempts WHERE id = ?", (attempt_id,)
+            ).fetchone()
+            if updated is None:  # pragma: no cover - protected by transaction
+                raise RuntimeError("Failed to retrieve validated posting attempt")
+            return _posting_attempt_from_row(updated)
+
+    def mark_posting_submission_started(
+        self,
+        attempt_id: int,
+        *,
+        started_at: datetime,
+    ) -> PostingAttempt:
+        """Durably cross the no-retry boundary immediately before browser submission."""
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM posting_attempts WHERE id = ?", (attempt_id,)
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"Posting attempt {attempt_id} does not exist")
+            attempt = _posting_attempt_from_row(row)
+            if (
+                attempt.dry_run
+                or attempt.status is not PostingAttemptStatus.VALIDATING
+                or attempt.validated_at is None
+                or attempt.submission_started_at is not None
+            ):
+                raise ValueError("Posting attempt is not ready for submission")
+            connection.execute(
+                """
+                UPDATE posting_attempts SET status = ?, submission_started_at = ?
+                WHERE id = ?
+                """,
+                (
+                    PostingAttemptStatus.SUBMITTING.value,
+                    _serialize_datetime(started_at),
+                    attempt_id,
+                ),
+            )
+            updated = connection.execute(
+                "SELECT * FROM posting_attempts WHERE id = ?", (attempt_id,)
+            ).fetchone()
+            if updated is None:  # pragma: no cover - protected by transaction
+                raise RuntimeError("Failed to retrieve submitting attempt")
+            return _posting_attempt_from_row(updated)
+
+    def complete_posting_attempt(
+        self,
+        attempt_id: int,
+        *,
+        completed_at: datetime,
+        facebook_reply_url: str | None,
+        after_screenshot_path: str | None,
+    ) -> PostingWorkItem:
+        """Atomically mark a verified Facebook comment and its lead posted."""
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM posting_attempts WHERE id = ?", (attempt_id,)
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"Posting attempt {attempt_id} does not exist")
+            attempt = _posting_attempt_from_row(row)
+            if attempt.status is not PostingAttemptStatus.SUBMITTING or attempt.dry_run:
+                raise ValueError("Posting attempt is not awaiting verified completion")
+            connection.execute(
+                """
+                UPDATE posting_attempts SET status = ?, completed_at = ?,
+                    facebook_reply_url = ?, after_screenshot_path = ?, error_code = NULL
+                WHERE id = ?
+                """,
+                (
+                    PostingAttemptStatus.POSTED.value,
+                    _serialize_datetime(completed_at),
+                    facebook_reply_url,
+                    after_screenshot_path,
+                    attempt_id,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE leads SET status = ?, posting_timestamp = ?, facebook_reply_url = ?,
+                    screenshot_path = ?, updated_at = ?, error_state = NULL
+                WHERE id = ?
+                """,
+                (
+                    LeadStatus.POSTED.value,
+                    _serialize_datetime(completed_at),
+                    facebook_reply_url,
+                    after_screenshot_path,
+                    _serialize_datetime(completed_at),
+                    attempt.lead_id,
+                ),
+            )
+            return _posting_work_from_connection(connection, attempt_id)
+
+    def fail_posting_attempt(
+        self,
+        attempt_id: int,
+        *,
+        failed_at: datetime,
+        error_code: str,
+        after_screenshot_path: str | None = None,
+    ) -> PostingWorkItem:
+        """Fail closed; a post-submit uncertainty is permanently marked for attention."""
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM posting_attempts WHERE id = ?", (attempt_id,)
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"Posting attempt {attempt_id} does not exist")
+            attempt = _posting_attempt_from_row(row)
+            if attempt.status in {
+                PostingAttemptStatus.POSTED,
+                PostingAttemptStatus.DRY_RUN_VALIDATED,
+                PostingAttemptStatus.FAILED,
+                PostingAttemptStatus.NEEDS_ATTENTION,
+            }:
+                return _posting_work_from_connection(connection, attempt_id)
+            status = (
+                PostingAttemptStatus.NEEDS_ATTENTION
+                if attempt.submission_started_at is not None
+                else PostingAttemptStatus.FAILED
+            )
+            connection.execute(
+                """
+                UPDATE posting_attempts SET status = ?, completed_at = ?,
+                    after_screenshot_path = COALESCE(?, after_screenshot_path),
+                    error_code = ?
+                WHERE id = ?
+                """,
+                (
+                    status.value,
+                    _serialize_datetime(failed_at),
+                    after_screenshot_path,
+                    error_code,
+                    attempt_id,
+                ),
+            )
+            if not attempt.dry_run:
+                connection.execute(
+                    """
+                    UPDATE leads SET status = ?, updated_at = ?, error_state = ?,
+                        screenshot_path = COALESCE(?, screenshot_path)
+                    WHERE id = ?
+                    """,
+                    (
+                        LeadStatus.NEEDS_ATTENTION.value,
+                        _serialize_datetime(failed_at),
+                        error_code,
+                        after_screenshot_path,
+                        attempt.lead_id,
+                    ),
+                )
+            return _posting_work_from_connection(connection, attempt_id)
+
     def record_audit_event(self, event: AuditEvent) -> AuditEvent:
         """Append an immutable structured event to the audit trail."""
         with self.connection() as connection:
@@ -1269,6 +1680,51 @@ def _approval_notification_from_row(row: sqlite3.Row) -> ApprovalNotification:
         provider_message_id=row["provider_message_id"],
         error_code=row["error_code"],
     )
+
+
+def _posting_attempt_from_row(row: sqlite3.Row) -> PostingAttempt:
+    return PostingAttempt(
+        id=row["id"],
+        lead_id=row["lead_id"],
+        approval_request_id=row["approval_request_id"],
+        status=PostingAttemptStatus(row["status"]),
+        dry_run=bool(row["dry_run"]),
+        approved_response=row["approved_response"],
+        approved_response_hash=row["approved_response_hash"],
+        source_text_hash=row["source_text_hash"],
+        post_url=row["post_url"],
+        group_id=row["group_id"],
+        started_at=datetime.fromisoformat(row["started_at"]),
+        validated_at=_parse_datetime(row["validated_at"]),
+        submission_started_at=_parse_datetime(row["submission_started_at"]),
+        completed_at=_parse_datetime(row["completed_at"]),
+        facebook_reply_url=row["facebook_reply_url"],
+        before_screenshot_path=row["before_screenshot_path"],
+        after_screenshot_path=row["after_screenshot_path"],
+        error_code=row["error_code"],
+    )
+
+
+def _posting_work_from_connection(
+    connection: sqlite3.Connection,
+    attempt_id: int,
+) -> PostingWorkItem:
+    attempt_row = connection.execute(
+        "SELECT * FROM posting_attempts WHERE id = ?", (attempt_id,)
+    ).fetchone()
+    if attempt_row is None:  # pragma: no cover - protected by caller query
+        raise RuntimeError("Failed to retrieve posting attempt")
+    attempt = _posting_attempt_from_row(attempt_row)
+    lead_row = connection.execute("SELECT * FROM leads WHERE id = ?", (attempt.lead_id,)).fetchone()
+    if lead_row is None:  # pragma: no cover - foreign key constraint
+        raise RuntimeError("Posting attempt is missing its lead")
+    lead = _lead_from_row(lead_row)
+    post_row = connection.execute(
+        "SELECT * FROM facebook_posts WHERE id = ?", (lead.facebook_post_id,)
+    ).fetchone()
+    if post_row is None:  # pragma: no cover - foreign key constraint
+        raise RuntimeError("Posting attempt lead is missing its Facebook post")
+    return PostingWorkItem(attempt=attempt, lead=lead, post=_post_from_row(post_row))
 
 
 def _approval_review_from_connection(

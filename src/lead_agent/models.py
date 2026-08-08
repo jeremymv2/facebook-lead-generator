@@ -92,6 +92,17 @@ class NotificationStatus(StrEnum):
     FAILED = "failed"
 
 
+class PostingAttemptStatus(StrEnum):
+    """Durable stages for one dry-run validation or live Facebook posting attempt."""
+
+    VALIDATING = "validating"
+    DRY_RUN_VALIDATED = "dry_run_validated"
+    SUBMITTING = "submitting"
+    POSTED = "posted"
+    FAILED = "failed"
+    NEEDS_ATTENTION = "needs_attention"
+
+
 @dataclass(slots=True)
 class FacebookPost:
     group_id: str
@@ -237,6 +248,48 @@ class ApprovalNotification:
             raise ValueError("provider cannot be empty")
         if self.attempt_count < 1:
             raise ValueError("attempt_count must be positive")
+
+
+@dataclass(slots=True)
+class PostingAttempt:
+    """Immutable-input ledger plus mutable outcome for one posting workflow execution."""
+
+    lead_id: int
+    approval_request_id: int
+    status: PostingAttemptStatus
+    dry_run: bool
+    approved_response: str
+    approved_response_hash: str
+    source_text_hash: str
+    post_url: str
+    group_id: str
+    started_at: datetime
+    validated_at: datetime | None = None
+    submission_started_at: datetime | None = None
+    completed_at: datetime | None = None
+    facebook_reply_url: str | None = None
+    before_screenshot_path: str | None = None
+    after_screenshot_path: str | None = None
+    error_code: str | None = None
+    id: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.lead_id < 1 or self.approval_request_id < 1:
+            raise ValueError("posting attempt IDs must be positive")
+        self.approved_response = self.approved_response.strip()
+        if not self.approved_response:
+            raise ValueError("approved_response cannot be empty")
+        if not self.post_url.strip() or not self.group_id.strip():
+            raise ValueError("posting attempts require a post URL and group")
+
+
+@dataclass(frozen=True, slots=True)
+class PostingWorkItem:
+    """A posting attempt joined to the exact approved lead and source post."""
+
+    attempt: PostingAttempt
+    lead: Lead
+    post: FacebookPost
 
 
 @dataclass(slots=True)

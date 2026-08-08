@@ -24,6 +24,10 @@ def test_safe_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert settings.approval_expiration_minutes == 20
     assert settings.approval_local_port == 8765
     assert settings.remote_approval_port == 8766
+    assert settings.posting_approval_max_age_minutes == 20
+    assert settings.daily_posting_limit == 5
+    assert settings.per_group_daily_posting_limit == 2
+    assert settings.business_timezone == "America/New_York"
     assert settings.browser_channel is None
     assert settings.browser_headless is False
     assert settings.facebook_max_scrolls == 12
@@ -34,6 +38,13 @@ def test_safe_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert settings.ai_max_posts_per_run == 20
     assert settings.sms_provider == "disabled"
     assert settings.remote_approval_ready is False
+
+
+def test_business_timezone_must_be_valid(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError, match="IANA timezone"):
+        Settings(_env_file=None, business_timezone="Louisville/Invalid")
 
 
 @pytest.mark.parametrize(
