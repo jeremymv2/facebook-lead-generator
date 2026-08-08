@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,7 @@ def test_initialize_is_idempotent_and_records_schema_version(database: Database)
 
     assert row is not None
     assert row["value"] == str(SCHEMA_VERSION)
+    assert database.path.stat().st_mode & 0o777 == 0o600
 
 
 def test_post_discovery_is_deduplicated(database: Database) -> None:
@@ -168,3 +170,55 @@ def test_audit_events_append_structured_details(database: Database) -> None:
 def test_list_posts_rejects_non_positive_limit(database: Database) -> None:
     with pytest.raises(ValueError, match="positive"):
         database.list_posts(limit=0)
+
+
+def test_group_scan_state_preserves_success_across_failure(database: Database) -> None:
+    success_at = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
+    failure_at = datetime(2026, 8, 7, 12, 5, tzinfo=UTC)
+    database.record_group_scan_success(
+        group_id="group-123",
+        group_name="Louisville Homeowners",
+        group_url="https://www.facebook.com/groups/123",
+        posts_seen=8,
+        posts_new=3,
+        last_known_post_identity="facebook-id:123",
+        occurred_at=success_at,
+    )
+
+    failed = database.record_group_scan_failure(
+        group_id="group-123",
+        group_name="Louisville Homeowners",
+        group_url="https://www.facebook.com/groups/123",
+        error="FacebookSafetyStop:checkpoint",
+        occurred_at=failure_at,
+    )
+
+    assert failed.last_attempt_at == failure_at
+    assert failed.last_success_at == success_at
+    assert failed.last_known_post_identity == "facebook-id:123"
+    assert failed.last_error == "FacebookSafetyStop:checkpoint"
+    assert failed.posts_seen == 0
+    assert failed.posts_new == 0
+
+
+def test_empty_success_preserves_last_known_post(database: Database) -> None:
+    database.record_group_scan_success(
+        group_id="group-123",
+        group_name="Louisville Homeowners",
+        group_url="https://www.facebook.com/groups/123",
+        posts_seen=1,
+        posts_new=1,
+        last_known_post_identity="facebook-id:123",
+    )
+
+    state = database.record_group_scan_success(
+        group_id="group-123",
+        group_name="Louisville Homeowners",
+        group_url="https://www.facebook.com/groups/123",
+        posts_seen=0,
+        posts_new=0,
+        last_known_post_identity=None,
+    )
+
+    assert state.last_known_post_identity == "facebook-id:123"
+    assert state.last_error is None

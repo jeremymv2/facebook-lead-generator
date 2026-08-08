@@ -3,7 +3,11 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from lead_agent.config import PostingDisabledError, Settings
+from lead_agent.config import (
+    PostingDisabledError,
+    Settings,
+    UnsafeReadOnlyModeError,
+)
 
 
 def test_safe_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -16,6 +20,10 @@ def test_safe_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert settings.posting_allowed is False
     assert settings.scan_interval_seconds == 300
     assert settings.lead_threshold == 75
+    assert settings.browser_channel is None
+    assert settings.browser_headless is False
+    assert settings.facebook_max_scrolls == 12
+    assert settings.facebook_scroll_settle_seconds == 0.75
 
 
 @pytest.mark.parametrize(
@@ -52,6 +60,60 @@ def test_posting_requires_two_explicit_configuration_changes(
     settings.require_posting_allowed()
 
     assert settings.posting_allowed is True
+
+
+@pytest.mark.parametrize(
+    ("posting_enabled", "dry_run", "expected_message"),
+    [
+        (True, True, "POSTING_ENABLED=false"),
+        (False, False, "DRY_RUN=true"),
+    ],
+)
+def test_read_only_browser_requires_both_safe_flags(
+    posting_enabled: bool,
+    dry_run: bool,
+    expected_message: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    settings = Settings(
+        _env_file=None,
+        posting_enabled=posting_enabled,
+        dry_run=dry_run,
+    )
+
+    with pytest.raises(UnsafeReadOnlyModeError, match=expected_message):
+        settings.require_read_only_mode()
+
+
+def test_read_only_browser_accepts_safe_flags(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    settings = Settings(_env_file=None, posting_enabled=False, dry_run=True)
+
+    settings.require_read_only_mode()
+
+
+def test_empty_browser_channel_uses_bundled_chromium(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_env_file=None, browser_channel="  ")
+
+    assert settings.browser_channel is None
+
+
+def test_empty_optional_url_is_not_treated_as_a_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_env_file=None, approval_api_url="")
+
+    assert settings.approval_api_url is None
 
 
 def test_environment_overrides_and_comma_separated_services(

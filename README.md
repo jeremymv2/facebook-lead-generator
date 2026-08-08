@@ -5,10 +5,10 @@ explicitly approved set of Louisville-area Facebook groups. The intended product
 
 > Detect → classify → score → draft → notify → human approve/edit/reject → validate → post once
 
-This repository is currently at **Phase 1: repository bootstrap**. It includes safe configuration,
-domain models, SQLite persistence, duplicate prevention, structured logging, tests, and CI. It does
-**not** include Facebook scraping, browser automation, AI calls, remote approvals, notifications, or
-comment posting yet.
+This repository is currently at **Phase 2: read-only Facebook proof of concept**. It includes safe
+configuration, a dedicated persistent Playwright profile, explicit group allowlisting, visible-post
+extraction, SQLite persistence and duplicate prevention, structured logging, tests, and CI. It does
+**not** include AI calls, remote approvals, notifications, scheduling, or Facebook comment posting.
 
 ## Safety status
 
@@ -17,11 +17,16 @@ The project fails closed:
 - `POSTING_ENABLED=false` by default.
 - `DRY_RUN=true` by default.
 - Both controls are checked independently by `Settings.require_posting_allowed()`.
-- No Facebook submission implementation exists in this milestone.
+- The browser adapter exposes navigation and reading only; no comment or other submission
+  implementation exists.
+- Read-only commands refuse to start unless `POSTING_ENABLED=false` and `DRY_RUN=true`.
+- Only groups explicitly marked `enabled: true` in the local allowlist can be scanned.
+- Login pages, CAPTCHA, checkpoints, off-domain redirects, missing posts, and unreadable UI stop the
+  scan and produce at most one local diagnostic screenshot.
 - Browser profiles, cookies, databases, screenshots, `.env`, and local group configuration are
   excluded from Git.
-- Future browser automation must stop on login challenges, CAPTCHA, checkpoints, missing controls,
-  or unexpected Facebook pages. It must never attempt to bypass platform security.
+- The browser never enters Facebook credentials, handles MFA, solves CAPTCHA, bypasses checkpoints,
+  or attempts to defeat platform security.
 
 Browser automation may violate Facebook rules or place the account at risk. Account preservation
 and human review take priority over lead volume.
@@ -36,20 +41,19 @@ Mac
 ├── SQLite posts, leads, workflow state, and audit events
 ├── JSON structured application logs
 ├── screenshots directory (gitignored)
-└── dedicated Facebook browser profile outside the repository (future phase)
+└── dedicated Playwright browser profile outside the repository (cookies; never committed)
 ```
 
-Core business models have no browser dependency. A later Playwright adapter will produce plain
-`FacebookPost` records and pass them to the persistence layer. This keeps most tests independent of
-Facebook and makes UI selector changes replaceable.
+The Playwright adapter produces plain `FacebookPost` records and passes them to a browser-independent
+scan service and persistence layer. Pure page-state, URL, and text helpers plus a fake reader keep
+the automated test suite independent of live Facebook.
 
 ## Requirements
 
 - macOS (the intended production host) or Linux for development
 - Python 3.12+
 - Git
-
-Playwright is deliberately not installed in this phase.
+- A Facebook account that you log into manually
 
 ## Setup
 
@@ -68,6 +72,7 @@ Or perform the same setup manually:
 python3.12 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/playwright install chromium
 .venv/bin/pre-commit install --hook-type pre-commit --hook-type pre-push
 cp .env.example .env
 .venv/bin/lead-agent init-db
@@ -92,7 +97,12 @@ Important settings include:
 | `APPROVAL_EXPIRATION_MINUTES` | `20` | Planned approval lifetime |
 | `DAILY_POSTING_LIMIT` | `5` | Planned global daily cap |
 | `PER_GROUP_DAILY_POSTING_LIMIT` | `2` | Planned per-group cap |
-| `FACEBOOK_PROFILE_PATH` | `~/.jjmiller-lead-agent/facebook-profile` | Future persistent profile |
+| `FACEBOOK_PROFILE_PATH` | `~/.jjmiller-lead-agent/facebook-profile` | Dedicated persistent profile |
+| `BROWSER_HEADLESS` | `false` | Keeps manual login and scan behavior visible |
+| `FACEBOOK_MAX_SCROLLS` | `12` | Maximum bounded lazy-load scrolls per group |
+| `FACEBOOK_SCROLL_SETTLE_SECONDS` | `0.75` | Wait after each bounded scroll |
+| `MAX_POSTS_PER_GROUP` | `20` | Conservative visible-post cap per run |
+| `MIN_POST_TEXT_LENGTH` | `15` | Ignores very short UI fragments |
 
 The browser profile validator rejects paths inside the repository because a persistent profile
 contains authentication cookies and other sensitive session data.
@@ -112,6 +122,7 @@ SQLite currently stores:
 - Discovered Facebook posts and durable processing state.
 - Leads, classification fields, response fields, approval/posting timestamps, errors, and retries.
 - Append-only audit events with structured JSON details.
+- Per-group last attempt, last success, last-known post, safe error type, and scan counts.
 - A schema version for future migrations.
 
 Post identity prefers a Facebook post ID, then a canonical post URL, then a deterministic hash of
@@ -183,16 +194,81 @@ and force pushes, and require both `checks` and `Gitleaks full history` before m
 If a scanner reports a real credential, do not merely delete the file: revoke or rotate the
 credential first. Follow [SECURITY.md](SECURITY.md) for containment and Git-history cleanup.
 
-## Facebook login and browser profile
+## Test the read-only Facebook scanner
 
-Playwright setup and manual Facebook login arrive in the read-only proof-of-concept milestone. The
-profile will live at `FACEBOOK_PROFILE_PATH` outside Git and persist the normal login session. The
-software will never solve CAPTCHA, bypass MFA, or defeat account checkpoints; it will pause and
-alert Jeremy instead.
+Keep your normal browser out of this workflow. Playwright uses the separate directory in
+`FACEBOOK_PROFILE_PATH`; only one process can use that directory at a time.
+
+1. Confirm `.env` retains the safety settings:
+
+   ```dotenv
+   POSTING_ENABLED=false
+   DRY_RUN=true
+   BROWSER_HEADLESS=false
+   ```
+
+2. Copy and edit the private group allowlist. Use the real Facebook group URL and set only the group
+   you approve to `enabled: true`:
+
+   ```bash
+   cp config/groups.example.yaml config/groups.yaml
+   ```
+
+3. Check the non-secret configuration, then open the dedicated profile and log in yourself. Enter
+   credentials and MFA only in the visible browser window; return to the terminal and press Enter
+   after Facebook has fully loaded:
+
+   ```bash
+   lead-agent doctor
+   lead-agent facebook-login
+   ```
+
+4. Scan one allowlisted group conservatively:
+
+   ```bash
+   lead-agent scan-facebook --group-id louisville-homeowners-example --max-posts 10
+   ```
+
+   Replace the example ID with the `id` in your `config/groups.yaml`. The command prints the counts
+   and text only for newly stored posts.
+
+5. Run the same command again. A successful deduplication check reports `new=0` for unchanged posts
+   and does not add duplicate rows.
+
+If the browser closes before you can inspect what Facebook rendered, pause it explicitly:
+
+```bash
+lead-agent scan-facebook --group-id louisville-homeowners-example --max-posts 10 --pause-after-scan
+```
+
+The browser remains open until you return to the terminal and press Enter. The pause does not enable
+clicking, typing, commenting, or any other automated Facebook write action.
+
+The scanner waits through Facebook's initial placeholder rendering and requires at least one
+text-bearing post. If containers appear but readable post text never loads, the run stops safely and
+captures a local screenshot instead of recording a misleading successful zero-post scan.
+Top-level post text is isolated from nested comment articles so a long reply is never paired with
+the parent post's permalink. Facebook comment and reply articles are also rejected by their
+semantic `aria-label`, including when Facebook exposes them outside the parent article subtree.
+Current Facebook group feeds are read from semantic `story_message` nodes and paired with the
+nearest owning group-post permalink; role-based article extraction remains a guarded fallback.
+When Facebook exposes no post permalink, the scanner leaves the URL empty and uses the normalized
+top-level text hash for deduplication; it never substitutes a comment, photo, or unrelated URL.
+`--max-posts` is a target and hard cap: the scanner accumulates unique posts across bounded
+sub-viewport scrolls until it reaches the target, its scroll limit, or its load timeout. It rechecks
+login, CAPTCHA, checkpoint, redirect, and page state after every scroll.
+
+To scan every enabled group sequentially, omit `--group-id`. The current proof of concept is manual;
+it does not yet run every five minutes.
+
+If the scan stops safely, do not automate around the challenge. Review the terminal reason and the
+single PNG in `screenshots/` if one was captured, then resolve login, MFA, CAPTCHA, or checkpoint
+manually. Screenshots are local, ignored by Git, and cleaned up according to
+`SCREENSHOT_RETENTION_DAYS`.
 
 ## Runtime and troubleshooting
 
-The bootstrap runs manually. A later reliability milestone will supply a `launchd` service with
+The scanner runs manually. A later reliability milestone will supply a `launchd` service with
 bounded restart behavior, pause controls, health monitoring, log retention, and screenshot cleanup.
 
 For current configuration errors, run `lead-agent doctor`. For database initialization errors,
@@ -201,10 +277,10 @@ is idempotent.
 
 ## Roadmap
 
-1. **Repository bootstrap (this milestone):** config, models, SQLite, logging, tests, CI.
-2. **Read-only Playwright proof of concept:** manually log in, scan one configured group, extract
-   visible posts and URLs, save only new posts, and never comment.
-3. Deduplication and group scan state hardening.
+1. **Repository bootstrap:** config, models, SQLite, logging, tests, CI.
+2. **Read-only Playwright proof of concept (this milestone):** manually log in, scan configured
+   groups, extract visible posts and URLs, save only new posts, and never comment.
+3. Selector fixture expansion, deduplication edge cases, and group scan state hardening.
 4. Swappable AI classification/scoring and drafting providers.
 5. Local then remote human approval with expiring one-time tokens.
 6. Idempotent approved posting with final validation, limits, screenshots, and stop-on-uncertainty.
