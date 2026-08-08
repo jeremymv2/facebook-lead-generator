@@ -1,0 +1,190 @@
+import socket
+from datetime import UTC, datetime
+from http import HTTPStatus
+from http.server import HTTPServer
+from pathlib import Path
+from typing import cast
+from urllib.parse import urlencode
+
+import pytest
+
+from lead_agent.approval_web import (
+    LOOPBACK_HOST,
+    CSRFFailure,
+    LocalApprovalController,
+    _handler_class,
+)
+from lead_agent.approvals import ApprovalAction, LocalApprovalService
+from lead_agent.database import Database
+from lead_agent.models import FacebookPost, Lead, LeadIntent, LeadStatus
+
+VALID_DRAFT = (
+    "JJ Miller & Co. can help with your deck project. Free estimates. "
+    "Text me at 502-528-0858 or visit https://jjmillerco.com."
+)
+
+
+def prepared_controller(tmp_path: Path) -> tuple[LocalApprovalController, int, datetime]:
+    database = Database(tmp_path / "dashboard.sqlite3")
+    database.initialize()
+    post = database.save_post(
+        FacebookPost(
+            external_post_id="web-fixture",
+            post_url="javascript:alert(1)",
+            group_id="fixture-group",
+            group_name="<script>Fixture Group</script>",
+            post_text="<img src=x onerror=alert(1)> Need a deck repair in Louisville.",
+        )
+    ).post
+    database.create_lead(
+        Lead(
+            facebook_post_id=post.id or 0,
+            status=LeadStatus.CANDIDATE,
+            service_category="decks",
+            intent=LeadIntent.HIRING,
+            overall_score=95,
+            drafted_response=VALID_DRAFT,
+        )
+    )
+    now = datetime.now(UTC)
+    service = LocalApprovalService(database, expiration_minutes=20)
+    request_id = service.prepare_candidates(limit=10, now=now)[0].request.id or 0
+    return LocalApprovalController(service, csrf_token="fixture-csrf"), request_id, now
+
+
+def test_dashboard_escapes_facebook_content_and_states_safety_boundary(tmp_path: Path) -> None:
+    controller, _, now = prepared_controller(tmp_path)
+
+    page = controller.render(now=now)
+
+    assert "&lt;script&gt;Fixture Group&lt;/script&gt;" in page
+    assert "&lt;img src=x onerror=alert(1)&gt;" in page
+    assert "<script>Fixture Group</script>" not in page
+    assert "This dashboard cannot post to Facebook" in page
+    assert 'name="csrf_token" value="fixture-csrf"' in page
+    assert "javascript:alert" not in page
+
+
+def test_controller_rejects_missing_csrf_and_accepts_once(tmp_path: Path) -> None:
+    controller, request_id, now = prepared_controller(tmp_path)
+
+    with pytest.raises(CSRFFailure, match="CSRF"):
+        controller.submit(
+            request_id,
+            ApprovalAction.APPROVE.value,
+            {},
+            now=now,
+        )
+
+    result = controller.submit(
+        request_id,
+        ApprovalAction.APPROVE.value,
+        {"csrf_token": ["fixture-csrf"]},
+        now=now,
+    )
+
+    assert result.result == "approved"
+    assert "No Facebook action" in result.message
+
+
+class FakeHTTPServer:
+    server_name = LOOPBACK_HOST
+    server_port = 8765
+
+
+def handle_request(
+    controller: LocalApprovalController,
+    method: str,
+    path: str,
+    *,
+    body: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, dict[str, str], str]:
+    client, server = socket.socketpair()
+    try:
+        payload = (body or "").encode("utf-8")
+        request_headers = {
+            "Host": f"{LOOPBACK_HOST}:8765",
+            "Connection": "close",
+            **(headers or {}),
+        }
+        if payload:
+            request_headers["Content-Length"] = str(len(payload))
+        header_lines = "\r\n".join(f"{name}: {value}" for name, value in request_headers.items())
+        client.sendall(f"{method} {path} HTTP/1.1\r\n{header_lines}\r\n\r\n".encode() + payload)
+        client.shutdown(socket.SHUT_WR)
+        handler = _handler_class(controller, port=8765)
+        handler(server, (LOOPBACK_HOST, 12345), cast(HTTPServer, FakeHTTPServer()))
+        server.shutdown(socket.SHUT_WR)
+        chunks: list[bytes] = []
+        while chunk := client.recv(65536):
+            chunks.append(chunk)
+        raw_headers, raw_body = b"".join(chunks).split(b"\r\n\r\n", maxsplit=1)
+        response_header_lines = raw_headers.decode("iso-8859-1").split("\r\n")
+        status = int(response_header_lines[0].split()[1])
+        response_headers = dict(line.split(": ", maxsplit=1) for line in response_header_lines[1:])
+        return status, response_headers, raw_body.decode("utf-8")
+    finally:
+        client.close()
+        server.close()
+
+
+def test_loopback_server_enforces_headers_csrf_and_one_time_decision(tmp_path: Path) -> None:
+    controller, request_id, _ = prepared_controller(tmp_path)
+    host = f"{LOOPBACK_HOST}:8765"
+    origin = f"http://{host}"
+
+    status, headers, page = handle_request(controller, "GET", "/", headers={"Host": host})
+    assert status == HTTPStatus.OK
+    assert headers["Cache-Control"] == "no-store"
+    assert "frame-ancestors 'none'" in headers["Content-Security-Policy"]
+    assert "Lead Review" in page
+
+    status, _, _ = handle_request(controller, "GET", "/", headers={"Host": "attacker.invalid"})
+    assert status == HTTPStatus.MISDIRECTED_REQUEST
+
+    form = urlencode({"csrf_token": "fixture-csrf"})
+    form_headers = {
+        "Host": host,
+        "Origin": "https://attacker.invalid",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    status, _, _ = handle_request(
+        controller,
+        "POST",
+        f"/approvals/{request_id}/approve",
+        body=form,
+        headers=form_headers,
+    )
+    assert status == HTTPStatus.FORBIDDEN
+
+    form_headers["Origin"] = origin
+    wrong_csrf = urlencode({"csrf_token": "wrong"})
+    status, _, _ = handle_request(
+        controller,
+        "POST",
+        f"/approvals/{request_id}/approve",
+        body=wrong_csrf,
+        headers=form_headers,
+    )
+    assert status == HTTPStatus.FORBIDDEN
+
+    status, headers, _ = handle_request(
+        controller,
+        "POST",
+        f"/approvals/{request_id}/approve",
+        body=form,
+        headers=form_headers,
+    )
+    assert status == HTTPStatus.SEE_OTHER
+    assert headers["Location"] == "/?result=approved"
+
+    status, _, page = handle_request(
+        controller,
+        "POST",
+        f"/approvals/{request_id}/reject",
+        body=form,
+        headers=form_headers,
+    )
+    assert status == HTTPStatus.CONFLICT
+    assert "already been decided" in page

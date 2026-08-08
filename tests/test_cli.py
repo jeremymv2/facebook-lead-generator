@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import lead_agent.cli as cli_module
 from lead_agent.cli import build_parser, main
 from lead_agent.database import Database
 from lead_agent.models import FacebookPost, LeadStatus
@@ -114,6 +115,20 @@ def test_classify_parser_accepts_bounded_post_selection() -> None:
     assert args.limit == 3
 
 
+def test_approval_parser_accepts_local_port_and_candidate_limit() -> None:
+    args = build_parser().parse_args(["approval-dashboard", "--port", "9876", "--limit", "5"])
+
+    assert args.port == 9876
+    assert args.limit == 5
+
+
+def test_approval_parser_rejects_privileged_port() -> None:
+    parser = build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["approval-dashboard", "--port", "80"])
+
+
 def test_classify_command_fails_closed_when_provider_is_disabled(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -162,6 +177,35 @@ def test_classify_command_runs_offline_and_prints_only_candidate_summary(
     lead = database.get_lead_for_post(saved.id or 0)
     assert lead is not None
     assert lead.status is LeadStatus.CANDIDATE
+
+
+def test_approval_dashboard_command_uses_local_service_without_facebook(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    database_path = tmp_path / "approvals.sqlite3"
+    monkeypatch.setenv("DATABASE_PATH", str(database_path))
+    monkeypatch.setenv("FACEBOOK_PROFILE_PATH", str(tmp_path.parent / "browser-profile"))
+    calls: dict[str, int] = {}
+
+    def fake_dashboard(
+        service: object,
+        *,
+        port: int,
+        candidate_limit: int,
+    ) -> None:
+        calls["port"] = port
+        calls["candidate_limit"] = candidate_limit
+        assert service.__class__.__name__ == "LocalApprovalService"
+
+    monkeypatch.setattr(cli_module, "run_local_approval_dashboard", fake_dashboard)
+
+    result = main(["approval-dashboard", "--port", "9876", "--limit", "4"])
+
+    assert result == 0
+    assert calls == {"port": 9876, "candidate_limit": 4}
+    assert database_path.exists()
 
 
 def test_scan_command_fails_closed_when_no_group_is_enabled(

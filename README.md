@@ -5,12 +5,12 @@ explicitly approved set of Louisville-area Facebook groups. The intended product
 
 > Detect → classify → score → draft → notify → human approve/edit/reject → validate → post once
 
-This repository is currently at **Phase 4: lead classification and drafting**. It includes safe
+This repository is currently at **Phase 5: local human approval**. It includes safe
 configuration, a dedicated persistent Playwright profile, explicit group allowlisting, visible-post
 extraction, alias-based SQLite duplicate prevention, durable per-group scan health, synthetic
 selector fixtures, swappable structured lead providers, candidate-only response drafting,
-structured logging, tests, and CI. It does **not** include approvals, notifications, scheduling, or
-Facebook comment posting.
+an expiring loopback-only approve/edit/reject dashboard, structured logging, tests, and CI. It does
+**not** include remote approvals, notifications, scheduling, or Facebook comment posting.
 
 ## Safety status
 
@@ -26,6 +26,9 @@ The project fails closed:
   Gemini provider choice.
 - Classification and drafting operate only on SQLite records and have no Facebook browser access.
 - Low-score, spam, competitor, sales, advice-only, and unrelated posts never receive drafts.
+- The local approval dashboard binds only to `127.0.0.1`, validates CSRF and local Host/Origin
+  headers, and remains incapable of Facebook submission.
+- Approval decisions are atomic, expire quickly, and can transition only once.
 - Only groups explicitly marked `enabled: true` in the local allowlist can be scanned.
 - Login pages, CAPTCHA, checkpoints, off-domain redirects, missing posts, and unreadable UI stop the
   scan and produce at most one local diagnostic screenshot.
@@ -48,6 +51,7 @@ Mac
 ├── vendor-independent structured classifier/drafter
 │   ├── deterministic offline heuristic provider
 │   └── optional Gemini structured-output adapter
+├── SQLite-backed approval state and loopback-only local review dashboard
 ├── JSON structured application logs
 ├── screenshots directory (gitignored)
 └── dedicated Playwright browser profile outside the repository (cookies; never committed)
@@ -104,7 +108,8 @@ Important settings include:
 | `SCAN_INTERVAL_SECONDS` | `300` | Target interval between group scans |
 | `LEAD_THRESHOLD` | `75` | Minimum score for an approval candidate |
 | `SERVICE_AREA` | `Louisville, Kentucky` | Primary geographic target |
-| `APPROVAL_EXPIRATION_MINUTES` | `20` | Planned approval lifetime |
+| `APPROVAL_EXPIRATION_MINUTES` | `20` | Local review lifetime |
+| `APPROVAL_LOCAL_PORT` | `8765` | Loopback-only local review dashboard port |
 | `DAILY_POSTING_LIMIT` | `5` | Planned global daily cap |
 | `PER_GROUP_DAILY_POSTING_LIMIT` | `2` | Planned per-group cap |
 | `FACEBOOK_PROFILE_PATH` | `~/.jjmiller-lead-agent/facebook-profile` | Dedicated persistent profile |
@@ -145,9 +150,11 @@ Post identity prefers a Facebook post ID, then a canonical post URL, then a dete
 group, author, and normalized text. Database constraints and identity aliases make repeated scans
 idempotent. A second uniqueness constraint permits only one lead per post. Schema version 4 adds
 intent, residential/spam flags, provider/model metadata, and a classification-contract version.
+Schema version 5 adds immutable approval draft snapshots, expiration, and one terminal local
+decision per request.
 
-The eventual posting workflow requires additional one-time approval and posting-attempt records;
-those will be implemented with the approval/posting milestones before any submission code exists.
+The eventual posting workflow still requires posting-attempt records and final page validation;
+those will be implemented before any submission code exists.
 
 ## Development commands
 
@@ -322,8 +329,8 @@ DATABASE_PATH=data/lead_agent.phase4-test.sqlite3 lead-agent classify-posts --li
 
 Only posts without an existing lead row are processed. Run the same command again; it should report
 `considered=0 classified=0`. Strong candidates print a score, service, and locally stored `DRAFT`.
-Ignored posts are counted but their source text is not printed. No command in this phase can approve
-or submit the draft to Facebook.
+Ignored posts are counted but their source text is not printed. Classification cannot approve or
+submit a draft to Facebook.
 
 Drafts are intentionally brief and direct. Every locally validated draft identifies JJ Miller &
 Co., states that estimates are free, links to `https://jjmillerco.com`, and asks the customer to text
@@ -346,12 +353,34 @@ AI_MODEL=gemini-2.5-flash
 GEMINI_API_KEY=REPLACE_ME
 ```
 
-Enabling Gemini sends bounded post text, a sanitized first name, and non-secret service settings to
-Google. It does not send the Facebook group ID, group name, post URL, browser cookies, or database
-contents. Review Google's
+Enabling Gemini sends bounded post text and non-secret service settings to Google. It does not send
+the Facebook author name, group ID, group name, post URL, browser cookies, or database contents.
+Review Google's
 [structured-output documentation](https://ai.google.dev/gemini-api/docs/structured-output) and
 [current pricing/data-use terms](https://ai.google.dev/gemini-api/docs/pricing) before processing
 real customer content. Keep `AI_PROVIDER=disabled` if external processing is not acceptable.
+
+## Test local human approval
+
+Use the same copied database after it contains classified candidate leads:
+
+```bash
+DATABASE_PATH=data/lead_agent.phase4-test.sqlite3 lead-agent approval-dashboard
+```
+
+Open `http://127.0.0.1:8765` on the same Mac. The page displays the source post, score, proposed
+response, and remaining review time. Each candidate can be approved exactly as drafted, edited and
+approved, or rejected. Edited responses must still satisfy the local company identity, free
+estimate, full website URL, text-number, and length rules.
+
+Starting review changes a candidate to `pending_approval` and snapshots the draft so later data
+changes cannot silently alter what was reviewed. The default review window is 20 minutes. A terminal
+decision cannot be changed or replayed; expired requests require a new review workflow. Every state
+change is written to the audit trail without logging source text or approved response content.
+
+The dashboard is intentionally local-only: it binds to `127.0.0.1`, has no configurable public host,
+uses an in-memory CSRF token, validates local Host/Origin headers, and imports no Facebook browser
+submission capability. Approval only updates SQLite; it cannot comment on Facebook.
 
 ## Runtime and troubleshooting
 
@@ -369,11 +398,13 @@ is idempotent.
    groups, extract visible posts and URLs, save only new posts, and never comment.
 3. **Selector fixtures and scanner hardening:** regression-test sanitized DOM
    candidates, deduplicate changing Facebook identities, and persist recoverable group health.
-4. **Swappable AI classification/scoring and drafting (this milestone):** validate structured
+4. **Swappable AI classification/scoring and drafting:** validate structured
    classifications, draft only strong candidates, and remain incapable of Facebook submission.
-5. Local then remote human approval with expiring one-time tokens.
-6. Idempotent approved posting with final validation, limits, screenshots, and stop-on-uncertainty.
-7. Notifications, dashboard, `launchd`, retention, and operational health.
+5. **Loopback-only local human approval (this milestone):** snapshot drafts and support expiring,
+   one-time approve/edit/reject decisions with no Facebook posting capability.
+6. Secure remote/mobile approval with per-request cryptographic tokens and outbound Mac polling.
+7. Idempotent approved posting with final validation, limits, screenshots, and stop-on-uncertainty.
+8. Notifications, `launchd`, retention, and operational health.
 
 The first browser milestone is successful only when a second read-only run stores no duplicate
 posts and the software remains incapable of commenting.

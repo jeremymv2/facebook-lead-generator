@@ -11,6 +11,8 @@ from collections.abc import Sequence
 from contextlib import suppress
 
 from lead_agent.ai import AIProviderError, build_ai_provider, classification_context
+from lead_agent.approval_web import run_local_approval_dashboard
+from lead_agent.approvals import ApprovalError, LocalApprovalService
 from lead_agent.classifier import ClassificationSummary, LeadClassificationService
 from lead_agent.config import Settings, UnsafeReadOnlyModeError, load_settings
 from lead_agent.database import Database
@@ -46,6 +48,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_int,
         help="Maximum posts to classify (defaults to AI_MAX_POSTS_PER_RUN)",
     )
+    approval_parser = subparsers.add_parser(
+        "approval-dashboard",
+        help="Review candidate drafts on a loopback-only local web page",
+    )
+    approval_parser.add_argument(
+        "--port",
+        type=_local_port,
+        help="Local loopback port (defaults to APPROVAL_LOCAL_PORT)",
+    )
+    approval_parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        help="Maximum new candidates to prepare for review",
+    )
     subparsers.add_parser(
         "facebook-login",
         help="Open the dedicated browser profile for a manual Facebook login",
@@ -78,6 +94,13 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _local_port(value: str) -> int:
+    parsed = int(value)
+    if not 1024 <= parsed <= 65535:
+        raise argparse.ArgumentTypeError("must be between 1024 and 65535")
+    return parsed
+
+
 def _doctor_payload(settings: Settings) -> dict[str, object]:
     return {
         "database_path": str(settings.database_path),
@@ -87,6 +110,8 @@ def _doctor_payload(settings: Settings) -> dict[str, object]:
         "read_only_mode_ready": not settings.posting_enabled and settings.dry_run,
         "service_area": settings.service_area,
         "lead_threshold": settings.lead_threshold,
+        "approval_expiration_minutes": settings.approval_expiration_minutes,
+        "approval_local_url": f"http://127.0.0.1:{settings.approval_local_port}",
         "facebook_profile_path": str(settings.facebook_profile_path),
         "browser_headless": settings.browser_headless,
         "groups_config_path": str(settings.groups_config_path),
@@ -222,6 +247,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Stopped safely: {error}", file=sys.stderr)
             return 2
         _print_classification_results(summary)
+        return 0
+
+    if args.command == "approval-dashboard":
+        try:
+            settings.require_read_only_mode()
+            database = Database(settings.database_path)
+            database.initialize()
+            service = LocalApprovalService(
+                database,
+                expiration_minutes=settings.approval_expiration_minutes,
+            )
+            run_local_approval_dashboard(
+                service,
+                port=args.port or settings.approval_local_port,
+                candidate_limit=args.limit or settings.ai_max_posts_per_run,
+            )
+        except (ApprovalError, OSError, UnsafeReadOnlyModeError) as error:
+            print(f"Stopped safely: {error}", file=sys.stderr)
+            return 2
         return 0
 
     if args.command == "facebook-login":

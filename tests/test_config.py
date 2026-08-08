@@ -20,6 +20,8 @@ def test_safe_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert settings.posting_allowed is False
     assert settings.scan_interval_seconds == 300
     assert settings.lead_threshold == 75
+    assert settings.approval_expiration_minutes == 20
+    assert settings.approval_local_port == 8765
     assert settings.browser_channel is None
     assert settings.browser_headless is False
     assert settings.facebook_max_scrolls == 12
