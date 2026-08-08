@@ -550,3 +550,15 @@ def test_initialize_migrates_v2_state_and_backfills_post_aliases(tmp_path: Path)
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'approval_requests'"
         ).fetchone()
     assert approval_table is not None
+    with migrated.connection() as connection:
+        approval_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(approval_requests)")
+        }
+        notification_table = connection.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name = 'approval_notifications'
+            """
+        ).fetchone()
+    assert "remote_token_hash" in approval_columns
+    assert notification_table is not None

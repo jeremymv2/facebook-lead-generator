@@ -20,6 +20,7 @@ config/groups.yaml
 credentials*.json
 client_secret*.json
 service-account*.json
+.cloudflared/
 .envrc
 .netrc
 .npmrc

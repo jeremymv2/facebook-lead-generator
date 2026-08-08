@@ -1,7 +1,9 @@
 """Application configuration and posting safety interlocks."""
 
+import re
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlsplit
 
 from pydantic import Field, HttpUrl, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -40,6 +42,10 @@ class UnsafeReadOnlyModeError(RuntimeError):
     """Raised when a read-only command is run with unsafe feature flags."""
 
 
+class NotificationConfigurationError(RuntimeError):
+    """Raised when remote approval notifications are not safely configured."""
+
+
 class Settings(BaseSettings):
     """Validated settings loaded from environment variables or ``.env``."""
 
@@ -63,6 +69,7 @@ class Settings(BaseSettings):
 
     approval_expiration_minutes: int = Field(default=20, ge=1, le=120)
     approval_local_port: int = Field(default=8765, ge=1024, le=65535)
+    remote_approval_port: int = Field(default=8766, ge=1024, le=65535)
     daily_posting_limit: int = Field(default=5, ge=1, le=100)
     per_group_daily_posting_limit: int = Field(default=2, ge=1, le=50)
     screenshot_retention_days: int = Field(default=14, ge=1, le=365)
@@ -87,8 +94,15 @@ class Settings(BaseSettings):
     ai_request_timeout_seconds: int = Field(default=30, ge=5, le=120)
     ai_max_posts_per_run: int = Field(default=20, ge=1, le=100)
     ai_max_input_characters: int = Field(default=5000, ge=500, le=20000)
-    approval_api_url: HttpUrl | None = None
     notifications_enabled: bool = False
+    notification_poll_interval_seconds: int = Field(default=10, ge=5, le=300)
+    remote_approval_base_url: HttpUrl | None = None
+    approval_signing_key: SecretStr | None = None
+    sms_provider: str = "disabled"
+    sms_recipient_number: str | None = None
+    sms_request_timeout_seconds: int = Field(default=15, ge=5, le=60)
+    telnyx_api_key: SecretStr | None = None
+    telnyx_from_number: str | None = None
 
     log_level: str = "INFO"
     log_json: bool = True
@@ -141,18 +155,57 @@ class Settings(BaseSettings):
     def normalize_ai_model(cls, value: str) -> str:
         return value.strip()
 
-    @field_validator("gemini_api_key", mode="before")
+    @field_validator("gemini_api_key", "approval_signing_key", "telnyx_api_key", mode="before")
     @classmethod
     def normalize_optional_secret(cls, value: object) -> object:
         if isinstance(value, str) and not value.strip():
             return None
         return value
 
-    @field_validator("approval_api_url", mode="before")
+    @field_validator("remote_approval_base_url", mode="before")
     @classmethod
     def normalize_optional_url(cls, value: object) -> object:
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator("remote_approval_base_url")
+    @classmethod
+    def validate_remote_approval_base_url(cls, value: HttpUrl | None) -> HttpUrl | None:
+        if value is None:
+            return None
+        parts = urlsplit(str(value))
+        if parts.scheme != "https":
+            raise ValueError("REMOTE_APPROVAL_BASE_URL must use HTTPS")
+        if parts.username or parts.password or parts.query or parts.fragment:
+            raise ValueError("REMOTE_APPROVAL_BASE_URL must be a plain HTTPS origin")
+        if parts.path not in {"", "/"}:
+            raise ValueError("REMOTE_APPROVAL_BASE_URL must not include a path")
+        if len(str(value).rstrip("/")) > 86:
+            raise ValueError("REMOTE_APPROVAL_BASE_URL is too long for one SMS segment")
+        hostname = (parts.hostname or "").casefold()
+        if hostname in {"localhost", "127.0.0.1", "::1"}:
+            raise ValueError("REMOTE_APPROVAL_BASE_URL must be reachable from the phone")
+        return value
+
+    @field_validator("sms_provider")
+    @classmethod
+    def validate_sms_provider(cls, value: str) -> str:
+        normalized = value.strip().casefold()
+        if normalized not in {"disabled", "telnyx"}:
+            raise ValueError("SMS_PROVIDER must be disabled or telnyx")
+        return normalized
+
+    @field_validator("sms_recipient_number", "telnyx_from_number", mode="before")
+    @classmethod
+    def normalize_phone_number(cls, value: object) -> object:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            if re.fullmatch(r"\+[1-9]\d{7,14}", stripped) is None:
+                raise ValueError("SMS phone numbers must use E.164 format, such as +15025551234")
+            return stripped
         return value
 
     @field_validator("log_level")
@@ -183,6 +236,48 @@ class Settings(BaseSettings):
             )
         if not self.dry_run:
             raise UnsafeReadOnlyModeError("Read-only Facebook commands require DRY_RUN=true")
+
+    @property
+    def remote_approval_ready(self) -> bool:
+        """Return whether every secret and endpoint needed for tunneled SMS review exists."""
+        signing_key = (
+            self.approval_signing_key.get_secret_value()
+            if self.approval_signing_key is not None
+            else ""
+        )
+        return (
+            self.notifications_enabled
+            and self.sms_provider == "telnyx"
+            and self.remote_approval_base_url is not None
+            and len(signing_key) >= 32
+            and self.sms_recipient_number is not None
+            and self.telnyx_api_key is not None
+            and self.telnyx_from_number is not None
+        )
+
+    def require_remote_approval_ready(self) -> None:
+        """Fail closed unless tunneled remote approval and Telnyx are fully configured."""
+        if not self.notifications_enabled:
+            raise NotificationConfigurationError(
+                "Remote approval requires NOTIFICATIONS_ENABLED=true"
+            )
+        if self.sms_provider != "telnyx":
+            raise NotificationConfigurationError("Remote approval requires SMS_PROVIDER=telnyx")
+        if self.remote_approval_base_url is None:
+            raise NotificationConfigurationError("REMOTE_APPROVAL_BASE_URL is required")
+        if (
+            self.approval_signing_key is None
+            or len(self.approval_signing_key.get_secret_value()) < 32
+        ):
+            raise NotificationConfigurationError(
+                "APPROVAL_SIGNING_KEY must contain at least 32 characters"
+            )
+        if self.sms_recipient_number is None:
+            raise NotificationConfigurationError("SMS_RECIPIENT_NUMBER is required")
+        if self.telnyx_api_key is None:
+            raise NotificationConfigurationError("TELNYX_API_KEY is required")
+        if self.telnyx_from_number is None:
+            raise NotificationConfigurationError("TELNYX_FROM_NUMBER is required")
 
 
 def load_settings() -> Settings:

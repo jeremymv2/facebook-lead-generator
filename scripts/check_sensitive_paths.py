@@ -11,6 +11,7 @@ from pathlib import PurePosixPath
 
 _SENSITIVE_DIRECTORY_NAMES = {
     ".auth",
+    ".cloudflared",
     "browser-profile",
     "facebook-profile",
     "logs",

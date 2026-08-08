@@ -86,6 +86,12 @@ class ApprovalStatus(StrEnum):
     EXPIRED = "expired"
 
 
+class NotificationStatus(StrEnum):
+    SENDING = "sending"
+    SENT = "sent"
+    FAILED = "failed"
+
+
 @dataclass(slots=True)
 class FacebookPost:
     group_id: str
@@ -211,6 +217,26 @@ class ApprovalReview:
     request: ApprovalRequest
     lead: Lead
     post: FacebookPost
+
+
+@dataclass(slots=True)
+class ApprovalNotification:
+    approval_request_id: int
+    provider: str
+    status: NotificationStatus
+    attempt_count: int
+    last_attempt_at: datetime
+    sent_at: datetime | None = None
+    provider_message_id: str | None = None
+    error_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.approval_request_id < 1:
+            raise ValueError("approval_request_id must be positive")
+        if not self.provider.strip():
+            raise ValueError("provider cannot be empty")
+        if self.attempt_count < 1:
+            raise ValueError("attempt_count must be positive")
 
 
 @dataclass(slots=True)

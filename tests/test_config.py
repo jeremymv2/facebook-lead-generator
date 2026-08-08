@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from lead_agent.config import (
+    NotificationConfigurationError,
     PostingDisabledError,
     Settings,
     UnsafeReadOnlyModeError,
@@ -22,6 +23,7 @@ def test_safe_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert settings.lead_threshold == 75
     assert settings.approval_expiration_minutes == 20
     assert settings.approval_local_port == 8765
+    assert settings.remote_approval_port == 8766
     assert settings.browser_channel is None
     assert settings.browser_headless is False
     assert settings.facebook_max_scrolls == 12
@@ -30,6 +32,8 @@ def test_safe_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert settings.ai_model == "gemini-2.5-flash"
     assert settings.gemini_api_key is None
     assert settings.ai_max_posts_per_run == 20
+    assert settings.sms_provider == "disabled"
+    assert settings.remote_approval_ready is False
 
 
 @pytest.mark.parametrize(
@@ -112,14 +116,61 @@ def test_empty_browser_channel_uses_bundled_chromium(
     assert settings.browser_channel is None
 
 
-def test_empty_optional_url_is_not_treated_as_a_url(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_remote_approval_requires_https_origin_and_e164_numbers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     monkeypatch.chdir(tmp_path)
 
-    settings = Settings(_env_file=None, approval_api_url="")
+    with pytest.raises(ValidationError, match="HTTPS"):
+        Settings(
+            _env_file=None,
+            facebook_profile_path=tmp_path.parent / "browser-profile",
+            remote_approval_base_url="http://approve.example",
+        )
+    with pytest.raises(ValidationError, match=r"E\.164"):
+        Settings(
+            _env_file=None,
+            facebook_profile_path=tmp_path.parent / "browser-profile",
+            sms_recipient_number="502-555-1234",
+        )
 
-    assert settings.approval_api_url is None
+
+def test_remote_approval_readiness_never_exposes_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    settings = Settings(
+        _env_file=None,
+        facebook_profile_path=tmp_path.parent / "browser-profile",
+        notifications_enabled=True,
+        sms_provider=" TELNYX ",
+        remote_approval_base_url="https://approve.example",
+        approval_signing_key="s" * 48,
+        sms_recipient_number="+15025550101",
+        telnyx_api_key="telnyx-secret",
+        telnyx_from_number="+15025550100",
+    )
+
+    settings.require_remote_approval_ready()
+
+    assert settings.remote_approval_ready is True
+    assert "telnyx-secret" not in repr(settings.telnyx_api_key)
+
+
+def test_remote_approval_fails_closed_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    settings = Settings(
+        _env_file=None,
+        facebook_profile_path=tmp_path.parent / "browser-profile",
+    )
+
+    with pytest.raises(NotificationConfigurationError, match="NOTIFICATIONS_ENABLED"):
+        settings.require_remote_approval_ready()
 
 
 def test_environment_overrides_and_comma_separated_services(
