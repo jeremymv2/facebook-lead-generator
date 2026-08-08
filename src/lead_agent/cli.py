@@ -10,6 +10,8 @@ import sys
 from collections.abc import Sequence
 from contextlib import suppress
 
+from lead_agent.ai import AIProviderError, build_ai_provider, classification_context
+from lead_agent.classifier import ClassificationSummary, LeadClassificationService
 from lead_agent.config import Settings, UnsafeReadOnlyModeError, load_settings
 from lead_agent.database import Database
 from lead_agent.facebook import FacebookBrowserError, FacebookReadOnlyBrowser
@@ -30,6 +32,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show persisted per-group scan health without post content",
     )
     status_parser.add_argument("--group-id", help="Show health for one previously scanned group")
+    classify_parser = subparsers.add_parser(
+        "classify-posts",
+        help="Classify unprocessed posts and draft candidate replies without using Facebook",
+    )
+    classify_parser.add_argument(
+        "--post-id",
+        type=_positive_int,
+        help="Classify one saved post ID instead of the newest unclassified posts",
+    )
+    classify_parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        help="Maximum posts to classify (defaults to AI_MAX_POSTS_PER_RUN)",
+    )
     subparsers.add_parser(
         "facebook-login",
         help="Open the dedicated browser profile for a manual Facebook login",
@@ -75,6 +91,13 @@ def _doctor_payload(settings: Settings) -> dict[str, object]:
         "browser_headless": settings.browser_headless,
         "groups_config_path": str(settings.groups_config_path),
         "ai_provider": settings.ai_provider,
+        "ai_model": settings.ai_model,
+        "ai_ready": settings.ai_provider == "heuristic"
+        or (
+            settings.ai_provider == "gemini"
+            and settings.gemini_api_key is not None
+            and bool(settings.ai_model)
+        ),
         "notifications_enabled": settings.notifications_enabled,
     }
 
@@ -135,6 +158,20 @@ def _print_scan_results(summaries: Sequence[ScanSummary]) -> None:
             print(post.post_text[:500])
 
 
+def _print_classification_results(summary: ClassificationSummary) -> None:
+    print(
+        f"considered={summary.posts_considered} classified={summary.leads_created} "
+        f"candidates={len(summary.candidates)} ignored={len(summary.ignored)}"
+    )
+    for lead in summary.candidates:
+        print(
+            f"CANDIDATE lead={lead.id} post={lead.facebook_post_id} "
+            f"score={lead.overall_score} service={lead.service_category or 'unknown'}"
+        )
+        if lead.drafted_response:
+            print(f"DRAFT {lead.drafted_response}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     settings = load_settings()
@@ -164,6 +201,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             states = database.list_group_scan_states()
         print(json.dumps([_scan_state_payload(state) for state in states], indent=2))
+        return 0
+
+    if args.command == "classify-posts":
+        try:
+            settings.require_read_only_mode()
+            database = Database(settings.database_path)
+            database.initialize()
+            provider = build_ai_provider(settings)
+            classifier = LeadClassificationService(
+                database,
+                provider,
+                classification_context(settings),
+            )
+            summary = classifier.classify_posts(
+                limit=args.limit or settings.ai_max_posts_per_run,
+                post_id=args.post_id,
+            )
+        except (AIProviderError, UnsafeReadOnlyModeError) as error:
+            print(f"Stopped safely: {error}", file=sys.stderr)
+            return 2
+        _print_classification_results(summary)
         return 0
 
     if args.command == "facebook-login":

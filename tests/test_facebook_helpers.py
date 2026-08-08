@@ -137,6 +137,26 @@ def test_message_selection_chooses_the_most_complete_owned_post_text() -> None:
     assert selected == "The complete top-level post text that should be retained by the extractor."
 
 
+def test_message_selection_removes_duplicated_see_more_preview() -> None:
+    complete = (
+        "Need someone to mow two yards today, trim the bushes, and remove weeds along the fence. "
+        "Update: I have found someone."
+    )
+    duplicated_preview = (
+        f"{complete} Need someone to mow two yards today, trim the bushes, and remove weeds along "
+        "the fence.… See more"
+    )
+
+    selected = select_message_text(
+        duplicated_preview,
+        [duplicated_preview],
+        [],
+        min_length=15,
+    )
+
+    assert selected == complete
+
+
 def test_sanitized_candidate_fixtures_cover_supported_selector_shapes() -> None:
     fixtures = cast(list[dict[str, object]], json.loads(FIXTURE_PATH.read_text(encoding="utf-8")))
     group = FacebookGroup(

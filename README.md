@@ -5,11 +5,12 @@ explicitly approved set of Louisville-area Facebook groups. The intended product
 
 > Detect → classify → score → draft → notify → human approve/edit/reject → validate → post once
 
-This repository is currently at **Phase 3: read-only scanner hardening**. It includes safe
+This repository is currently at **Phase 4: lead classification and drafting**. It includes safe
 configuration, a dedicated persistent Playwright profile, explicit group allowlisting, visible-post
 extraction, alias-based SQLite duplicate prevention, durable per-group scan health, synthetic
-selector fixtures, structured logging, tests, and CI. It does **not** include AI calls, remote
-approvals, notifications, scheduling, or Facebook comment posting.
+selector fixtures, swappable structured lead providers, candidate-only response drafting,
+structured logging, tests, and CI. It does **not** include approvals, notifications, scheduling, or
+Facebook comment posting.
 
 ## Safety status
 
@@ -21,6 +22,10 @@ The project fails closed:
 - The browser adapter exposes navigation and reading only; no comment or other submission
   implementation exists.
 - Read-only commands refuse to start unless `POSTING_ENABLED=false` and `DRY_RUN=true`.
+- AI access defaults to `AI_PROVIDER=disabled`; classification requires an explicit offline or
+  Gemini provider choice.
+- Classification and drafting operate only on SQLite records and have no Facebook browser access.
+- Low-score, spam, competitor, sales, advice-only, and unrelated posts never receive drafts.
 - Only groups explicitly marked `enabled: true` in the local allowlist can be scanned.
 - Login pages, CAPTCHA, checkpoints, off-domain redirects, missing posts, and unreadable UI stop the
   scan and produce at most one local diagnostic screenshot.
@@ -40,14 +45,18 @@ The initial local runtime is intentionally small:
 Mac
 ├── validated configuration and safety interlocks
 ├── SQLite posts, leads, workflow state, and audit events
+├── vendor-independent structured classifier/drafter
+│   ├── deterministic offline heuristic provider
+│   └── optional Gemini structured-output adapter
 ├── JSON structured application logs
 ├── screenshots directory (gitignored)
 └── dedicated Playwright browser profile outside the repository (cookies; never committed)
 ```
 
 The Playwright adapter produces plain `FacebookPost` records and passes them to a browser-independent
-scan service and persistence layer. Pure page-state, URL, and text helpers plus a fake reader keep
-the automated test suite independent of live Facebook.
+scan service and persistence layer. Classification is a separate bounded command behind an
+`AIProvider` protocol. Pure helpers, synthetic fixtures, fake readers, and fake AI transports keep
+the automated test suite independent of live Facebook and external model APIs.
 
 ## Requirements
 
@@ -104,6 +113,12 @@ Important settings include:
 | `FACEBOOK_SCROLL_SETTLE_SECONDS` | `0.75` | Wait after each bounded scroll |
 | `MAX_POSTS_PER_GROUP` | `20` | Conservative visible-post cap per run |
 | `MIN_POST_TEXT_LENGTH` | `15` | Ignores very short UI fragments |
+| `AI_PROVIDER` | `disabled` | `disabled`, offline `heuristic`, or opt-in `gemini` |
+| `AI_MODEL` | `gemini-2.5-flash` | Model used only by the Gemini provider |
+| `GEMINI_API_KEY` | empty | Local secret required only for Gemini; never printed |
+| `AI_MAX_POSTS_PER_RUN` | `20` | Bounded classification batch size |
+| `AI_MAX_INPUT_CHARACTERS` | `5000` | Maximum post text sent per model request |
+| `AI_REQUEST_TIMEOUT_SECONDS` | `30` | Per-request Gemini timeout |
 
 The browser profile validator rejects paths inside the repository because a persistent profile
 contains authentication cookies and other sensitive session data.
@@ -127,8 +142,9 @@ SQLite currently stores:
 - A schema version for future migrations.
 
 Post identity prefers a Facebook post ID, then a canonical post URL, then a deterministic hash of
-group, author, and normalized text. A database uniqueness constraint makes repeated scans
-idempotent. A second uniqueness constraint permits only one lead per post.
+group, author, and normalized text. Database constraints and identity aliases make repeated scans
+idempotent. A second uniqueness constraint permits only one lead per post. Schema version 4 adds
+intent, residential/spam flags, provider/model metadata, and a classification-contract version.
 
 The eventual posting workflow requires additional one-time approval and posting-attempt records;
 those will be implemented with the approval/posting milestones before any submission code exists.
@@ -286,6 +302,57 @@ Synthetic candidate fixtures under `tests/fixtures/` cover each supported semant
 comment and nested-reply rejection, cross-group permalink rejection, short placeholders, and
 no-permalink rendering. They contain no captured Facebook content or account data.
 
+## Test lead classification and drafting
+
+Classification does not run automatically after a Facebook scan. Start with the deterministic
+offline provider, which makes no network requests and exists for smoke tests and regression
+fixtures—not as a substitute for human judgment:
+
+```dotenv
+AI_PROVIDER=heuristic
+```
+
+Use a copy of the database while testing schema migration and classification:
+
+```bash
+cp -p data/lead_agent.sqlite3 data/lead_agent.phase4-test.sqlite3
+DATABASE_PATH=data/lead_agent.phase4-test.sqlite3 lead-agent init-db
+DATABASE_PATH=data/lead_agent.phase4-test.sqlite3 lead-agent classify-posts --limit 10
+```
+
+Only posts without an existing lead row are processed. Run the same command again; it should report
+`considered=0 classified=0`. Strong candidates print a score, service, and locally stored `DRAFT`.
+Ignored posts are counted but their source text is not printed. No command in this phase can approve
+or submit the draft to Facebook.
+
+Drafts are intentionally brief and direct. Every locally validated draft identifies JJ Miller &
+Co., states that estimates are free, links to `https://jjmillerco.com`, and asks the customer to text
+`502-528-0858`. Generic greetings, filler, and requests to message through Facebook are rejected.
+Posts that say the author already found or hired someone, is all set, or is no longer looking are
+classified as resolved and never receive drafts.
+
+To classify one saved post during focused testing:
+
+```bash
+DATABASE_PATH=data/lead_agent.phase4-test.sqlite3 lead-agent classify-posts --post-id 123
+```
+
+The optional Gemini provider uses Google's current structured-output interface and validates the
+returned JSON again inside the application. Put the key only in the ignored `.env` file:
+
+```dotenv
+AI_PROVIDER=gemini
+AI_MODEL=gemini-2.5-flash
+GEMINI_API_KEY=REPLACE_ME
+```
+
+Enabling Gemini sends bounded post text, a sanitized first name, and non-secret service settings to
+Google. It does not send the Facebook group ID, group name, post URL, browser cookies, or database
+contents. Review Google's
+[structured-output documentation](https://ai.google.dev/gemini-api/docs/structured-output) and
+[current pricing/data-use terms](https://ai.google.dev/gemini-api/docs/pricing) before processing
+real customer content. Keep `AI_PROVIDER=disabled` if external processing is not acceptable.
+
 ## Runtime and troubleshooting
 
 The scanner runs manually. A later reliability milestone will supply a `launchd` service with
@@ -300,9 +367,10 @@ is idempotent.
 1. **Repository bootstrap:** config, models, SQLite, logging, tests, CI.
 2. **Read-only Playwright proof of concept:** manually log in, scan configured
    groups, extract visible posts and URLs, save only new posts, and never comment.
-3. **Selector fixtures and scanner hardening (this milestone):** regression-test sanitized DOM
+3. **Selector fixtures and scanner hardening:** regression-test sanitized DOM
    candidates, deduplicate changing Facebook identities, and persist recoverable group health.
-4. Swappable AI classification/scoring and drafting providers.
+4. **Swappable AI classification/scoring and drafting (this milestone):** validate structured
+   classifications, draft only strong candidates, and remain incapable of Facebook submission.
 5. Local then remote human approval with expiring one-time tokens.
 6. Idempotent approved posting with final validation, limits, screenshots, and stop-on-uncertainty.
 7. Notifications, dashboard, `launchd`, retention, and operational health.

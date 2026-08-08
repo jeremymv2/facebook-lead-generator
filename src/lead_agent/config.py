@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import Field, HttpUrl, field_validator
+from pydantic import Field, HttpUrl, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 DEFAULT_SERVICES = [
@@ -81,7 +81,11 @@ class Settings(BaseSettings):
     min_post_text_length: int = Field(default=15, ge=1, le=500)
 
     ai_provider: str = "disabled"
-    ai_model: str = ""
+    ai_model: str = "gemini-2.5-flash"
+    gemini_api_key: SecretStr | None = None
+    ai_request_timeout_seconds: int = Field(default=30, ge=5, le=120)
+    ai_max_posts_per_run: int = Field(default=20, ge=1, le=100)
+    ai_max_input_characters: int = Field(default=5000, ge=500, le=20000)
     approval_api_url: HttpUrl | None = None
     notifications_enabled: bool = False
 
@@ -121,6 +125,26 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             stripped = value.strip()
             return stripped or None
+        return value
+
+    @field_validator("ai_provider")
+    @classmethod
+    def validate_ai_provider(cls, value: str) -> str:
+        normalized = value.strip().casefold()
+        if normalized not in {"disabled", "heuristic", "gemini"}:
+            raise ValueError("AI_PROVIDER must be disabled, heuristic, or gemini")
+        return normalized
+
+    @field_validator("ai_model")
+    @classmethod
+    def normalize_ai_model(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("gemini_api_key", mode="before")
+    @classmethod
+    def normalize_optional_secret(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
         return value
 
     @field_validator("approval_api_url", mode="before")

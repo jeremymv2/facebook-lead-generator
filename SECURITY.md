@@ -30,6 +30,8 @@ first containment action.
 - GitHub Actions performs an independent full-history Gitleaks scan.
 - Scanner output is redacted and report artifacts are not uploaded.
 - Real Facebook credentials remain in the local persistent browser profile, outside this repository.
+- Gemini credentials remain only in the ignored local `.env`; the application never logs or stores
+  the key in SQLite.
 
 Repository administrators should also enable GitHub Secret Protection and push protection when the
 account plan permits it, protect `main`, disallow direct and force pushes, and require the

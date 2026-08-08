@@ -24,6 +24,10 @@ def test_safe_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert settings.browser_headless is False
     assert settings.facebook_max_scrolls == 12
     assert settings.facebook_scroll_settle_seconds == 0.75
+    assert settings.ai_provider == "disabled"
+    assert settings.ai_model == "gemini-2.5-flash"
+    assert settings.gemini_api_key is None
+    assert settings.ai_max_posts_per_run == 20
 
 
 @pytest.mark.parametrize(
@@ -127,6 +131,37 @@ def test_environment_overrides_and_comma_separated_services(
 
     assert settings.lead_threshold == 88
     assert settings.enabled_services == ["decks", "drywall", "flooring"]
+
+
+def test_ai_provider_and_secret_configuration_are_normalized(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    settings = Settings(
+        _env_file=None,
+        facebook_profile_path=tmp_path.parent / "browser-profile",
+        ai_provider=" GEMINI ",
+        ai_model=" gemini-fixture ",
+        gemini_api_key="placeholder",
+    )
+
+    assert settings.ai_provider == "gemini"
+    assert settings.ai_model == "gemini-fixture"
+    assert settings.gemini_api_key is not None
+    assert settings.gemini_api_key.get_secret_value() == "placeholder"
+    assert "placeholder" not in repr(settings.gemini_api_key)
+
+
+def test_invalid_ai_provider_is_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError, match="AI_PROVIDER"):
+        Settings(
+            _env_file=None,
+            facebook_profile_path=tmp_path.parent / "browser-profile",
+            ai_provider="unknown",
+        )
 
 
 def test_browser_profile_must_be_outside_repository(
