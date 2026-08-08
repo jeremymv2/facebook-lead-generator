@@ -1,0 +1,9 @@
+# Copy this file to config/groups.yaml, which is intentionally ignored if it contains
+# private group details. The read-only scanner will consume this in a later milestone.
+groups:
+  - id: louisville-homeowners-example
+    name: Louisville Homeowners (example only)
+    url: https://www.facebook.com/groups/REPLACE_ME
+    enabled: false
+    priority: 1
+    geography: Louisville, Kentucky

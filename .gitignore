@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+config/groups.yaml
+
+# Runtime state
+data/*
+!data/.gitkeep
+screenshots/*
+!screenshots/.gitkeep
+logs/
+*.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Browser credentials and session data (defense in depth)
+facebook-profile/
+playwright/.auth/
+storage-state*.json
+
+# Editors and macOS
+.DS_Store
+.idea/
+.vscode/
