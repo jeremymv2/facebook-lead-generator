@@ -1,18 +1,24 @@
 # JJ Miller & Co. Facebook Lead Agent
 
+[![Coverage gate](https://github.com/jeremymv2/facebook-lead-generator/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/jeremymv2/facebook-lead-generator/actions/workflows/test.yml)
+[![Lint](https://github.com/jeremymv2/facebook-lead-generator/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/jeremymv2/facebook-lead-generator/actions/workflows/lint.yml)
+[![Secret scan](https://github.com/jeremymv2/facebook-lead-generator/actions/workflows/secret-scan.yml/badge.svg?branch=main)](https://github.com/jeremymv2/facebook-lead-generator/actions/workflows/secret-scan.yml)
+
 A local-first, AI-assisted lead workflow for identifying high-value contracting requests in an
 explicitly approved set of Louisville-area Facebook groups. The intended product flow is:
 
 > Detect → classify → score → draft → notify → human approve/edit/reject → validate → post once
 
-This repository is currently at **Phase 7: idempotent approved posting**. It includes safe
+This repository is currently at **Phase 8: local unattended operations**. It includes safe
 configuration, a dedicated persistent Playwright profile, explicit group allowlisting, visible-post
 extraction, alias-based SQLite duplicate prevention, durable per-group scan health, synthetic
 selector fixtures, swappable structured lead providers, candidate-only response drafting,
 an expiring loopback-only approve/edit/reject dashboard, a separately isolated tokenized mobile
 review origin, provider-independent SMS delivery with a Telnyx adapter, structured logging, tests,
-and CI. It now includes a manually invoked, triple-gated Facebook commenting path, but it does
-**not** include autonomous scheduling, inbound SMS commands, or autonomous posting.
+and CI. A macOS user launch agent can run locked scan/classify/notify cycles with pause controls,
+content-free health, bounded scheduling, retention, duplicate-review suppression, and group-yield
+reporting. It includes a manually invoked, triple-gated Facebook commenting path, but it does
+**not** include inbound SMS commands or autonomous posting.
 
 ## Safety status
 
@@ -133,6 +139,7 @@ Important settings include:
 | `LEAD_THRESHOLD` | `75` | Minimum score for an approval candidate |
 | `SERVICE_AREA` | `Louisville, Kentucky` | Primary geographic target |
 | `APPROVAL_EXPIRATION_MINUTES` | `20` | Local review lifetime |
+| `CANDIDATE_DUPLICATE_WINDOW_HOURS` | `72` | Suppress nearby exact-text reviews in one group |
 | `APPROVAL_LOCAL_PORT` | `8765` | Loopback-only local review dashboard port |
 | `REMOTE_APPROVAL_PORT` | `8766` | Separate loopback origin intended for a secure relay |
 | `POSTING_APPROVAL_MAX_AGE_MINUTES` | `20` | Maximum terminal-approval age at posting time |
@@ -146,6 +153,9 @@ Important settings include:
 | `DAILY_POSTING_LIMIT` | `5` | Global live-attempt cap per local calendar day |
 | `PER_GROUP_DAILY_POSTING_LIMIT` | `2` | Per-group live-attempt cap per local calendar day |
 | `BUSINESS_TIMEZONE` | `America/New_York` | Local calendar used by posting limits |
+| `OPERATIONS_LOG_RETENTION_DAYS` | `14` | Rotated local operations-log retention |
+| `OPERATIONS_LOG_MAX_BYTES` | `5000000` | Rotate an operations log after this size |
+| `CYCLE_CLASSIFICATION_LIMIT` | `100` | Maximum saved posts classified per cycle |
 | `FACEBOOK_PROFILE_PATH` | `~/.jjmiller-lead-agent/facebook-profile` | Dedicated persistent profile |
 | `BROWSER_HEADLESS` | `false` | Keeps manual login and scan behavior visible |
 | `FACEBOOK_MAX_SCROLLS` | `12` | Maximum bounded lazy-load scrolls per group |
@@ -210,8 +220,10 @@ pre-commit run --all-files --hook-stage pre-commit
 pre-commit run --all-files --hook-stage pre-push
 ```
 
-Pull requests run formatting, lint, type, unit-test, and independent full-history secret checks.
-Live Facebook tests must never run in GitHub Actions.
+Pull requests expose separate required-ready status checks for lint/type safety, unit-test coverage,
+and independent full-history secret scanning. Coverage fails below 85% and publishes its full
+terminal report in the GitHub Actions job summary. Live Facebook tests must never run in GitHub
+Actions.
 
 ## Secrets and local data
 
@@ -320,8 +332,17 @@ never merged solely because their text matches.
 sub-viewport scrolls until it reaches the target, its scroll limit, or its load timeout. It rechecks
 login, CAPTCHA, checkpoint, redirect, and page state after every scroll.
 
-To scan every enabled group sequentially, omit `--group-id`. The current proof of concept is manual;
-it does not yet run every five minutes.
+To scan every enabled group sequentially, omit `--group-id`. For a single content-free operational
+test that scans all enabled groups, classifies locally, performs retention, and cannot send SMS,
+use:
+
+```bash
+AI_PROVIDER=heuristic lead-agent run-cycle --max-posts 10 --skip-notifications
+```
+
+Unlike `scan-facebook`, `run-cycle` prints only aggregate counts and never prints discovered post
+text. Ordinary failure in one group is recorded and the remaining groups continue; a Facebook
+checkpoint, CAPTCHA, or other safety stop still aborts the whole cycle.
 
 If the scan stops safely, do not automate around the challenge. Review the terminal reason and the
 single PNG in `screenshots/` if one was captured, then resolve login, MFA, CAPTCHA, or checkpoint
@@ -334,6 +355,16 @@ Inspect persisted group health without opening Facebook or printing post text:
 lead-agent scan-status
 lead-agent scan-status --group-id louisville-homeowners-example
 ```
+
+Inspect group quality without exposing post text or URLs:
+
+```bash
+lead-agent group-report
+```
+
+The report shows discoveries, classifications, candidate yield, provider advertisements, and exact
+text duplicates. Priority remains a manual allowlist decision; the report never edits
+`config/groups.yaml`.
 
 The JSON output reports the last attempt and success, latest safe error type, post counts, and
 consecutive failure count. A successful recovery resets the failure streak while retaining the
@@ -553,10 +584,73 @@ approved response becomes visible in a Facebook comment article. Any uncertainty
 boundary becomes `needs_attention` and is never retried automatically. Restore the safe defaults
 after any controlled live test.
 
-## Runtime and troubleshooting
+## Local unattended operation on macOS
 
-The scanner runs manually. A later reliability milestone will supply a `launchd` service with
-bounded restart behavior, pause controls, health monitoring, log retention, and screenshot cleanup.
+The cycle launch agent invokes one process at `SCAN_INTERVAL_SECONDS`; launchd does not overlap an
+already-running interval, and the application also takes a non-blocking file lock. The worker never
+posts to Facebook. Keep `POSTING_ENABLED=false` and `DRY_RUN=true`.
+
+For local-only classification, set this in the ignored `.env`:
+
+```dotenv
+AI_PROVIDER=heuristic
+AI_MODEL=heuristic-v1
+```
+
+Exercise the exact unattended command manually before installing anything:
+
+```bash
+lead-agent operations-pause
+lead-agent operations-status
+lead-agent operations-resume
+lead-agent run-cycle --max-posts 10 --skip-notifications
+lead-agent group-report
+```
+
+Install and load only the cycle agent while Telnyx is pending:
+
+```bash
+.venv/bin/python scripts/manage_launchd.py install
+.venv/bin/python scripts/manage_launchd.py status
+```
+
+The generated plist contains only executable paths and non-secret scheduling metadata. It reads the
+ignored `.env` from the repository at runtime; credentials and phone numbers are never copied into
+the plist. Logs live under `data/logs/`, and content-free health lives at
+`data/operations/health.json`.
+
+After the Telnyx campaign is active and `lead-agent doctor` reports
+`remote_approval_ready: true`, install both agents:
+
+```bash
+.venv/bin/python scripts/manage_launchd.py install --include-remote-approval
+```
+
+Remove both JJ Miller & Co. launch agents with:
+
+```bash
+.venv/bin/python scripts/manage_launchd.py uninstall
+```
+
+The Mac must remain powered on, awake, connected to the internet, signed into its user session, and
+logged into Facebook in the dedicated profile. Keep `BROWSER_HEADLESS=false` until the visible
+scheduled cycle has been proven reliable; never automate around a Facebook checkpoint or MFA flow.
+
+Pause creates a private local marker and prevents future cycles from opening Facebook. It does not
+stop the separate approval server, so an already-sent review link can still be decided:
+
+```bash
+lead-agent operations-pause
+lead-agent operations-resume
+```
+
+`lead-agent operations-status` reports `success`, `degraded`, `failed`, `paused`, or `never_run`,
+plus aggregate counts and a stale-health flag. Failure state stores only the exception class name.
+Expired PNG/JPEG/WebP screenshots and rotated `.log`/`.jsonl` files are removed within their
+configured directories; databases, group configuration, browser profiles, and credentials are
+never retention targets.
+
+## Runtime and troubleshooting
 
 For current configuration errors, run `lead-agent doctor`. For database initialization errors,
 confirm the configured parent directory is writable, then rerun `lead-agent init-db`; schema setup
@@ -575,9 +669,11 @@ is idempotent.
    one-time approve/edit/reject decisions with no Facebook posting capability.
 6. **Tunneled remote/mobile approval:** keep state on the Mac, send Telnyx alerts,
    and expose only per-request cryptographic review URLs through an outbound HTTPS relay.
-7. **Idempotent approved posting (this milestone):** final validation, limits, screenshots,
+7. **Idempotent approved posting:** final validation, limits, screenshots,
    one live attempt, and stop-on-uncertainty behavior.
-8. Notifications, `launchd`, retention, and operational health.
+8. **Local unattended operations (this milestone):** locked scan/classify/notify cycles, macOS
+   launch agents, pause controls, content-free health, retention, duplicate review suppression,
+   and group-quality reporting.
 
 The first browser milestone is successful only when a second read-only run stores no duplicate
 posts and the software remains incapable of commenting.

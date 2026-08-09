@@ -319,3 +319,24 @@ class GroupScanState:
     posts_new: int = 0
     consecutive_failures: int = 0
     last_failure_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GroupQuality:
+    """Content-free classification yield metrics for one approved group."""
+
+    group_id: str
+    group_name: str
+    posts_discovered: int
+    posts_classified: int
+    candidates_created: int
+    provider_advertisements: int
+    exact_text_duplicates: int
+    cross_group_reposts: int
+    last_discovered_at: datetime
+
+    @property
+    def candidate_yield_percent(self) -> float:
+        if self.posts_classified == 0:
+            return 0.0
+        return round(self.candidates_created * 100 / self.posts_classified, 1)

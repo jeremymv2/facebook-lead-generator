@@ -88,6 +88,7 @@ class Settings(BaseSettings):
     )
 
     approval_expiration_minutes: int = Field(default=20, ge=1, le=120)
+    candidate_duplicate_window_hours: int = Field(default=72, ge=1, le=720)
     approval_local_port: int = Field(default=8765, ge=1024, le=65535)
     remote_approval_port: int = Field(default=8766, ge=1024, le=65535)
     posting_approval_max_age_minutes: int = Field(default=20, ge=1, le=120)
@@ -95,6 +96,9 @@ class Settings(BaseSettings):
     per_group_daily_posting_limit: int = Field(default=2, ge=1, le=50)
     business_timezone: str = "America/New_York"
     screenshot_retention_days: int = Field(default=14, ge=1, le=365)
+    operations_log_retention_days: int = Field(default=14, ge=1, le=365)
+    operations_log_max_bytes: int = Field(default=5_000_000, ge=65_536, le=100_000_000)
+    cycle_classification_limit: int = Field(default=100, ge=1, le=1_000)
 
     data_dir: Path = Path("data")
     database_path: Path = Path("data/lead_agent.sqlite3")
@@ -128,6 +132,14 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
     log_json: bool = True
+
+    @property
+    def operations_state_dir(self) -> Path:
+        return self.data_dir / "operations"
+
+    @property
+    def operations_log_dir(self) -> Path:
+        return self.data_dir / "logs"
 
     @field_validator("enabled_services", mode="before")
     @classmethod

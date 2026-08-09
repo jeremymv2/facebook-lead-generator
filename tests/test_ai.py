@@ -196,6 +196,10 @@ def test_heuristic_rejects_commercial_property_request() -> None:
             "earn your business. Our services include painting, decks, and structural repairs."
         ),
         "Floors N More offers tile installation. #FreeEstimate #LicensedAndInsured",
+        (
+            "In need a lawn care, landscaping, pressure wash, or junk removal? Book with me at "
+            "502-555-0100. #HeavyLawnCareService"
+        ),
     ],
 )
 def test_heuristic_suppresses_realistic_contractor_advertisements(text: str) -> None:

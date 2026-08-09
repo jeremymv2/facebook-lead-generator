@@ -18,6 +18,7 @@ from lead_agent.models import (
     ApprovalStatus,
     AuditEvent,
     FacebookPost,
+    GroupQuality,
     GroupScanState,
     Lead,
     LeadIntent,
@@ -573,6 +574,37 @@ class Database:
             ).fetchall()
         return [_group_scan_state_from_row(row) for row in rows]
 
+    def list_group_quality(self) -> list[GroupQuality]:
+        """Return content-free lead yield and noise metrics grouped by Facebook group."""
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    posts.group_id,
+                    MAX(posts.group_name) AS group_name,
+                    COUNT(posts.id) AS posts_discovered,
+                    COUNT(leads.id) AS posts_classified,
+                    SUM(CASE WHEN leads.drafted_response IS NOT NULL THEN 1 ELSE 0 END)
+                        AS candidates_created,
+                    SUM(CASE WHEN leads.intent = ? THEN 1 ELSE 0 END)
+                        AS provider_advertisements,
+                    COUNT(posts.id) - COUNT(DISTINCT posts.text_hash)
+                        AS exact_text_duplicates,
+                    SUM(CASE WHEN EXISTS (
+                        SELECT 1 FROM facebook_posts AS other_posts
+                        WHERE other_posts.text_hash = posts.text_hash
+                          AND other_posts.group_id != posts.group_id
+                    ) THEN 1 ELSE 0 END) AS cross_group_reposts,
+                    MAX(posts.discovered_at) AS last_discovered_at
+                FROM facebook_posts AS posts
+                LEFT JOIN leads ON leads.facebook_post_id = posts.id
+                GROUP BY posts.group_id
+                ORDER BY candidates_created DESC, posts_classified DESC, posts.group_id
+                """,
+                (LeadIntent.COMPETITOR_ADVERTISEMENT.value,),
+            ).fetchall()
+        return [_group_quality_from_row(row) for row in rows]
+
     def create_lead(self, lead: Lead) -> Lead:
         """Create at most one lead per Facebook post."""
         with self.connection() as connection:
@@ -629,19 +661,54 @@ class Database:
                 raise RuntimeError("Failed to retrieve updated lead")
             return _lead_from_row(row)
 
-    def list_candidate_leads(self, *, limit: int) -> list[Lead]:
-        """Return draft-bearing candidates that are ready to enter local review."""
+    def list_candidate_leads(
+        self,
+        *,
+        limit: int,
+        duplicate_window_hours: int = 72,
+        classification_version: str | None = None,
+    ) -> list[Lead]:
+        """Return review-ready candidates, suppressing nearby exact-text duplicates."""
         if limit < 1:
             raise ValueError("limit must be positive")
+        if duplicate_window_hours < 1:
+            raise ValueError("duplicate_window_hours must be positive")
         with self.connection() as connection:
             rows = connection.execute(
                 """
-                SELECT * FROM leads
-                WHERE status = ? AND drafted_response IS NOT NULL
-                ORDER BY overall_score DESC, created_at, id
+                SELECT leads.*
+                FROM leads
+                JOIN facebook_posts AS posts ON posts.id = leads.facebook_post_id
+                WHERE leads.status = ? AND leads.drafted_response IS NOT NULL
+                  AND (? IS NULL OR leads.classification_version = ?)
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM leads AS prior_leads
+                    JOIN facebook_posts AS prior_posts
+                      ON prior_posts.id = prior_leads.facebook_post_id
+                    WHERE prior_leads.drafted_response IS NOT NULL
+                      AND prior_posts.text_hash = posts.text_hash
+                      AND (
+                        prior_posts.discovered_at < posts.discovered_at
+                        OR (
+                          prior_posts.discovered_at = posts.discovered_at
+                          AND prior_leads.id < leads.id
+                        )
+                      )
+                      AND (
+                        julianday(posts.discovered_at) - julianday(prior_posts.discovered_at)
+                      ) * 24 <= ?
+                  )
+                ORDER BY leads.overall_score DESC, leads.created_at, leads.id
                 LIMIT ?
                 """,
-                (LeadStatus.CANDIDATE.value, limit),
+                (
+                    LeadStatus.CANDIDATE.value,
+                    classification_version,
+                    classification_version,
+                    duplicate_window_hours,
+                    limit,
+                ),
             ).fetchall()
         return [_lead_from_row(row) for row in rows]
 
@@ -1781,4 +1848,18 @@ def _group_scan_state_from_row(row: sqlite3.Row) -> GroupScanState:
         posts_new=row["posts_new"],
         consecutive_failures=row["consecutive_failures"],
         last_failure_at=_parse_datetime(row["last_failure_at"]),
+    )
+
+
+def _group_quality_from_row(row: sqlite3.Row) -> GroupQuality:
+    return GroupQuality(
+        group_id=row["group_id"],
+        group_name=row["group_name"],
+        posts_discovered=row["posts_discovered"],
+        posts_classified=row["posts_classified"],
+        candidates_created=row["candidates_created"],
+        provider_advertisements=row["provider_advertisements"],
+        exact_text_duplicates=row["exact_text_duplicates"],
+        cross_group_reposts=row["cross_group_reposts"],
+        last_discovered_at=datetime.fromisoformat(row["last_discovered_at"]),
     )
