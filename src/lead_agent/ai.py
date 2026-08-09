@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from lead_agent.config import Settings
 from lead_agent.models import FacebookPost, LeadIntent, normalize_post_text
 
-CLASSIFICATION_VERSION = "2026-08-08.v3"
+CLASSIFICATION_VERSION = "2026-08-08.v4"
 COMPANY_NAME = "JJ Miller & Co."
 COMPANY_WEBSITE = "https://jjmillerco.com"
 COMPANY_TEXT_PHONE = "502-528-0858"
@@ -949,6 +949,8 @@ def _is_competitor_advertisement(text: str, service: str | None) -> bool:
         r"\b(?:give|contact|get with) us (?:a call|for (?:a )?(?:free )?(?:quote|estimate))\b",
         r"\bcontact us to schedule\b",
         r"\bschedule your (?:free )?estimate\b",
+        r"\bbook with me\b",
+        r"\bbook (?:with us|now|today)\b",
         r"\b(?:i|we) can schedule your estimate\b",
         r"\bwe(?:['\u2019]d| would) love (?:the opportunity )?to earn your business\b",
         r"\bwe(?:['\u2019]ll| will) (?:build|install|repair|replace|paint|remodel)\b",

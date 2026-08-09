@@ -43,11 +43,22 @@ class ApprovalAction(StrEnum):
 class LocalApprovalService:
     """Prepare candidates and apply exactly one local human decision per request."""
 
-    def __init__(self, database: Database, *, expiration_minutes: int) -> None:
+    def __init__(
+        self,
+        database: Database,
+        *,
+        expiration_minutes: int,
+        duplicate_window_hours: int = 72,
+        classification_version: str | None = None,
+    ) -> None:
         if expiration_minutes < 1:
             raise ValueError("expiration_minutes must be positive")
+        if duplicate_window_hours < 1:
+            raise ValueError("duplicate_window_hours must be positive")
         self.database = database
         self.expiration = timedelta(minutes=expiration_minutes)
+        self.duplicate_window_hours = duplicate_window_hours
+        self.classification_version = classification_version
 
     def prepare_candidates(
         self,
@@ -57,7 +68,11 @@ class LocalApprovalService:
     ) -> list[ApprovalReview]:
         timestamp = now or utc_now()
         self.expire_pending(now=timestamp)
-        for lead in self.database.list_candidate_leads(limit=limit):
+        for lead in self.database.list_candidate_leads(
+            limit=limit,
+            duplicate_window_hours=self.duplicate_window_hours,
+            classification_version=self.classification_version,
+        ):
             if (
                 lead.id is None or lead.drafted_response is None
             ):  # pragma: no cover - query contract

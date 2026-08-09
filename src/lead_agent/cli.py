@@ -9,8 +9,14 @@ import logging
 import sys
 from collections.abc import Sequence
 from contextlib import suppress
+from dataclasses import asdict
 
-from lead_agent.ai import AIProviderError, build_ai_provider, classification_context
+from lead_agent.ai import (
+    CLASSIFICATION_VERSION,
+    AIProviderError,
+    build_ai_provider,
+    classification_context,
+)
 from lead_agent.approval_web import run_local_approval_dashboard
 from lead_agent.approvals import ApprovalError, LocalApprovalService
 from lead_agent.classifier import ClassificationSummary, LeadClassificationService
@@ -27,8 +33,21 @@ from lead_agent.facebook_posting import FacebookCommentBrowser
 from lead_agent.facebook_state import FacebookSafetyStop
 from lead_agent.groups import FacebookGroup, GroupsConfigError, load_group_catalog
 from lead_agent.logging_config import configure_logging
-from lead_agent.models import GroupScanState
-from lead_agent.notifications import ApprovalNotificationService, build_sms_provider
+from lead_agent.models import AuditEvent, GroupScanState
+from lead_agent.notifications import (
+    ApprovalNotificationService,
+    NotificationSummary,
+    build_sms_provider,
+)
+from lead_agent.operations import (
+    CycleAlreadyRunningError,
+    CycleSummary,
+    OperationPaths,
+    OperationsCycleRunner,
+    OperationsState,
+    RetentionService,
+    ScanCycleSummary,
+)
 from lead_agent.posting import ApprovedPostingService, PostingError, PostingExecutionResult
 from lead_agent.remote_approval_web import (
     RemoteApprovalController,
@@ -48,6 +67,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show persisted per-group scan health without post content",
     )
     status_parser.add_argument("--group-id", help="Show health for one previously scanned group")
+    subparsers.add_parser(
+        "operations-status",
+        help="Show content-free health for the unattended local workflow",
+    )
+    subparsers.add_parser(
+        "operations-pause",
+        help="Pause future unattended cycles without stopping approval servers",
+    )
+    subparsers.add_parser(
+        "operations-resume",
+        help="Resume unattended cycles",
+    )
+    subparsers.add_parser(
+        "group-report",
+        help="Show content-free per-group lead yield and noise metrics",
+    )
     classify_parser = subparsers.add_parser(
         "classify-posts",
         help="Classify unprocessed posts and draft candidate replies without using Facebook",
@@ -117,6 +152,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Keep the browser open for inspection until Enter is pressed",
     )
+    cycle_parser = subparsers.add_parser(
+        "run-cycle",
+        help="Run one locked scan, classify, notify, and retention cycle",
+    )
+    cycle_parser.add_argument(
+        "--max-posts",
+        type=_positive_int,
+        help="Maximum visible posts per group (defaults to MAX_POSTS_PER_GROUP)",
+    )
+    cycle_parser.add_argument(
+        "--classification-limit",
+        type=_positive_int,
+        help="Maximum posts to classify in this cycle",
+    )
+    cycle_parser.add_argument(
+        "--skip-notifications",
+        action="store_true",
+        help="Never send SMS in this manually invoked cycle",
+    )
     posting_parser = subparsers.add_parser(
         "post-approved",
         help="Validate one approved lead; submit only with --submit and both safety flags",
@@ -179,6 +233,11 @@ def _doctor_payload(settings: Settings) -> dict[str, object]:
         "daily_posting_limit": settings.daily_posting_limit,
         "per_group_daily_posting_limit": settings.per_group_daily_posting_limit,
         "business_timezone": settings.business_timezone,
+        "scan_interval_seconds": settings.scan_interval_seconds,
+        "cycle_classification_limit": settings.cycle_classification_limit,
+        "candidate_duplicate_window_hours": settings.candidate_duplicate_window_hours,
+        "operations_state_dir": str(settings.operations_state_dir),
+        "operations_log_dir": str(settings.operations_log_dir),
     }
 
 
@@ -195,6 +254,14 @@ def _scan_state_payload(state: GroupScanState) -> dict[str, object]:
         "posts_seen": state.posts_seen,
         "posts_new": state.posts_new,
     }
+
+
+def _operation_paths(settings: Settings) -> OperationPaths:
+    return OperationPaths(
+        state_dir=settings.operations_state_dir,
+        log_dir=settings.operations_log_dir,
+        screenshot_dir=settings.screenshot_dir,
+    )
 
 
 async def _manual_login(settings: Settings) -> None:
@@ -252,6 +319,148 @@ def _print_classification_results(summary: ClassificationSummary) -> None:
             print(f"DRAFT {lead.drafted_response}")
 
 
+async def _scan_groups_for_cycle(
+    settings: Settings,
+    groups: Sequence[FacebookGroup],
+    *,
+    max_posts: int,
+) -> ScanCycleSummary:
+    """Scan every group while isolating ordinary per-group failures."""
+    settings.require_read_only_mode()
+    database = Database(settings.database_path)
+    database.initialize()
+    summaries: list[ScanSummary] = []
+    failures = 0
+    logger = logging.getLogger("lead_agent.operations")
+    async with FacebookReadOnlyBrowser(settings) as browser:
+        scanner = ReadOnlyScanService(database, browser)
+        for group in groups:
+            try:
+                summaries.append(await scanner.scan_group(group, max_posts=max_posts))
+            except FacebookSafetyStop:
+                raise
+            except Exception as error:
+                failures += 1
+                logger.warning(
+                    "Group scan failed; cycle will continue",
+                    extra={
+                        "action": "cycle.group_scan",
+                        "result": "failed",
+                        "group_id": group.id,
+                        "error": type(error).__name__,
+                    },
+                )
+    return ScanCycleSummary(
+        groups_scanned=len(summaries),
+        groups_failed=failures,
+        posts_seen=sum(summary.posts_seen for summary in summaries),
+        posts_new=sum(len(summary.new_posts) for summary in summaries),
+        duplicates=sum(summary.duplicates for summary in summaries),
+    )
+
+
+def _build_approval_notifier(
+    settings: Settings,
+    database: Database,
+) -> ApprovalNotificationService:
+    settings.require_remote_approval_ready()
+    approvals = LocalApprovalService(
+        database,
+        expiration_minutes=settings.approval_expiration_minutes,
+        duplicate_window_hours=settings.candidate_duplicate_window_hours,
+        classification_version=CLASSIFICATION_VERSION,
+    )
+    sms_provider = build_sms_provider(settings)
+    if settings.remote_approval_base_url is None:
+        raise RuntimeError("Validated remote approval URL is unexpectedly missing")
+    if settings.sms_recipient_number is None:
+        raise RuntimeError("Validated SMS recipient is unexpectedly missing")
+    return ApprovalNotificationService(
+        database,
+        approvals,
+        sms_provider,
+        public_base_url=str(settings.remote_approval_base_url),
+        recipient_number=settings.sms_recipient_number,
+        relay_healthcheck=lambda: relay_is_healthy(
+            str(settings.remote_approval_base_url),
+            timeout_seconds=5,
+        ),
+    )
+
+
+def _run_operations_cycle(
+    settings: Settings,
+    *,
+    max_posts: int,
+    classification_limit: int,
+    skip_notifications: bool,
+) -> tuple[CycleSummary | None, OperationsState]:
+    settings.require_read_only_mode()
+    state = OperationsState(_operation_paths(settings))
+    if state.paused:
+        state.mark_paused()
+        return None, state
+    if max_posts > 50:
+        raise GroupsConfigError("--max-posts cannot exceed the read-only safety cap of 50")
+    if classification_limit > 1_000:
+        raise AIProviderError("--classification-limit cannot exceed 1000")
+    catalog = load_group_catalog(settings.groups_config_path)
+    groups = catalog.enabled_groups()
+    if not groups:
+        raise GroupsConfigError("No Facebook groups are enabled in the group allowlist")
+
+    database = Database(settings.database_path)
+    database.initialize()
+    provider = build_ai_provider(settings)
+    classifier = LeadClassificationService(
+        database,
+        provider,
+        classification_context(settings),
+    )
+    retention = RetentionService(
+        state.paths,
+        screenshot_retention_days=settings.screenshot_retention_days,
+        log_retention_days=settings.operations_log_retention_days,
+        log_max_bytes=settings.operations_log_max_bytes,
+    )
+    notifier = None
+    if settings.notifications_enabled and not skip_notifications:
+        notifier = _build_approval_notifier(settings, database)
+
+    runner = OperationsCycleRunner(state)
+
+    def notify_cycle() -> NotificationSummary:
+        if notifier is None:  # pragma: no cover - callback is installed only when configured
+            raise RuntimeError("Notification callback is not configured")
+        return notifier.notify_candidates(limit=settings.ai_max_posts_per_run)
+
+    notify_callback = notify_cycle if notifier is not None else None
+    result = runner.run(
+        scan=lambda: asyncio.run(_scan_groups_for_cycle(settings, groups, max_posts=max_posts)),
+        classify=lambda: classifier.classify_posts(limit=classification_limit),
+        notify=notify_callback,
+        retain=retention.cleanup,
+    )
+    if result is not None:
+        database.record_audit_event(
+            AuditEvent(
+                component="operations",
+                action="cycle.run",
+                result=result.status,
+                details={
+                    "groups_scanned": result.scan.groups_scanned,
+                    "groups_failed": result.scan.groups_failed,
+                    "posts_seen": result.scan.posts_seen,
+                    "posts_new": result.scan.posts_new,
+                    "posts_classified": result.posts_classified,
+                    "candidates_created": result.candidates_created,
+                    "notifications_sent": result.notifications_sent,
+                },
+            )
+        )
+    return result, state
+
+
 async def _execute_approved_posting(
     settings: Settings,
     service: ApprovedPostingService,
@@ -294,6 +503,87 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps([_scan_state_payload(state) for state in states], indent=2))
         return 0
 
+    if args.command == "operations-status":
+        state = OperationsState(_operation_paths(settings))
+        stale_after = max(600, settings.scan_interval_seconds * 3)
+        payload = state.status_payload(stale_after_seconds=stale_after)
+        payload.update(
+            {
+                "ai_ready": _doctor_payload(settings)["ai_ready"],
+                "notifications_enabled": settings.notifications_enabled,
+                "remote_approval_ready": settings.remote_approval_ready,
+                "read_only_mode_ready": not settings.posting_enabled and settings.dry_run,
+            }
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "operations-pause":
+        state = OperationsState(_operation_paths(settings))
+        state.pause()
+        print("Unattended lead-agent cycles are paused")
+        return 0
+
+    if args.command == "operations-resume":
+        state = OperationsState(_operation_paths(settings))
+        changed = state.resume()
+        print("Unattended lead-agent cycles resumed" if changed else "Cycles were not paused")
+        return 0
+
+    if args.command == "group-report":
+        database = Database(settings.database_path)
+        database.initialize()
+        catalog = load_group_catalog(settings.groups_config_path)
+        priorities = {group.id: group.priority for group in catalog.enabled_groups()}
+        report_payload = [
+            {
+                "group_id": quality.group_id,
+                "group_name": quality.group_name,
+                "priority": priorities.get(quality.group_id),
+                "posts_discovered": quality.posts_discovered,
+                "posts_classified": quality.posts_classified,
+                "candidates_created": quality.candidates_created,
+                "candidate_yield_percent": quality.candidate_yield_percent,
+                "provider_advertisements": quality.provider_advertisements,
+                "exact_text_duplicates": quality.exact_text_duplicates,
+                "cross_group_reposts": quality.cross_group_reposts,
+                "last_discovered_at": quality.last_discovered_at.isoformat(),
+            }
+            for quality in database.list_group_quality()
+        ]
+        print(json.dumps(report_payload, indent=2))
+        return 0
+
+    if args.command == "run-cycle":
+        try:
+            cycle_result, _state = _run_operations_cycle(
+                settings,
+                max_posts=args.max_posts or settings.max_posts_per_group,
+                classification_limit=(
+                    args.classification_limit or settings.cycle_classification_limit
+                ),
+                skip_notifications=args.skip_notifications,
+            )
+        except CycleAlreadyRunningError as error:
+            print(f"No action taken: {error}")
+            return 0
+        except Exception as error:
+            logger.error(
+                "Operations cycle stopped safely",
+                extra={
+                    "action": "cycle.run",
+                    "result": "failed",
+                    "error": type(error).__name__,
+                },
+            )
+            print(f"Stopped safely: {type(error).__name__}", file=sys.stderr)
+            return 2
+        if cycle_result is None:
+            print("No action taken: unattended cycles are paused")
+        else:
+            print(json.dumps(asdict(cycle_result), sort_keys=True))
+        return 0
+
     if args.command == "classify-posts":
         try:
             settings.require_read_only_mode()
@@ -323,6 +613,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             service = LocalApprovalService(
                 database,
                 expiration_minutes=settings.approval_expiration_minutes,
+                duplicate_window_hours=settings.candidate_duplicate_window_hours,
+                classification_version=CLASSIFICATION_VERSION,
             )
             run_local_approval_dashboard(
                 service,
@@ -343,6 +635,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             approvals = LocalApprovalService(
                 database,
                 expiration_minutes=settings.approval_expiration_minutes,
+                duplicate_window_hours=settings.candidate_duplicate_window_hours,
+                classification_version=CLASSIFICATION_VERSION,
             )
             sms_provider = build_sms_provider(settings)
             if settings.remote_approval_base_url is None:
@@ -459,7 +753,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 settings,
                 enabled_group_ids=enabled_group_ids,
             )
-            result = asyncio.run(
+            posting_result = asyncio.run(
                 _execute_approved_posting(
                     settings,
                     posting_service,
@@ -480,8 +774,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             if screenshot_path is not None:
                 print(f"Diagnostic screenshot: {screenshot_path}", file=sys.stderr)
             return 2
-        attempt = result.work.attempt
-        if not result.created:
+        attempt = posting_result.work.attempt
+        if not posting_result.created:
             print(
                 f"No action taken: live posting attempt already exists "
                 f"with status={attempt.status.value}"

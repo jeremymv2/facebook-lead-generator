@@ -6,7 +6,7 @@ import pytest
 import lead_agent.cli as cli_module
 from lead_agent.cli import build_parser, main
 from lead_agent.database import Database
-from lead_agent.models import FacebookPost, LeadStatus
+from lead_agent.models import FacebookPost, Lead, LeadIntent, LeadStatus
 from lead_agent.notifications import SmsDeliveryReceipt, SmsMessage
 
 
@@ -170,6 +170,93 @@ def test_remote_approval_parser_accepts_safe_runtime_options() -> None:
     assert args.port == 9877
     assert args.limit == 4
     assert args.retry_failed is True
+
+
+def test_run_cycle_parser_accepts_bounded_manual_options() -> None:
+    args = build_parser().parse_args(
+        ["run-cycle", "--max-posts", "12", "--classification-limit", "80", "--skip-notifications"]
+    )
+
+    assert args.max_posts == 12
+    assert args.classification_limit == 80
+    assert args.skip_notifications is True
+
+
+def test_operations_pause_status_and_resume_do_not_require_ai_or_facebook(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("FACEBOOK_PROFILE_PATH", str(tmp_path.parent / "browser-profile"))
+
+    assert main(["operations-pause"]) == 0
+    capsys.readouterr()
+    assert main(["run-cycle"]) == 0
+    assert "paused" in capsys.readouterr().out
+    assert main(["operations-status"]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["paused"] is True
+    assert status["status"] == "paused"
+    assert main(["operations-resume"]) == 0
+    assert "resumed" in capsys.readouterr().out
+
+
+def test_group_report_contains_counts_but_no_post_content_or_urls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    database_path = tmp_path / "data" / "quality.sqlite3"
+    groups_path = tmp_path / "groups.yaml"
+    monkeypatch.setenv("DATABASE_PATH", str(database_path))
+    monkeypatch.setenv("GROUPS_CONFIG_PATH", str(groups_path))
+    monkeypatch.setenv("FACEBOOK_PROFILE_PATH", str(tmp_path.parent / "browser-profile"))
+    groups_path.write_text(
+        """
+groups:
+  - id: fixture-group
+    name: Fixture Group
+    url: https://www.facebook.com/groups/111
+    enabled: true
+    priority: 2
+""",
+        encoding="utf-8",
+    )
+    database = Database(database_path)
+    database.initialize()
+    post = database.save_post(
+        FacebookPost(
+            external_post_id="private-post",
+            post_url="https://www.facebook.com/groups/111/posts/private-post",
+            group_id="fixture-group",
+            group_name="Fixture Group",
+            post_text="Private customer needs a deck repaired.",
+        )
+    ).post
+    database.create_lead(
+        Lead(
+            facebook_post_id=post.id or 0,
+            status=LeadStatus.CANDIDATE,
+            service_category="decks",
+            intent=LeadIntent.HIRING,
+            overall_score=90,
+            drafted_response="Fixture draft",
+        )
+    )
+
+    result = main(["group-report"])
+    output = capsys.readouterr().out
+    payload = json.loads(output)
+
+    assert result == 0
+    assert payload[0]["group_id"] == "fixture-group"
+    assert payload[0]["priority"] == 2
+    assert payload[0]["posts_discovered"] == 1
+    assert "Private customer" not in output
+    assert "facebook.com" not in output
 
 
 def test_post_approved_parser_defaults_to_validation_only() -> None:

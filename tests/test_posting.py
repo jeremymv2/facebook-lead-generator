@@ -70,7 +70,7 @@ def create_approved_lead(
             group_id=group_id,
             group_name="Synthetic Homeowners",
             author_name="Fixture Customer",
-            post_text="Looking for someone in Louisville to repair our deck this week.",
+            post_text=f"Looking for someone in Louisville to repair deck project {post_id}.",
         )
     ).post
     database.create_lead(
