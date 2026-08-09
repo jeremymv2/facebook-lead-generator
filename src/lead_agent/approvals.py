@@ -14,6 +14,7 @@ from lead_agent.models import (
     ApprovalReview,
     ApprovalStatus,
     AuditEvent,
+    RejectionReason,
     utc_now,
 )
 
@@ -104,6 +105,7 @@ class LocalApprovalService:
         action: ApprovalAction,
         *,
         edited_response: str | None = None,
+        rejection_reason: RejectionReason | str | None = None,
         now: datetime | None = None,
     ) -> ApprovalReview:
         timestamp = now or utc_now()
@@ -116,6 +118,7 @@ class LocalApprovalService:
         if request.status is not ApprovalStatus.PENDING:
             raise ApprovalStateError("Approval request has already been decided")
 
+        selected_rejection_reason: RejectionReason | None = None
         if action is ApprovalAction.APPROVE:
             decision = ApprovalStatus.APPROVED
             response = self._validate_response(request.draft_response)
@@ -125,12 +128,19 @@ class LocalApprovalService:
         else:
             decision = ApprovalStatus.REJECTED
             response = None
+            try:
+                selected_rejection_reason = RejectionReason(rejection_reason or "")
+            except ValueError as error:
+                raise ApprovalValidationError("Select a valid rejection reason") from error
 
         review, changed = self.database.decide_approval_request(
             request_id,
             decision,
             decided_at=timestamp,
             edited_response=response,
+            rejection_reason=(
+                selected_rejection_reason if action is ApprovalAction.REJECT else None
+            ),
         )
         if not changed:
             if review.request.status is ApprovalStatus.EXPIRED:
@@ -141,7 +151,14 @@ class LocalApprovalService:
             review,
             action=f"approval.{review.request.status.value}",
             result=review.request.status.value,
-            details={"edited": action is ApprovalAction.EDIT},
+            details={
+                "edited": action is ApprovalAction.EDIT,
+                "rejection_reason": (
+                    review.request.rejection_reason.value
+                    if review.request.rejection_reason is not None
+                    else None
+                ),
+            },
         )
         return review
 

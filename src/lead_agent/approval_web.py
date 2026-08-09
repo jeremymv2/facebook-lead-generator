@@ -21,7 +21,7 @@ from lead_agent.approvals import (
     LocalApprovalService,
 )
 from lead_agent.dashboard_metrics import CycleTrend, DashboardMetricsService, DashboardTrendSnapshot
-from lead_agent.models import ApprovalReview, utc_now
+from lead_agent.models import ApprovalReview, RejectionReason, utc_now
 
 LOOPBACK_HOST = "127.0.0.1"
 MAX_FORM_BYTES = 4096
@@ -83,10 +83,12 @@ class LocalApprovalController:
         except ValueError as error:  # pragma: no cover - route regex contract
             raise ApprovalStateError("Unknown approval action") from error
         edited_response = _one_form_value(form, "response", required=False)
+        rejection_reason = _one_form_value(form, "rejection_reason", required=False)
         review = self.service.decide(
             request_id,
             action,
             edited_response=edited_response,
+            rejection_reason=rejection_reason,
             now=now,
         )
         if action is ApprovalAction.REJECT:
@@ -196,7 +198,8 @@ def render_dashboard(
       font-weight: 700; padding: 3px 8px; }}
     .meta {{ display: flex; flex-wrap: wrap; gap: 8px 16px; color: #57606a; }}
     .post {{ border-left: 4px solid #6e7781; padding: 10px 14px; white-space: pre-wrap; }}
-    textarea {{ box-sizing: border-box; min-height: 108px; padding: 10px; width: 100%; }}
+    textarea, select {{ box-sizing: border-box; font: inherit; padding: 10px; width: 100%; }}
+    textarea {{ min-height: 108px; }}
     .actions {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }}
     form {{ margin: 0; }}
     button {{ border: 0; border-radius: 8px; cursor: pointer; font-weight: 700;
@@ -279,6 +282,7 @@ def _render_trends(trends: DashboardTrendSnapshot, *, display_timezone: tzinfo) 
         </div>"""
         cycle_table = _render_cycle_table(displayed_cycles, display_timezone=display_timezone)
     group_table = _render_group_health_table(trends, display_timezone=display_timezone)
+    feedback_panel = _render_feedback_panel(trends)
     return f"""
     <section aria-labelledby="historical-trends">
       <div class="section-heading">
@@ -289,6 +293,36 @@ def _render_trends(trends: DashboardTrendSnapshot, *, display_timezone: tzinfo) 
       {cycle_panels}
       {cycle_table}
       {group_table}
+      {feedback_panel}
+    </section>"""
+
+
+def _render_feedback_panel(trends: DashboardTrendSnapshot) -> str:
+    feedback = trends.feedback
+    if feedback.reviewed == 0:
+        detail = "<p>No completed lead reviews yet.</p>"
+    elif feedback.rejection_reasons:
+        rows = "".join(
+            f"<tr><td>{html.escape(reason.replace('_', ' ').title())}</td><td>{count}</td></tr>"
+            for reason, count in feedback.rejection_reasons
+        )
+        detail = f"""
+        <div class="table-wrap"><table>
+          <thead><tr><th>Rejection reason</th><th>Count</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table></div>"""
+    else:
+        detail = "<p>No rejected candidates yet.</p>"
+    return f"""
+    <section class="panel">
+      <h3>Candidate review quality</h3>
+      <div class="meta">
+        <span>Reviewed: {feedback.reviewed}</span>
+        <span>Accepted: {feedback.accepted}</span>
+        <span>Rejected: {feedback.rejected}</span>
+        <span>Acceptance rate: {feedback.acceptance_percent:g}%</span>
+      </div>
+      {detail}
     </section>"""
 
 
@@ -427,6 +461,11 @@ def _render_review(review: ApprovalReview, *, csrf_token: str, now: datetime) ->
         )
     csrf = html.escape(csrf_token, quote=True)
     draft = html.escape(review.request.draft_response)
+    rejection_options = "".join(
+        f'<option value="{reason.value}">{html.escape(reason.value.replace("_", " ").title())}'
+        "</option>"
+        for reason in RejectionReason
+    )
     return f"""
 <section class="card">
   <h2>{html.escape(service.title())} lead</h2>
@@ -454,6 +493,12 @@ def _render_review(review: ApprovalReview, *, csrf_token: str, now: datetime) ->
     </form>
     <form method="post" action="/approvals/{request_id}/reject">
       <input type="hidden" name="csrf_token" value="{csrf}">
+      <label>Reason for rejection
+        <select name="rejection_reason" required>
+          <option value="" selected disabled>Select a reason</option>
+          {rejection_options}
+        </select>
+      </label>
       <button class="reject" type="submit">Reject</button>
     </form>
   </div>

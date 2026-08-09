@@ -84,6 +84,9 @@ class RetentionSummary:
     screenshots_removed: int = 0
     logs_removed: int = 0
     logs_rotated: int = 0
+    backups_created: int = 0
+    backups_verified: int = 0
+    backups_removed: int = 0
 
 
 @dataclass(frozen=True, slots=True)

@@ -23,7 +23,7 @@ from lead_agent.approvals import (
     ApprovalStateError,
     LocalApprovalService,
 )
-from lead_agent.models import ApprovalReview, ApprovalStatus, utc_now
+from lead_agent.models import ApprovalReview, ApprovalStatus, RejectionReason, utc_now
 from lead_agent.notifications import remote_token_hash
 
 LOOPBACK_HOST = "127.0.0.1"
@@ -112,6 +112,7 @@ class RemoteApprovalController:
             review.request.id or 0,
             action,
             edited_response=_one_form_value(form, "response", required=False),
+            rejection_reason=_one_form_value(form, "rejection_reason", required=False),
             now=now,
         )
 
@@ -151,6 +152,11 @@ def _render_pending(
     token_path = html.escape(token, quote=True)
     csrf = html.escape(csrf_token, quote=True)
     draft = html.escape(review.request.draft_response)
+    rejection_options = "".join(
+        f'<option value="{reason.value}">{html.escape(reason.value.replace("_", " ").title())}'
+        "</option>"
+        for reason in RejectionReason
+    )
     return _page(
         f"""
 <section class="card">
@@ -175,6 +181,12 @@ def _render_pending(
     </form>
     <form method="post" action="/review/{token_path}/reject">
       <input type="hidden" name="csrf_token" value="{csrf}">
+      <label>Reason for rejection
+        <select name="rejection_reason" required>
+          <option value="" selected disabled>Select a reason</option>
+          {rejection_options}
+        </select>
+      </label>
       <button class="reject" type="submit">Reject</button>
     </form>
   </div>
@@ -220,8 +232,8 @@ def _page(content: str) -> str:
     .meta {{ color: #57606a; display: flex; flex-wrap: wrap; gap: 8px 16px; }}
     .expiry {{ color: #9a6700; font-weight: 700; }}
     .post {{ border-left: 4px solid #6e7781; padding: 10px 12px; white-space: pre-wrap; }}
-    textarea {{ box-sizing: border-box; font: inherit; min-height: 120px; padding: 11px;
-      width: 100%; }}
+    textarea, select {{ box-sizing: border-box; font: inherit; padding: 11px; width: 100%; }}
+    textarea {{ min-height: 120px; }}
     .actions {{ display: flex; gap: 10px; margin-top: 12px; }}
     .actions form {{ flex: 1; }}
     button {{ border: 0; border-radius: 9px; color: white; cursor: pointer;

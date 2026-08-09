@@ -1,5 +1,6 @@
 import re
 import socket
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
@@ -181,11 +182,20 @@ def handle_request(
             port=8766,
             public_base_url=PUBLIC_BASE_URL,
         )
-        handler(server, (LOOPBACK_HOST, 12345), cast(HTTPServer, FakeHTTPServer()))
-        server.shutdown(socket.SHUT_WR)
+
+        def serve() -> None:
+            handler(server, (LOOPBACK_HOST, 12345), cast(HTTPServer, FakeHTTPServer()))
+            server.shutdown(socket.SHUT_WR)
+
+        worker = threading.Thread(
+            target=serve,
+        )
+        worker.start()
         chunks: list[bytes] = []
         while chunk := client.recv(65_536):
             chunks.append(chunk)
+        worker.join(timeout=2)
+        assert not worker.is_alive()
         raw_headers, raw_body = b"".join(chunks).split(b"\r\n\r\n", maxsplit=1)
         response_lines = raw_headers.decode("iso-8859-1").split("\r\n")
         status = int(response_lines[0].split()[1])

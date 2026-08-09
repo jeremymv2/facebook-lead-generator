@@ -12,7 +12,7 @@ from lead_agent.ai import (
 from lead_agent.classifier import LeadClassificationService
 from lead_agent.config import DEFAULT_SERVICES
 from lead_agent.database import Database
-from lead_agent.models import FacebookPost, LeadIntent, LeadStatus, PostStatus
+from lead_agent.models import FacebookPost, Lead, LeadIntent, LeadStatus, PostStatus
 
 
 @pytest.fixture
@@ -182,6 +182,76 @@ def test_resolved_yard_request_is_landscaping_but_never_drafted(database: Databa
     assert lead.intent is LeadIntent.RESOLVED
     assert lead.overall_score is not None and lead.overall_score <= 10
     assert lead.drafted_response is None
+
+
+def test_targeted_reclassification_corrects_unreviewed_provider_ad(database: Database) -> None:
+    source = save_post(
+        database,
+        "provider-showcase",
+        (
+            "At Example Trim Carpentry LLC we build and install custom stairs with professional "
+            "finishes. Contact us today to make your project a reality."
+        ),
+    )
+    stale = database.create_lead(
+        Lead(
+            facebook_post_id=source.id or 0,
+            status=LeadStatus.CANDIDATE,
+            service_category="carpentry",
+            intent=LeadIntent.HIRING,
+            overall_score=86,
+            drafted_response="Fixture draft",
+            ai_provider="heuristic",
+            ai_model="heuristic-v1",
+            classification_version="fixture-v1",
+        )
+    )
+    service = LeadClassificationService(database, HeuristicAIProvider(), context())
+
+    summary = service.reclassify_leads(limit=10, lead_id=stale.id)
+
+    assert summary.leads_considered == 1
+    assert summary.changes[0].prior_status is LeadStatus.CANDIDATE
+    assert summary.changes[0].status is LeadStatus.IGNORED
+    corrected = database.get_lead(stale.id or 0)
+    assert corrected is not None
+    assert corrected.id == stale.id
+    assert corrected.intent is LeadIntent.COMPETITOR_ADVERTISEMENT
+    assert corrected.drafted_response is None
+    assert database.list_audit_events()[-1].action == "lead.reclassified"
+
+
+def test_historical_replay_reports_changes_without_mutating_lead(database: Database) -> None:
+    source = save_post(
+        database,
+        "labor-request",
+        (
+            "Looking for help pressure washing today. I have a pretty big job to do and need a "
+            "little help surface cleaning a large driveway. Anyone interested?"
+        ),
+    )
+    stale = database.create_lead(
+        Lead(
+            facebook_post_id=source.id or 0,
+            status=LeadStatus.CANDIDATE,
+            service_category="pressure_washing",
+            intent=LeadIntent.HIRING,
+            overall_score=96,
+            drafted_response="Fixture draft",
+            classification_version="fixture-v1",
+        )
+    )
+    service = LeadClassificationService(database, HeuristicAIProvider(), context())
+
+    replay = service.replay_history(limit=10, lead_id=stale.id)
+
+    assert replay.leads_considered == 1
+    assert replay.changed == 1
+    assert replay.outcomes[0].replay_status is LeadStatus.IGNORED
+    unchanged = database.get_lead(stale.id or 0)
+    assert unchanged is not None
+    assert unchanged.status is LeadStatus.CANDIDATE
+    assert unchanged.classification_version == "fixture-v1"
 
 
 def test_provider_failure_records_only_safe_error_type(database: Database) -> None:

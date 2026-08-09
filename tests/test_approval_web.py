@@ -1,4 +1,5 @@
 import socket
+import threading
 from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import HTTPServer
@@ -117,6 +118,7 @@ def test_dashboard_renders_cycle_trends_and_current_group_health(tmp_path: Path)
     page = controller.render(now=now)
 
     assert "Historical trends" in page
+    assert "Candidate review quality" in page
     assert "68.8%" in page
     assert "Full group coverage" in page
     assert "Recent cycle details" in page
@@ -176,11 +178,20 @@ def handle_request(
         client.sendall(f"{method} {path} HTTP/1.1\r\n{header_lines}\r\n\r\n".encode() + payload)
         client.shutdown(socket.SHUT_WR)
         handler = _handler_class(controller, port=8765)
-        handler(server, (LOOPBACK_HOST, 12345), cast(HTTPServer, FakeHTTPServer()))
-        server.shutdown(socket.SHUT_WR)
+
+        def serve() -> None:
+            handler(server, (LOOPBACK_HOST, 12345), cast(HTTPServer, FakeHTTPServer()))
+            server.shutdown(socket.SHUT_WR)
+
+        worker = threading.Thread(
+            target=serve,
+        )
+        worker.start()
         chunks: list[bytes] = []
         while chunk := client.recv(65536):
             chunks.append(chunk)
+        worker.join(timeout=2)
+        assert not worker.is_alive()
         raw_headers, raw_body = b"".join(chunks).split(b"\r\n\r\n", maxsplit=1)
         response_header_lines = raw_headers.decode("iso-8859-1").split("\r\n")
         status = int(response_header_lines[0].split()[1])
@@ -274,7 +285,10 @@ def test_controller_supports_explicit_edit_and_reject_decisions(tmp_path: Path) 
     rejected = reject_controller.submit(
         reject_request_id,
         ApprovalAction.REJECT.value,
-        {"csrf_token": ["fixture-csrf"]},
+        {
+            "csrf_token": ["fixture-csrf"],
+            "rejection_reason": ["provider_advertisement"],
+        },
         now=now,
     )
     assert rejected.result == "rejected"
