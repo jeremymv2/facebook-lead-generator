@@ -1,7 +1,9 @@
 import asyncio
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -11,10 +13,16 @@ from lead_agent.cli import build_parser, main
 from lead_agent.config import Settings
 from lead_agent.database import Database
 from lead_agent.facebook_state import FacebookPageState, FacebookSafetyStop
-from lead_agent.groups import FacebookGroup
+from lead_agent.groups import FacebookGroup, GroupsConfigError
 from lead_agent.models import FacebookPost, Lead, LeadIntent, LeadStatus, RejectionReason
 from lead_agent.notifications import SmsDeliveryReceipt, SmsMessage
-from lead_agent.operations import CycleAlreadyRunningError, ScanCycleSummary
+from lead_agent.operations import (
+    CycleAlreadyRunningError,
+    OperationPaths,
+    OperationsState,
+    QuietHoursActiveError,
+    ScanCycleSummary,
+)
 from lead_agent.scanner import ScanSummary, TransientFacebookReadError
 
 
@@ -38,6 +46,9 @@ def test_doctor_reports_safe_state(
     assert payload["daily_posting_limit"] == 5
     assert payload["per_group_daily_posting_limit"] == 2
     assert payload["business_timezone"] == "America/New_York"
+    assert payload["operations_quiet_hours_enabled"] is True
+    assert payload["operations_quiet_hours_start"] == "22:00"
+    assert payload["operations_quiet_hours_end"] == "05:00"
     assert payload["ai_provider"] == "disabled"
     assert payload["ai_ready"] is False
 
@@ -303,12 +314,21 @@ def test_remote_approval_parser_accepts_safe_runtime_options() -> None:
 
 def test_run_cycle_parser_accepts_bounded_manual_options() -> None:
     args = build_parser().parse_args(
-        ["run-cycle", "--max-posts", "12", "--classification-limit", "80", "--skip-notifications"]
+        [
+            "run-cycle",
+            "--max-posts",
+            "12",
+            "--classification-limit",
+            "80",
+            "--skip-notifications",
+            "--ignore-quiet-hours",
+        ]
     )
 
     assert args.max_posts == 12
     assert args.classification_limit == 80
     assert args.skip_notifications is True
+    assert args.ignore_quiet_hours is True
 
 
 def test_operations_pause_status_and_resume_do_not_require_ai_or_facebook(
@@ -328,8 +348,37 @@ def test_operations_pause_status_and_resume_do_not_require_ai_or_facebook(
     status = json.loads(capsys.readouterr().out)
     assert status["paused"] is True
     assert status["status"] == "paused"
+    assert status["quiet_hours_enabled"] is True
+    assert status["quiet_hours_start"] == "22:00"
+    assert status["quiet_hours_end"] == "05:00"
+    assert status["quiet_hours_timezone"] == "America/New_York"
     assert main(["operations-resume"]) == 0
     assert "resumed" in capsys.readouterr().out
+
+
+def test_operations_status_does_not_report_expected_quiet_time_as_stale(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("FACEBOOK_PROFILE_PATH", str(tmp_path.parent / "browser-profile"))
+    state = OperationsState(
+        OperationPaths(
+            state_dir=tmp_path / "data" / "operations",
+            log_dir=tmp_path / "data" / "logs",
+            screenshot_dir=tmp_path / "screenshots",
+        )
+    )
+    state.mark_running(started_at=datetime(2026, 8, 8, tzinfo=UTC))
+    monkeypatch.setattr(cli_module, "_quiet_hours_active", lambda *args, **kwargs: True)
+
+    assert main(["operations-status"]) == 0
+    status = json.loads(capsys.readouterr().out)
+
+    assert status["quiet_hours_active"] is True
+    assert status["stale"] is False
 
 
 def test_group_report_contains_counts_but_no_post_content_or_urls(
@@ -700,6 +749,7 @@ groups:
     monkeypatch.setenv("GROUPS_CONFIG_PATH", str(groups_path))
     monkeypatch.setenv("FACEBOOK_PROFILE_PATH", str(tmp_path.parent / "browser-profile"))
     monkeypatch.setenv("AI_PROVIDER", "heuristic")
+    monkeypatch.setenv("OPERATIONS_QUIET_HOURS_ENABLED", "false")
     return groups_path
 
 
@@ -833,6 +883,55 @@ def test_run_cycle_command_handles_active_lock_without_failure(
 
     assert result == 0
     assert "already running" in capsys.readouterr().out
+
+
+def test_run_cycle_skips_quiet_hours_before_database_or_facebook_work(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    database_path = tmp_path / "data" / "quiet.sqlite3"
+    monkeypatch.setenv("DATABASE_PATH", str(database_path))
+    monkeypatch.setenv("FACEBOOK_PROFILE_PATH", str(tmp_path.parent / "browser-profile"))
+    monkeypatch.setattr(cli_module, "_quiet_hours_active", lambda *args, **kwargs: True)
+
+    result = main(["run-cycle"])
+
+    assert result == 0
+    assert "quiet hours are active" in capsys.readouterr().out
+    assert not database_path.exists()
+
+
+def test_cycle_gate_uses_eastern_wall_clock_and_manual_override(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        database_path=tmp_path / "quiet.sqlite3",
+        groups_config_path=tmp_path / "missing-groups.yaml",
+        facebook_profile_path=tmp_path.parent / "browser-profile",
+    )
+    overnight = datetime(2026, 8, 9, 3, tzinfo=ZoneInfo("America/New_York"))
+
+    with pytest.raises(QuietHoursActiveError, match="22:00-05:00"):
+        cli_module._run_operations_cycle(
+            settings,
+            max_posts=10,
+            classification_limit=10,
+            skip_notifications=True,
+            now=overnight,
+        )
+    assert not settings.database_path.exists()
+    with pytest.raises(GroupsConfigError):
+        cli_module._run_operations_cycle(
+            settings,
+            max_posts=10,
+            classification_limit=10,
+            skip_notifications=True,
+            ignore_quiet_hours=True,
+            now=overnight,
+        )
 
 
 def test_scan_command_uses_allowlist_and_prints_new_posts(

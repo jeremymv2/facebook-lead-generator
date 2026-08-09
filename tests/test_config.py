@@ -1,3 +1,4 @@
+from datetime import time
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,9 @@ def test_safe_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert settings.database_backup_retention_days == 14
     assert settings.database_backup_interval_hours == 24
     assert settings.database_backup_dir == Path("data/backups")
+    assert settings.operations_quiet_hours_enabled is True
+    assert settings.operations_quiet_hours_start == time(hour=22)
+    assert settings.operations_quiet_hours_end == time(hour=5)
     assert settings.browser_channel is None
     assert settings.browser_headless is False
     assert settings.facebook_group_max_retries == 1
@@ -54,6 +58,24 @@ def test_backup_directory_expands_user_path(
     settings = Settings(_env_file=None, database_backup_dir=Path("~/private-lead-backups"))
 
     assert settings.database_backup_dir == Path.home() / "private-lead-backups"
+
+
+def test_quiet_hours_must_use_distinct_minute_precision_times(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError, match="start and end must differ"):
+        Settings(
+            _env_file=None,
+            operations_quiet_hours_start=time(hour=5),
+            operations_quiet_hours_end=time(hour=5),
+        )
+    with pytest.raises(ValidationError, match="hour-and-minute precision"):
+        Settings(
+            _env_file=None,
+            operations_quiet_hours_start=time(hour=22, second=1),
+        )
 
 
 def test_business_timezone_must_be_valid(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -225,11 +247,17 @@ def test_environment_overrides_and_comma_separated_services(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("LEAD_THRESHOLD", "88")
     monkeypatch.setenv("ENABLED_SERVICES", "decks, drywall, flooring")
+    monkeypatch.setenv("OPERATIONS_QUIET_HOURS_ENABLED", "false")
+    monkeypatch.setenv("OPERATIONS_QUIET_HOURS_START", "21:30")
+    monkeypatch.setenv("OPERATIONS_QUIET_HOURS_END", "04:30")
 
     settings = Settings(_env_file=None)
 
     assert settings.lead_threshold == 88
     assert settings.enabled_services == ["decks", "drywall", "flooring"]
+    assert settings.operations_quiet_hours_enabled is False
+    assert settings.operations_quiet_hours_start == time(hour=21, minute=30)
+    assert settings.operations_quiet_hours_end == time(hour=4, minute=30)
 
 
 def test_ai_provider_and_secret_configuration_are_normalized(

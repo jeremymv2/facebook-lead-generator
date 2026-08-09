@@ -1,7 +1,8 @@
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import cast
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -18,6 +19,7 @@ from lead_agent.operations import (
     RetentionService,
     RetentionSummary,
     ScanCycleSummary,
+    is_within_quiet_hours,
 )
 
 
@@ -27,6 +29,56 @@ def operation_paths(tmp_path: Path) -> OperationPaths:
         log_dir=tmp_path / "logs",
         screenshot_dir=tmp_path / "screenshots",
     )
+
+
+@pytest.mark.parametrize(
+    ("hour", "minute", "expected"),
+    [
+        (21, 59, False),
+        (22, 0, True),
+        (23, 59, True),
+        (0, 0, True),
+        (4, 59, True),
+        (5, 0, False),
+    ],
+)
+def test_cross_midnight_quiet_hours_boundaries(hour: int, minute: int, expected: bool) -> None:
+    timestamp = datetime(
+        2026,
+        8,
+        9,
+        hour,
+        minute,
+        tzinfo=ZoneInfo("America/New_York"),
+    )
+
+    assert (
+        is_within_quiet_hours(
+            timestamp,
+            timezone="America/New_York",
+            start=time(hour=22),
+            end=time(hour=5),
+        )
+        is expected
+    )
+
+
+def test_quiet_hours_support_daytime_windows_and_require_aware_time() -> None:
+    midday = datetime(2026, 8, 9, 12, tzinfo=UTC)
+
+    assert is_within_quiet_hours(
+        midday,
+        timezone="UTC",
+        start=time(hour=9),
+        end=time(hour=17),
+    )
+    with pytest.raises(ValueError, match="timezone-aware"):
+        is_within_quiet_hours(
+            midday.replace(tzinfo=None),
+            timezone="UTC",
+            start=time(hour=22),
+            end=time(hour=5),
+        )
 
 
 def test_cycle_lock_rejects_an_overlapping_process(tmp_path: Path) -> None:
