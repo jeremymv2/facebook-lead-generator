@@ -1,13 +1,20 @@
+import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import lead_agent.cli as cli_module
 from lead_agent.cli import build_parser, main
+from lead_agent.config import Settings
 from lead_agent.database import Database
+from lead_agent.facebook_state import FacebookPageState, FacebookSafetyStop
+from lead_agent.groups import FacebookGroup
 from lead_agent.models import FacebookPost, Lead, LeadIntent, LeadStatus
 from lead_agent.notifications import SmsDeliveryReceipt, SmsMessage
+from lead_agent.operations import CycleAlreadyRunningError, ScanCycleSummary
+from lead_agent.scanner import ScanSummary, TransientFacebookReadError
 
 
 def test_doctor_reports_safe_state(
@@ -426,6 +433,325 @@ def test_remote_approval_command_uses_provider_abstraction_and_loopback_server(
         "periodic_callback": True,
         "callback_interval_seconds": 10,
     }
+
+
+def test_unattended_cycle_retries_only_transient_group_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    groups = [
+        FacebookGroup(
+            id="recovering",
+            name="Recovering Group",
+            url="https://www.facebook.com/groups/111",
+            enabled=True,
+        ),
+        FacebookGroup(
+            id="failing",
+            name="Failing Group",
+            url="https://www.facebook.com/groups/222",
+            enabled=True,
+        ),
+    ]
+    outcomes: dict[str, list[ScanSummary | Exception]] = {
+        "recovering": [
+            TransientFacebookReadError(stage="feed", kind="timeout"),
+            ScanSummary(groups[0], posts_seen=4, new_posts=()),
+        ],
+        "failing": [
+            TransientFacebookReadError(stage="navigation", kind="timeout"),
+            TransientFacebookReadError(stage="navigation", kind="timeout"),
+        ],
+    }
+    sleeps: list[float] = []
+
+    class FakeBrowser:
+        def __init__(self, settings: Settings) -> None:
+            del settings
+
+        async def __aenter__(self) -> "FakeBrowser":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+    class FakeScanner:
+        def __init__(self, database: Database, browser: object) -> None:
+            del database, browser
+
+        async def scan_group(self, group: FacebookGroup, *, max_posts: int) -> ScanSummary:
+            assert max_posts == 10
+            outcome = outcomes[group.id].pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(cli_module, "FacebookReadOnlyBrowser", FakeBrowser)
+    monkeypatch.setattr(cli_module, "ReadOnlyScanService", FakeScanner)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    settings = Settings(
+        _env_file=None,
+        database_path=tmp_path / "cycle.sqlite3",
+        data_dir=tmp_path / "data",
+        facebook_profile_path=tmp_path.parent / "browser-profile",
+        facebook_group_max_retries=1,
+        facebook_group_retry_backoff_seconds=5,
+        facebook_group_delay_seconds=2,
+    )
+
+    summary = asyncio.run(cli_module._scan_groups_for_cycle(settings, groups, max_posts=10))
+
+    assert summary.groups_scanned == 1
+    assert summary.groups_failed == 1
+    assert summary.groups_retried == 2
+    assert summary.groups_recovered == 1
+    assert summary.posts_seen == 4
+    assert sleeps == [5, 2, 5]
+
+
+def test_unattended_cycle_never_retries_a_facebook_safety_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    group = FacebookGroup(
+        id="checkpoint",
+        name="Checkpoint Group",
+        url="https://www.facebook.com/groups/111",
+        enabled=True,
+    )
+
+    class FakeBrowser:
+        def __init__(self, settings: Settings) -> None:
+            del settings
+
+        async def __aenter__(self) -> "FakeBrowser":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+    class FakeScanner:
+        def __init__(self, database: Database, browser: object) -> None:
+            del database, browser
+
+        async def scan_group(self, group: FacebookGroup, *, max_posts: int) -> ScanSummary:
+            del group, max_posts
+            raise FacebookSafetyStop(FacebookPageState.CHECKPOINT, "human review required")
+
+    monkeypatch.setattr(cli_module, "FacebookReadOnlyBrowser", FakeBrowser)
+    monkeypatch.setattr(cli_module, "ReadOnlyScanService", FakeScanner)
+    settings = Settings(
+        _env_file=None,
+        database_path=tmp_path / "safety-stop.sqlite3",
+        data_dir=tmp_path / "data",
+        facebook_profile_path=tmp_path.parent / "browser-profile",
+    )
+
+    with pytest.raises(FacebookSafetyStop):
+        asyncio.run(cli_module._scan_groups_for_cycle(settings, [group], max_posts=10))
+
+
+def configure_cycle_fixture(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> Path:
+    groups_path = tmp_path / "groups.yaml"
+    groups_path.write_text(
+        """
+groups:
+  - id: fixture-group
+    name: Fixture Group
+    url: https://www.facebook.com/groups/111
+    enabled: true
+    priority: 1
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "data" / "cycle.sqlite3"))
+    monkeypatch.setenv("GROUPS_CONFIG_PATH", str(groups_path))
+    monkeypatch.setenv("FACEBOOK_PROFILE_PATH", str(tmp_path.parent / "browser-profile"))
+    monkeypatch.setenv("AI_PROVIDER", "heuristic")
+    return groups_path
+
+
+def test_run_cycle_command_executes_content_free_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_cycle_fixture(monkeypatch, tmp_path)
+
+    async def fake_scan(
+        settings: Settings,
+        groups: list[FacebookGroup],
+        *,
+        max_posts: int,
+    ) -> ScanCycleSummary:
+        del settings
+        assert [group.id for group in groups] == ["fixture-group"]
+        assert max_posts == 10
+        return ScanCycleSummary(
+            groups_scanned=1,
+            groups_failed=0,
+            posts_seen=4,
+            posts_new=0,
+            duplicates=4,
+            groups_retried=1,
+            groups_recovered=1,
+        )
+
+    monkeypatch.setattr(cli_module, "_scan_groups_for_cycle", fake_scan)
+
+    result = main(
+        ["run-cycle", "--max-posts", "10", "--classification-limit", "5", "--skip-notifications"]
+    )
+    output = capsys.readouterr().out
+    payload = json.loads(output)
+
+    assert result == 0
+    assert payload["status"] == "success"
+    assert payload["scan"]["groups_retried"] == 1
+    assert payload["scan"]["groups_recovered"] == 1
+    database = Database(tmp_path / "data" / "cycle.sqlite3")
+    assert [event.action for event in database.list_audit_events()] == ["cycle.run"]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["run-cycle", "--max-posts", "51"],
+        ["run-cycle", "--classification-limit", "1001"],
+    ],
+)
+def test_run_cycle_command_enforces_safety_caps_without_details(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    arguments: list[str],
+) -> None:
+    configure_cycle_fixture(monkeypatch, tmp_path)
+
+    result = main(arguments)
+
+    assert result == 2
+    assert "Stopped safely:" in capsys.readouterr().err
+
+
+def test_run_cycle_command_handles_active_lock_without_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_cycle_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        cli_module,
+        "_run_operations_cycle",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            CycleAlreadyRunningError("fixture cycle already running")
+        ),
+    )
+
+    result = main(["run-cycle"])
+
+    assert result == 0
+    assert "already running" in capsys.readouterr().out
+
+
+def test_scan_command_uses_allowlist_and_prints_new_posts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_cycle_fixture(monkeypatch, tmp_path)
+    discovered = FacebookPost(
+        external_post_id="222",
+        post_url="https://www.facebook.com/groups/111/posts/222",
+        group_id="fixture-group",
+        group_name="Fixture Group",
+        post_text="Need someone for a deck repair estimate.",
+    )
+
+    async def fake_scan(
+        settings: Settings,
+        groups: list[FacebookGroup],
+        *,
+        max_posts: int,
+        pause_after_scan: bool,
+    ) -> list[ScanSummary]:
+        del settings
+        assert max_posts == 10
+        assert pause_after_scan is False
+        return [ScanSummary(groups[0], posts_seen=1, new_posts=(discovered,))]
+
+    monkeypatch.setattr(cli_module, "_scan_groups", fake_scan)
+
+    result = main(["scan-facebook", "--group-id", "fixture-group", "--max-posts", "10"])
+    output = capsys.readouterr().out
+
+    assert result == 0
+    assert "seen=1 new=1 duplicates=0" in output
+    assert discovered.post_url is not None
+    assert discovered.post_url in output
+    assert discovered.post_text in output
+
+
+def test_manual_login_command_reports_success_and_safe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_cycle_fixture(monkeypatch, tmp_path)
+
+    async def successful_login(settings: Settings) -> None:
+        del settings
+
+    monkeypatch.setattr(cli_module, "_manual_login", successful_login)
+    assert main(["facebook-login"]) == 0
+    assert "verified" in capsys.readouterr().out
+
+    async def failed_login(settings: Settings) -> None:
+        del settings
+        raise FacebookSafetyStop(FacebookPageState.LOGIN_REQUIRED, "manual login required")
+
+    monkeypatch.setattr(cli_module, "_manual_login", failed_login)
+    assert main(["facebook-login"]) == 2
+    assert "manual login required" in capsys.readouterr().err
+
+
+def test_post_approved_dry_run_reports_validation_without_browser_actions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_cycle_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli_module, "ApprovedPostingService", lambda *args, **kwargs: object())
+
+    async def fake_execute(
+        settings: Settings,
+        service: object,
+        *,
+        lead_id: int,
+        dry_run: bool,
+    ) -> object:
+        del settings, service
+        assert lead_id == 12
+        assert dry_run is True
+        return SimpleNamespace(
+            created=True,
+            work=SimpleNamespace(attempt=SimpleNamespace(status=SimpleNamespace(value="dry_run"))),
+        )
+
+    monkeypatch.setattr(cli_module, "_execute_approved_posting", fake_execute)
+
+    result = main(["post-approved", "--lead-id", "12"])
+
+    assert result == 0
+    assert "DRY RUN lead=12 validated" in capsys.readouterr().out
 
 
 def test_scan_command_fails_closed_when_no_group_is_enabled(

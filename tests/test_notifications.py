@@ -1,8 +1,17 @@
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from email.message import Message
+from io import BytesIO
 from pathlib import Path
+from typing import cast
+from urllib.error import HTTPError, URLError
+from urllib.request import Request
 
+import pytest
+
+import lead_agent.notifications as notifications_module
 from lead_agent.approvals import LocalApprovalService
+from lead_agent.config import Settings
 from lead_agent.database import Database
 from lead_agent.models import FacebookPost, Lead, LeadIntent, LeadStatus, NotificationStatus
 from lead_agent.notifications import (
@@ -11,6 +20,8 @@ from lead_agent.notifications import (
     SmsMessage,
     SmsProviderError,
     TelnyxSmsProvider,
+    UrllibJsonPostTransport,
+    build_sms_provider,
     remote_token_hash,
 )
 
@@ -76,6 +87,21 @@ class FakeTransport:
         self.payload = payload
         self.timeout_seconds = timeout_seconds
         return self.response
+
+
+class FakeUrlResponse:
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    def __enter__(self) -> "FakeUrlResponse":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        del args
+
+    def read(self, limit: int) -> bytes:
+        assert limit == 65_537
+        return self.body
 
 
 def test_telnyx_adapter_isolated_behind_sms_contract() -> None:
@@ -240,3 +266,185 @@ def test_unreachable_relay_does_not_start_expiration_or_send_sms(tmp_path: Path)
     assert provider.messages == []
     assert database.list_pending_approval_reviews() == []
     assert len(database.list_candidate_leads(limit=10)) == 1
+
+
+@pytest.mark.parametrize(
+    ("to", "body", "idempotency_key", "expected"),
+    [
+        ("502-555-0101", "Review", "approval:1", "E.164"),
+        ("+15025550101", "", "approval:1", "non-empty ASCII"),
+        ("+15025550101", "snowman ☃", "approval:1", "non-empty ASCII"),
+        ("+15025550101", "Review", "   ", "cannot be empty"),
+    ],
+)
+def test_sms_message_rejects_noncompliant_fields(
+    to: str,
+    body: str,
+    idempotency_key: str,
+    expected: str,
+) -> None:
+    with pytest.raises(ValueError, match=expected):
+        SmsMessage(to=to, body=body, idempotency_key=idempotency_key)
+
+
+@pytest.mark.parametrize(
+    ("api_key", "from_number", "expected"),
+    [
+        ("   ", "+15025550100", "API key"),
+        ("fixture", "502-555-0100", "E.164"),
+    ],
+)
+def test_telnyx_provider_rejects_invalid_credentials(
+    api_key: str,
+    from_number: str,
+    expected: str,
+) -> None:
+    with pytest.raises(ValueError, match=expected):
+        TelnyxSmsProvider(
+            api_key=api_key,
+            from_number=from_number,
+            timeout_seconds=5,
+        )
+
+
+def test_urllib_transport_posts_json_and_decodes_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(request: object, timeout: int) -> FakeUrlResponse:
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return FakeUrlResponse(b'{"data":{"id":"message-id"}}')
+
+    monkeypatch.setattr(notifications_module, "urlopen", fake_urlopen)
+    transport = UrllibJsonPostTransport()
+
+    response = transport.post(
+        "https://api.telnyx.com/v2/messages",
+        headers={"Authorization": "Bearer redacted"},
+        payload={"to": "+15025550101", "text": "Review"},
+        timeout_seconds=7,
+    )
+
+    assert response == {"data": {"id": "message-id"}}
+    request = cast(Request, captured["request"])
+    assert request.full_url == "https://api.telnyx.com/v2/messages"
+    assert request.method == "POST"
+    assert captured["timeout"] == 7
+
+
+def test_urllib_transport_reduces_http_failure_to_telnyx_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(request: object, timeout: int) -> FakeUrlResponse:
+        del request, timeout
+        raise HTTPError(
+            "https://api.telnyx.com/v2/messages",
+            422,
+            "rejected",
+            hdrs=Message(),
+            fp=BytesIO(b'{"errors":[{"code":"40300"}]}'),
+        )
+
+    monkeypatch.setattr(notifications_module, "urlopen", fail)
+
+    with pytest.raises(SmsProviderError, match="40300"):
+        UrllibJsonPostTransport().post(
+            "https://api.telnyx.com/v2/messages",
+            headers={},
+            payload={},
+            timeout_seconds=5,
+        )
+
+
+def test_urllib_transport_reduces_network_failure_without_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(request: object, timeout: int) -> FakeUrlResponse:
+        del request, timeout
+        raise URLError("private network detail")
+
+    monkeypatch.setattr(notifications_module, "urlopen", fail)
+
+    with pytest.raises(SmsProviderError, match="failed before acceptance") as captured:
+        UrllibJsonPostTransport().post(
+            "https://api.telnyx.com/v2/messages",
+            headers={},
+            payload={},
+            timeout_seconds=5,
+        )
+    assert "private network detail" not in str(captured.value)
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (b"x" * 65_537, "oversized"),
+        (b"not-json", "invalid response"),
+        (b"[]", "invalid response"),
+    ],
+)
+def test_urllib_transport_rejects_invalid_provider_responses(
+    monkeypatch: pytest.MonkeyPatch,
+    body: bytes,
+    expected: str,
+) -> None:
+    monkeypatch.setattr(
+        notifications_module,
+        "urlopen",
+        lambda request, timeout: FakeUrlResponse(body),
+    )
+
+    with pytest.raises(SmsProviderError, match=expected):
+        UrllibJsonPostTransport().post(
+            "https://api.telnyx.com/v2/messages",
+            headers={},
+            payload={},
+            timeout_seconds=5,
+        )
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {},
+        {"data": {}},
+        {"data": {"id": ""}},
+        {"data": {"id": 123}},
+    ],
+)
+def test_telnyx_provider_requires_message_id(response: Mapping[str, object]) -> None:
+    provider = TelnyxSmsProvider(
+        api_key="fixture",
+        from_number="+15025550100",
+        timeout_seconds=5,
+        transport=FakeTransport(response),
+    )
+
+    with pytest.raises(SmsProviderError, match=r"message data|message ID"):
+        provider.send(
+            SmsMessage(
+                to="+15025550101",
+                body="Review requested",
+                idempotency_key="approval:1",
+            )
+        )
+
+
+def test_build_sms_provider_uses_validated_telnyx_settings(tmp_path: Path) -> None:
+    settings = Settings(
+        _env_file=None,
+        facebook_profile_path=tmp_path.parent / "browser-profile",
+        notifications_enabled=True,
+        sms_provider="telnyx",
+        remote_approval_base_url="https://approve.example",
+        approval_signing_key="s" * 48,
+        sms_recipient_number="+15025550101",
+        telnyx_api_key="fixture-secret",
+        telnyx_from_number="+15025550100",
+    )
+
+    provider = build_sms_provider(settings)
+
+    assert provider.name == "telnyx"

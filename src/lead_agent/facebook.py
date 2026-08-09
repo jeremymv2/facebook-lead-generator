@@ -22,6 +22,7 @@ from lead_agent.facebook_state import (
 )
 from lead_agent.groups import FacebookGroup
 from lead_agent.models import FacebookPost, canonicalize_facebook_url, normalize_post_text
+from lead_agent.scanner import TransientFacebookReadError
 
 FACEBOOK_HOME = "https://www.facebook.com/"
 POST_PATH_PATTERN = re.compile(r"/(?:posts|permalink)/([^/?#]+)", re.IGNORECASE)
@@ -304,23 +305,49 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 )
         except FacebookSafetyStop:
             raise
-        except PlaywrightTimeoutError:
-            await self._require_normal_page(page, group_id=group.id)
-            await self._stop(
-                page,
-                group.id,
-                FacebookPageState.UNEXPECTED,
-                "No visible Facebook posts appeared before the safety timeout",
-            )
-        except Error:
-            await self._stop(
-                page,
-                group.id,
-                FacebookPageState.UNEXPECTED,
-                "Facebook could not be opened safely",
-            )
+        except PlaywrightTimeoutError as error:
+            try:
+                await self._require_normal_page(page, group_id=group.id)
+            except FacebookSafetyStop:
+                raise
+            except Error:
+                # A replaced/closed body during timeout assessment remains a bounded transient
+                # failure. It never weakens explicit login, CAPTCHA, checkpoint, or domain stops.
+                pass
+            raise TransientFacebookReadError(
+                stage="navigation",
+                kind="timeout",
+                screenshot_path=await self._capture_failure(
+                    page, group.id, "transient-navigation-timeout"
+                ),
+            ) from error
+        except Error as error:
+            raise TransientFacebookReadError(
+                stage="navigation",
+                kind="playwright_error",
+                screenshot_path=await self._capture_failure(
+                    page, group.id, "transient-navigation-error"
+                ),
+            ) from error
 
-        return await self._wait_for_readable_posts(page, group, max_posts=max_posts)
+        try:
+            return await self._wait_for_readable_posts(page, group, max_posts=max_posts)
+        except FacebookSafetyStop:
+            raise
+        except PlaywrightTimeoutError as error:
+            raise TransientFacebookReadError(
+                stage="feed",
+                kind="timeout",
+                screenshot_path=await self._capture_failure(
+                    page, group.id, "transient-feed-timeout"
+                ),
+            ) from error
+        except Error as error:
+            raise TransientFacebookReadError(
+                stage="feed",
+                kind="playwright_error",
+                screenshot_path=await self._capture_failure(page, group.id, "transient-feed-error"),
+            ) from error
 
     async def _wait_for_readable_posts(
         self,

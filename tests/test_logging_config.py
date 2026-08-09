@@ -21,6 +21,10 @@ def test_json_formatter_emits_context_fields() -> None:
     record.action = "post.discovered"
     record.post_id = 42
     record.group = "louisville-homeowners"
+    record.group_id = "louisville-homeowners"
+    record.attempt = 2
+    record.error_code = "feed:timeout"
+    record.retry_in_seconds = 5
     record.result = "new"
 
     payload = json.loads(JsonFormatter().format(record))
@@ -28,6 +32,10 @@ def test_json_formatter_emits_context_fields() -> None:
     assert payload["component"] == "lead_agent.scanner"
     assert payload["action"] == "post.discovered"
     assert payload["post_id"] == 42
+    assert payload["group_id"] == "louisville-homeowners"
+    assert payload["attempt"] == 2
+    assert payload["error_code"] == "feed:timeout"
+    assert payload["retry_in_seconds"] == 5
     assert payload["severity"] == "INFO"
 
 

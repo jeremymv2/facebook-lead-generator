@@ -13,6 +13,7 @@ from lead_agent.approval_web import (
     CSRFFailure,
     LocalApprovalController,
     _handler_class,
+    _safe_facebook_post_url,
 )
 from lead_agent.approvals import ApprovalAction, LocalApprovalService
 from lead_agent.database import Database
@@ -97,18 +98,18 @@ def handle_request(
     method: str,
     path: str,
     *,
-    body: str | None = None,
+    body: str | bytes | None = None,
     headers: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, str], str]:
     client, server = socket.socketpair()
     try:
-        payload = (body or "").encode("utf-8")
+        payload = body if isinstance(body, bytes) else (body or "").encode("utf-8")
         request_headers = {
             "Host": f"{LOOPBACK_HOST}:8765",
             "Connection": "close",
             **(headers or {}),
         }
-        if payload:
+        if payload and "Content-Length" not in request_headers:
             request_headers["Content-Length"] = str(len(payload))
         header_lines = "\r\n".join(f"{name}: {value}" for name, value in request_headers.items())
         client.sendall(f"{method} {path} HTTP/1.1\r\n{header_lines}\r\n\r\n".encode() + payload)
@@ -188,3 +189,114 @@ def test_loopback_server_enforces_headers_csrf_and_one_time_decision(tmp_path: P
     )
     assert status == HTTPStatus.CONFLICT
     assert "already been decided" in page
+
+
+def test_controller_supports_explicit_edit_and_reject_decisions(tmp_path: Path) -> None:
+    edit_directory = tmp_path / "edit"
+    edit_directory.mkdir()
+    edit_controller, edit_request_id, now = prepared_controller(edit_directory)
+    edited = edit_controller.submit(
+        edit_request_id,
+        ApprovalAction.EDIT.value,
+        {
+            "csrf_token": ["fixture-csrf"],
+            "response": [VALID_DRAFT],
+        },
+        now=now,
+    )
+    assert edited.result == "edited"
+    assert "Edited response approved" in edited.message
+
+    reject_directory = tmp_path / "reject"
+    reject_directory.mkdir()
+    reject_controller, reject_request_id, now = prepared_controller(reject_directory)
+    rejected = reject_controller.submit(
+        reject_request_id,
+        ApprovalAction.REJECT.value,
+        {"csrf_token": ["fixture-csrf"]},
+        now=now,
+    )
+    assert rejected.result == "rejected"
+    assert "Lead rejected" in rejected.message
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, None),
+        ("http://www.facebook.com/groups/111/posts/222", None),
+        ("https://example.com/groups/111/posts/222", None),
+        (
+            "https://www.facebook.com/groups/111/posts/222",
+            "https://www.facebook.com/groups/111/posts/222",
+        ),
+    ],
+)
+def test_dashboard_links_only_to_https_facebook_posts(
+    value: str | None,
+    expected: str | None,
+) -> None:
+    assert _safe_facebook_post_url(value) == expected
+
+
+def test_loopback_server_rejects_malformed_requests(tmp_path: Path) -> None:
+    controller, request_id, _ = prepared_controller(tmp_path)
+    valid_path = f"/approvals/{request_id}/approve"
+    host = f"{LOOPBACK_HOST}:8765"
+    origin = f"http://{host}"
+
+    status, _, body = handle_request(controller, "GET", "/health")
+    assert status == HTTPStatus.OK
+    assert body == "ok"
+    status, _, _ = handle_request(controller, "GET", "/missing")
+    assert status == HTTPStatus.NOT_FOUND
+    status, _, page = handle_request(controller, "GET", "/?result=rejected")
+    assert status == HTTPStatus.OK
+    assert "Lead rejected" in page
+
+    cases: list[tuple[str, str | bytes, dict[str, str], HTTPStatus]] = [
+        (valid_path, "", {"Host": "attacker.invalid"}, HTTPStatus.MISDIRECTED_REQUEST),
+        ("/not-an-approval", "", {"Origin": origin}, HTTPStatus.NOT_FOUND),
+        (valid_path, "x", {"Origin": origin}, HTTPStatus.UNSUPPORTED_MEDIA_TYPE),
+        (
+            valid_path,
+            "x",
+            {
+                "Origin": origin,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Length": "bad",
+            },
+            HTTPStatus.BAD_REQUEST,
+        ),
+        (
+            valid_path,
+            "",
+            {"Origin": origin, "Content-Type": "application/x-www-form-urlencoded"},
+            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+        ),
+        (
+            valid_path,
+            "x",
+            {
+                "Origin": origin,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Length": "4097",
+            },
+            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+        ),
+        (
+            valid_path,
+            b"\xff",
+            {"Origin": origin, "Content-Type": "application/x-www-form-urlencoded"},
+            HTTPStatus.BAD_REQUEST,
+        ),
+    ]
+    for path, body_value, headers, expected in cases:
+        status, _, _ = handle_request(
+            controller,
+            "POST",
+            path,
+            body=body_value,
+            headers=headers,
+        )
+        assert status == expected

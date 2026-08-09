@@ -9,7 +9,7 @@ explicitly approved set of Louisville-area Facebook groups. The intended product
 
 > Detect → classify → score → draft → notify → human approve/edit/reject → validate → post once
 
-This repository is currently at **Phase 8: local unattended operations**. It includes safe
+This repository is currently at **Phase 9: reliability and coverage hardening**. It includes safe
 configuration, a dedicated persistent Playwright profile, explicit group allowlisting, visible-post
 extraction, alias-based SQLite duplicate prevention, durable per-group scan health, synthetic
 selector fixtures, swappable structured lead providers, candidate-only response drafting,
@@ -135,11 +135,11 @@ Important settings include:
 | --- | --- | --- |
 | `POSTING_ENABLED` | `false` | Global posting kill switch |
 | `DRY_RUN` | `true` | Prevents submission while exercising future workflows |
-| `SCAN_INTERVAL_SECONDS` | `300` | Target interval between group scans |
+| `SCAN_INTERVAL_SECONDS` | `900` | Conservative interval between unattended cycles |
 | `LEAD_THRESHOLD` | `75` | Minimum score for an approval candidate |
 | `SERVICE_AREA` | `Louisville, Kentucky` | Primary geographic target |
 | `APPROVAL_EXPIRATION_MINUTES` | `20` | Local review lifetime |
-| `CANDIDATE_DUPLICATE_WINDOW_HOURS` | `72` | Suppress nearby exact-text reviews in one group |
+| `CANDIDATE_DUPLICATE_WINDOW_HOURS` | `72` | Suppress nearby exact-text reviews across groups |
 | `APPROVAL_LOCAL_PORT` | `8765` | Loopback-only local review dashboard port |
 | `REMOTE_APPROVAL_PORT` | `8766` | Separate loopback origin intended for a secure relay |
 | `POSTING_APPROVAL_MAX_AGE_MINUTES` | `20` | Maximum terminal-approval age at posting time |
@@ -158,6 +158,9 @@ Important settings include:
 | `CYCLE_CLASSIFICATION_LIMIT` | `100` | Maximum saved posts classified per cycle |
 | `FACEBOOK_PROFILE_PATH` | `~/.jjmiller-lead-agent/facebook-profile` | Dedicated persistent profile |
 | `BROWSER_HEADLESS` | `false` | Keeps manual login and scan behavior visible |
+| `FACEBOOK_GROUP_MAX_RETRIES` | `1` | Bounded transient retries per group and cycle |
+| `FACEBOOK_GROUP_RETRY_BACKOFF_SECONDS` | `5` | Delay before the one transient retry |
+| `FACEBOOK_GROUP_DELAY_SECONDS` | `2` | Delay between unattended group navigations |
 | `FACEBOOK_MAX_SCROLLS` | `12` | Maximum bounded lazy-load scrolls per group |
 | `FACEBOOK_SCROLL_SETTLE_SECONDS` | `0.75` | Wait after each bounded scroll |
 | `MAX_POSTS_PER_GROUP` | `20` | Conservative visible-post cap per run |
@@ -221,7 +224,7 @@ pre-commit run --all-files --hook-stage pre-push
 ```
 
 Pull requests expose separate required-ready status checks for lint/type safety, unit-test coverage,
-and independent full-history secret scanning. Coverage fails below 85% and publishes its full
+and independent full-history secret scanning. Coverage fails below 90% and publishes its full
 terminal report in the GitHub Actions job summary. Live Facebook tests must never run in GitHub
 Actions.
 
@@ -341,8 +344,11 @@ AI_PROVIDER=heuristic lead-agent run-cycle --max-posts 10 --skip-notifications
 ```
 
 Unlike `scan-facebook`, `run-cycle` prints only aggregate counts and never prints discovered post
-text. Ordinary failure in one group is recorded and the remaining groups continue; a Facebook
-checkpoint, CAPTCHA, or other safety stop still aborts the whole cycle.
+text. Unattended cycles wait between groups and retry a typed transient navigation/feed failure at
+most once after a bounded backoff. Aggregate health reports retry and recovery counts. An exhausted
+transient failure is recorded and the remaining groups continue; a Facebook login requirement,
+checkpoint, CAPTCHA, unexpected domain, or other safety stop is never retried and still aborts the
+whole cycle. Content-free logs identify only the group alias, attempt, stage, and safe error code.
 
 If the scan stops safely, do not automate around the challenge. Review the terminal reason and the
 single PNG in `screenshots/` if one was captured, then resolve login, MFA, CAPTCHA, or checkpoint
@@ -671,9 +677,12 @@ is idempotent.
    and expose only per-request cryptographic review URLs through an outbound HTTPS relay.
 7. **Idempotent approved posting:** final validation, limits, screenshots,
    one live attempt, and stop-on-uncertainty behavior.
-8. **Local unattended operations (this milestone):** locked scan/classify/notify cycles, macOS
+8. **Local unattended operations:** locked scan/classify/notify cycles, macOS
    launch agents, pause controls, content-free health, retention, duplicate review suppression,
    and group-quality reporting.
+9. **Reliability and coverage hardening (this milestone):** conservative scheduling, bounded
+   transient group retries, safe retry diagnostics, security-boundary tests, and an enforced 90%
+   branch-coverage floor.
 
 The first browser milestone is successful only when a second read-only run stores no duplicate
 posts and the software remains incapable of commenting.

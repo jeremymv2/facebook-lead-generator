@@ -59,6 +59,8 @@ class ScanCycleSummary:
     posts_seen: int
     posts_new: int
     duplicates: int
+    groups_retried: int = 0
+    groups_recovered: int = 0
 
 
 @dataclass(frozen=True, slots=True)
