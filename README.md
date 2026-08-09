@@ -13,7 +13,7 @@ This repository is currently at **Phase 11: review feedback and recovery hardeni
 configuration, a dedicated persistent Playwright profile, explicit group allowlisting, visible-post
 extraction, alias-based SQLite duplicate prevention, durable per-group scan health, synthetic
 selector fixtures, swappable structured lead providers, candidate-only response drafting,
-an expiring loopback-only approve/edit/reject dashboard, a separately isolated tokenized mobile
+a durable loopback-only approve/edit/reject backlog, a separately isolated tokenized mobile
 review origin, provider-independent SMS delivery with a Telnyx adapter, structured logging, tests,
 and CI. A macOS user launch agent can run locked scan/classify/notify cycles with pause controls,
 content-free health, bounded scheduling, retention, duplicate-review suppression, and group-yield
@@ -39,7 +39,8 @@ The project fails closed:
 - Low-score, spam, competitor, sales, advice-only, and unrelated posts never receive drafts.
 - The local approval dashboard binds only to `127.0.0.1`, validates CSRF and local Host/Origin
   headers, and remains incapable of Facebook submission.
-- Approval decisions are atomic, expire quickly, and can transition only once.
+- Approval decisions are atomic and can transition only once. Local candidates remain reviewable
+  until decided; tunneled mobile links retain their short expiration window.
 - Rejections require a structured reason, making classifier quality measurable without placing
   source post text in operations history.
 - Historical classifier replay is read-only. Reclassification is limited transactionally to
@@ -485,10 +486,11 @@ Use the same copied database after it contains classified candidate leads:
 DATABASE_PATH=data/lead_agent.phase4-test.sqlite3 lead-agent approval-dashboard
 ```
 
-Open `http://127.0.0.1:8765` on the same Mac. The page displays the source post, score, proposed
-response, and remaining review time. Each candidate can be approved exactly as drafted, edited and
-approved, or rejected. Edited responses must still satisfy the local company identity, free
-estimate, full website URL, text-number, and length rules.
+Open `http://127.0.0.1:8765` on the same Mac. The page displays every candidate from the
+current classifier version, including candidates whose earlier review window expired. New candidates
+appear on refresh and remain in the local backlog until approved or rejected. Each candidate can be
+approved exactly as drafted, edited and approved, or rejected. Edited responses must still satisfy
+the local company identity, free-estimate, full website URL, text-number, and length rules.
 
 Every rejection requires one structured reason such as provider advertisement, employment
 recruiting, wrong geography, irrelevant service, resolved, or duplicate/repost. The dashboard shows
@@ -512,9 +514,10 @@ counts, and shows the current failure streak and last success for every configur
 classification, candidate, and notification counters. Times use `BUSINESS_TIMEZONE`. No post text,
 draft response, Facebook URL, phone number, or credential is copied into trend records.
 
-Starting review changes a candidate to `pending_approval` and snapshots the draft so later data
-changes cannot silently alter what was reviewed. The default review window is 20 minutes. A terminal
-decision cannot be changed or replayed; expired requests require a new review workflow. Every state
+Opening or refreshing the local dashboard does not start an expiration clock or change candidate
+state. When a reviewer submits a decision, the application snapshots the draft and applies that
+one-time decision immediately. Previously expired, undecided requests return to the candidate
+backlog. The 20-minute window still applies to separately tokenized mobile reviews. Every state
 change is written to the audit trail without logging source text or approved response content.
 
 The dashboard is intentionally local-only: it binds to `127.0.0.1`, has no configurable public host,
@@ -776,8 +779,8 @@ is idempotent.
    candidates, deduplicate changing Facebook identities, and persist recoverable group health.
 4. **Swappable AI classification/scoring and drafting:** validate structured
    classifications, draft only strong candidates, and remain incapable of Facebook submission.
-5. **Loopback-only local human approval:** snapshot drafts and support expiring,
-   one-time approve/edit/reject decisions with no Facebook posting capability.
+5. **Loopback-only local human approval:** retain a durable candidate backlog and snapshot drafts
+   only when applying one-time approve/edit/reject decisions, with no Facebook posting capability.
 6. **Tunneled remote/mobile approval:** keep state on the Mac, send Telnyx alerts,
    and expose only per-request cryptographic review URLs through an outbound HTTPS relay.
 7. **Idempotent approved posting:** final validation, limits, screenshots,
