@@ -155,6 +155,8 @@ Important settings include:
 | `BUSINESS_TIMEZONE` | `America/New_York` | Local calendar used by posting limits |
 | `OPERATIONS_LOG_RETENTION_DAYS` | `14` | Rotated local operations-log retention |
 | `OPERATIONS_LOG_MAX_BYTES` | `5000000` | Rotate an operations log after this size |
+| `OPERATIONS_DEGRADED_CYCLE_LIMIT` | `2` | Consecutive materially incomplete cycles before automatic pause |
+| `OPERATIONS_INCOMPLETE_GROUP_RATE_THRESHOLD` | `0.25` | Failed-plus-partial group rate that advances the circuit breaker |
 | `CYCLE_CLASSIFICATION_LIMIT` | `100` | Maximum saved posts classified per cycle |
 | `FACEBOOK_PROFILE_PATH` | `~/.jjmiller-lead-agent/facebook-profile` | Dedicated persistent profile |
 | `BROWSER_HEADLESS` | `false` | Keeps manual login and scan behavior visible |
@@ -163,7 +165,7 @@ Important settings include:
 | `FACEBOOK_GROUP_DELAY_SECONDS` | `2` | Delay between unattended group navigations |
 | `FACEBOOK_MAX_SCROLLS` | `12` | Maximum bounded lazy-load scrolls per group |
 | `FACEBOOK_SCROLL_SETTLE_SECONDS` | `0.75` | Wait after each bounded scroll |
-| `MAX_POSTS_PER_GROUP` | `20` | Conservative visible-post cap per run |
+| `MAX_POSTS_PER_GROUP` | `10` | Conservative visible-post target per run |
 | `MIN_POST_TEXT_LENGTH` | `15` | Ignores very short UI fragments |
 | `AI_PROVIDER` | `disabled` | `disabled`, offline `heuristic`, or opt-in `gemini` |
 | `AI_MODEL` | `gemini-2.5-flash` | Model used only by the Gemini provider |
@@ -321,6 +323,11 @@ clicking, typing, commenting, or any other automated Facebook write action.
 The scanner waits through Facebook's initial placeholder rendering and requires at least one
 text-bearing post. If containers appear but readable post text never loads, the run stops safely and
 captures a local screenshot instead of recording a misleading successful zero-post scan.
+If Facebook yields fewer readable posts than the configured target, the group is recorded as
+`partial`, not fully successful. The dashboard reports full, partial, and failed group coverage
+separately. Two consecutive cycles with at least 25% failed-or-partial groups automatically pause
+future unattended cycles; two consecutive fatal cycle errors do the same. An operator must review
+the content-free health details and explicitly resume the worker.
 Top-level post text is isolated from nested comment articles so a long reply is never paired with
 the parent post's permalink. Facebook comment and reply articles are also rejected by their
 semantic `aria-label`, including when Facebook exposes them outside the parent article subtree.

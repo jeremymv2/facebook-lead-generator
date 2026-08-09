@@ -626,6 +626,7 @@ def test_run_cycle_command_executes_content_free_pipeline(
         "candidates_created": 0,
         "duplicates": 4,
         "groups_failed": 0,
+        "groups_partial": 0,
         "groups_recovered": 1,
         "groups_retried": 1,
         "groups_scanned": 1,
@@ -636,6 +637,8 @@ def test_run_cycle_command_executes_content_free_pipeline(
         "posts_ignored": 0,
         "posts_new": 0,
         "posts_seen": 4,
+        "posts_requested": 0,
+        "circuit_breaker_tripped": False,
     }
 
 
@@ -660,7 +663,10 @@ def test_run_cycle_records_only_safe_failure_type_for_dashboard_history(
     events = database.list_audit_events(component="operations", action="cycle.run")
     assert len(events) == 1
     assert events[0].result == "failed"
-    assert events[0].details == {"error_code": "RuntimeError"}
+    assert events[0].details == {
+        "error_code": "RuntimeError",
+        "circuit_breaker_tripped": False,
+    }
 
 
 @pytest.mark.parametrize(

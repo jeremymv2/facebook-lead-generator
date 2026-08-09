@@ -46,10 +46,15 @@ class ScanSummary:
     group: FacebookGroup
     posts_seen: int
     new_posts: tuple[FacebookPost, ...]
+    posts_requested: int = 0
 
     @property
     def duplicates(self) -> int:
         return self.posts_seen - len(self.new_posts)
+
+    @property
+    def partial(self) -> bool:
+        return self.posts_requested > 0 and self.posts_seen < self.posts_requested
 
 
 class ReadOnlyScanService:
@@ -71,6 +76,7 @@ class ReadOnlyScanService:
                 group_name=group.name,
                 group_url=group.url,
                 error=safe_error,
+                posts_requested=max_posts,
             )
             self.database.record_audit_event(
                 AuditEvent(
@@ -78,7 +84,7 @@ class ReadOnlyScanService:
                     action="group.scan",
                     result="stopped" if isinstance(error, FacebookSafetyStop) else "failed",
                     group_id=group.id,
-                    details={"error": safe_error},
+                    details={"error": safe_error, "posts_requested": max_posts},
                 )
             )
             raise
@@ -108,21 +114,28 @@ class ReadOnlyScanService:
             group_url=group.url,
             posts_seen=len(discovered),
             posts_new=len(new_posts),
+            posts_requested=max_posts,
+            is_partial=len(discovered) < max_posts,
             last_known_post_identity=last_identity,
         )
         self.database.record_audit_event(
             AuditEvent(
                 component="facebook_scanner",
                 action="group.scan",
-                result="success",
+                result="partial" if len(discovered) < max_posts else "success",
                 group_id=group.id,
-                details={"posts_seen": len(discovered), "posts_new": len(new_posts)},
+                details={
+                    "posts_seen": len(discovered),
+                    "posts_new": len(new_posts),
+                    "posts_requested": max_posts,
+                },
             )
         )
         return ScanSummary(
             group=group,
             posts_seen=len(discovered),
             new_posts=tuple(new_posts),
+            posts_requested=max_posts,
         )
 
 

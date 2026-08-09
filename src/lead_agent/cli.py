@@ -242,6 +242,11 @@ def _doctor_payload(settings: Settings) -> dict[str, object]:
         "facebook_group_max_retries": settings.facebook_group_max_retries,
         "facebook_group_retry_backoff_seconds": settings.facebook_group_retry_backoff_seconds,
         "facebook_group_delay_seconds": settings.facebook_group_delay_seconds,
+        "max_posts_per_group": settings.max_posts_per_group,
+        "operations_degraded_cycle_limit": settings.operations_degraded_cycle_limit,
+        "operations_incomplete_group_rate_threshold": (
+            settings.operations_incomplete_group_rate_threshold
+        ),
         "cycle_classification_limit": settings.cycle_classification_limit,
         "candidate_duplicate_window_hours": settings.candidate_duplicate_window_hours,
         "operations_state_dir": str(settings.operations_state_dir),
@@ -250,10 +255,17 @@ def _doctor_payload(settings: Settings) -> dict[str, object]:
 
 
 def _scan_state_payload(state: GroupScanState) -> dict[str, object]:
+    health = (
+        "degraded"
+        if state.last_error is not None
+        else "partial"
+        if state.last_scan_partial
+        else "healthy"
+    )
     return {
         "group_id": state.group_id,
         "group_name": state.group_name,
-        "health": "healthy" if state.last_error is None else "degraded",
+        "health": health,
         "consecutive_failures": state.consecutive_failures,
         "last_attempt_at": state.last_attempt_at.isoformat(),
         "last_success_at": state.last_success_at.isoformat() if state.last_success_at else None,
@@ -261,6 +273,8 @@ def _scan_state_payload(state: GroupScanState) -> dict[str, object]:
         "last_error": state.last_error,
         "posts_seen": state.posts_seen,
         "posts_new": state.posts_new,
+        "posts_requested": state.posts_requested,
+        "last_scan_partial": state.last_scan_partial,
     }
 
 
@@ -304,10 +318,15 @@ async def _scan_groups(
 
 def _print_scan_results(summaries: Sequence[ScanSummary]) -> None:
     for summary in summaries:
-        print(
+        counts = (
             f"[{summary.group.name}] seen={summary.posts_seen} "
             f"new={len(summary.new_posts)} duplicates={summary.duplicates}"
         )
+        if summary.posts_requested:
+            counts += f" requested={summary.posts_requested}"
+        if summary.partial:
+            counts += " PARTIAL"
+        print(counts)
         for post in summary.new_posts:
             print(f"NEW {post.post_url or '(no permalink)'}")
             print(post.post_text[:500])
@@ -397,6 +416,9 @@ async def _scan_groups_for_cycle(
         duplicates=sum(summary.duplicates for summary in summaries),
         groups_retried=retried,
         groups_recovered=recovered,
+        groups_partial=sum(summary.partial for summary in summaries),
+        posts_requested=sum(summary.posts_requested for summary in summaries)
+        + failures * max_posts,
     )
 
 
@@ -468,7 +490,11 @@ def _run_operations_cycle(
     if settings.notifications_enabled and not skip_notifications:
         notifier = _build_approval_notifier(settings, database)
 
-    runner = OperationsCycleRunner(state)
+    runner = OperationsCycleRunner(
+        state,
+        degraded_cycle_limit=settings.operations_degraded_cycle_limit,
+        incomplete_group_rate_threshold=(settings.operations_incomplete_group_rate_threshold),
+    )
 
     def notify_cycle() -> NotificationSummary:
         if notifier is None:  # pragma: no cover - callback is installed only when configured
@@ -484,12 +510,16 @@ def _run_operations_cycle(
             retain=retention.cleanup,
         )
     except Exception as error:
+        health = state.read_health()
         database.record_audit_event(
             AuditEvent(
                 component="operations",
                 action="cycle.run",
                 result="failed",
-                details={"error_code": type(error).__name__},
+                details={
+                    "error_code": type(error).__name__,
+                    "circuit_breaker_tripped": health.get("circuit_breaker_tripped", False),
+                },
             )
         )
         raise
@@ -502,9 +532,11 @@ def _run_operations_cycle(
                 details={
                     "groups_scanned": result.scan.groups_scanned,
                     "groups_failed": result.scan.groups_failed,
+                    "groups_partial": result.scan.groups_partial,
                     "groups_retried": result.scan.groups_retried,
                     "groups_recovered": result.scan.groups_recovered,
                     "posts_seen": result.scan.posts_seen,
+                    "posts_requested": result.scan.posts_requested,
                     "posts_new": result.scan.posts_new,
                     "duplicates": result.scan.duplicates,
                     "posts_classified": result.posts_classified,
@@ -513,6 +545,7 @@ def _run_operations_cycle(
                     "notifications_considered": result.notifications_considered,
                     "notifications_sent": result.notifications_sent,
                     "notifications_failed": result.notifications_failed,
+                    "circuit_breaker_tripped": result.circuit_breaker_tripped,
                 },
             )
         )
