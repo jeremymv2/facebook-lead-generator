@@ -376,6 +376,7 @@ def _render_cycle_table(cycles: tuple[CycleTrend, ...], *, display_timezone: tzi
               <td><span class="status {status}">{status.title()}</span></td>
               <td>{value.groups_complete}/{value.groups_attempted}</td>
               <td>{value.groups_partial}</td>
+              <td>{value.groups_severely_partial}</td>
               <td>{value.groups_retried}/{value.groups_recovered}</td>
               <td>{value.posts_seen}</td><td>{value.posts_new}</td>
               <td>{value.posts_classified}</td><td>{value.candidates_created}</td>
@@ -386,6 +387,7 @@ def _render_cycle_table(cycles: tuple[CycleTrend, ...], *, display_timezone: tzi
       <h3>Recent cycle details</h3>
       <div class="table-wrap"><table>
         <thead><tr><th>Completed</th><th>Status</th><th>Full groups</th><th>Partial</th>
+          <th>Severe partial</th>
           <th>Retries/recovered</th>
           <th>Seen</th><th>New</th><th>Classified</th><th>Candidates</th></tr></thead>
         <tbody>{"".join(rows)}</tbody>

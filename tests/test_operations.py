@@ -19,6 +19,7 @@ from lead_agent.operations import (
     RetentionService,
     RetentionSummary,
     ScanCycleSummary,
+    is_severe_post_shortfall,
     is_within_quiet_hours,
 )
 
@@ -79,6 +80,23 @@ def test_quiet_hours_support_daytime_windows_and_require_aware_time() -> None:
             start=time(hour=22),
             end=time(hour=5),
         )
+
+
+@pytest.mark.parametrize(
+    ("posts_seen", "expected"),
+    [(4, True), (5, False), (6, False), (10, False)],
+)
+def test_severe_post_shortfall_uses_strict_half_yield_boundary(
+    posts_seen: int, expected: bool
+) -> None:
+    assert (
+        is_severe_post_shortfall(
+            posts_seen=posts_seen,
+            posts_requested=10,
+            minimum_yield_rate=0.5,
+        )
+        is expected
+    )
 
 
 def test_cycle_lock_rejects_an_overlapping_process(tmp_path: Path) -> None:
@@ -163,7 +181,9 @@ def test_cycle_runner_records_success_and_safe_failure_type(tmp_path: Path) -> N
     assert "private customer text" not in paths_text(state.paths.health_path)
 
 
-def test_repeated_incomplete_cycles_trip_pause_circuit_breaker(tmp_path: Path) -> None:
+def test_ordinary_partial_yields_remain_degraded_without_advancing_pause(
+    tmp_path: Path,
+) -> None:
     state = OperationsState(operation_paths(tmp_path))
     runner = OperationsCycleRunner(
         state,
@@ -174,29 +194,31 @@ def test_repeated_incomplete_cycles_trip_pause_circuit_breaker(tmp_path: Path) -
 
     first = runner.run(
         scan=lambda: ScanCycleSummary(
-            groups_scanned=7,
-            groups_failed=1,
-            posts_seen=60,
-            posts_new=2,
-            duplicates=58,
-            groups_partial=1,
+            groups_scanned=8,
+            groups_failed=0,
+            posts_seen=72,
+            posts_new=4,
+            duplicates=68,
+            groups_partial=4,
             posts_requested=80,
         ),
-        classify=lambda: ClassificationSummary(2, (), ()),
+        classify=lambda: ClassificationSummary(4, (), ()),
         notify=None,
         retain=RetentionSummary,
         now=lambda: next(times),
     )
     second = runner.run(
         scan=lambda: ScanCycleSummary(
-            groups_scanned=6,
-            groups_failed=2,
-            posts_seen=50,
-            posts_new=1,
-            duplicates=49,
+            groups_scanned=8,
+            groups_failed=0,
+            posts_seen=68,
+            posts_new=7,
+            duplicates=61,
+            groups_partial=5,
+            groups_severely_partial=0,
             posts_requested=80,
         ),
-        classify=lambda: ClassificationSummary(1, (), ()),
+        classify=lambda: ClassificationSummary(7, (), ()),
         notify=None,
         retain=RetentionSummary,
         now=lambda: next(times),
@@ -206,6 +228,59 @@ def test_repeated_incomplete_cycles_trip_pause_circuit_breaker(tmp_path: Path) -
     assert first.status == "degraded"
     assert first.circuit_breaker_tripped is False
     assert second is not None
+    assert second.status == "degraded"
+    assert second.circuit_breaker_tripped is False
+    assert state.paused is False
+    health = state.read_health()
+    assert health["consecutive_degraded_cycles"] == 0
+    assert health["circuit_breaker_reason"] is None
+
+
+def test_repeated_materially_incomplete_cycles_trip_pause_circuit_breaker(
+    tmp_path: Path,
+) -> None:
+    state = OperationsState(operation_paths(tmp_path))
+    runner = OperationsCycleRunner(
+        state,
+        degraded_cycle_limit=2,
+        incomplete_group_rate_threshold=0.25,
+    )
+    times = iter(datetime(2026, 8, 8, 12, minute, tzinfo=UTC) for minute in range(4))
+
+    first = runner.run(
+        scan=lambda: ScanCycleSummary(
+            groups_scanned=6,
+            groups_failed=2,
+            posts_seen=50,
+            posts_new=2,
+            duplicates=48,
+            posts_requested=80,
+        ),
+        classify=lambda: ClassificationSummary(2, (), ()),
+        notify=None,
+        retain=RetentionSummary,
+        now=lambda: next(times),
+    )
+    second = runner.run(
+        scan=lambda: ScanCycleSummary(
+            groups_scanned=8,
+            groups_failed=0,
+            posts_seen=35,
+            posts_new=1,
+            duplicates=34,
+            groups_partial=2,
+            groups_severely_partial=2,
+            posts_requested=80,
+        ),
+        classify=lambda: ClassificationSummary(1, (), ()),
+        notify=None,
+        retain=RetentionSummary,
+        now=lambda: next(times),
+    )
+
+    assert first is not None
+    assert first.circuit_breaker_tripped is False
+    assert second is not None
     assert second.circuit_breaker_tripped is True
     assert state.paused is True
     health = state.read_health()
@@ -213,7 +288,7 @@ def test_repeated_incomplete_cycles_trip_pause_circuit_breaker(tmp_path: Path) -
     assert health["circuit_breaker_reason"] == "incomplete_group_rate"
     summary = cast(dict[str, object], health["summary"])
     scan = cast(dict[str, object], summary["scan"])
-    assert scan["groups_partial"] == 0
+    assert scan["groups_severely_partial"] == 2
 
 
 def test_repeated_fatal_cycles_trip_pause_circuit_breaker(tmp_path: Path) -> None:
