@@ -313,7 +313,6 @@ def test_loopback_server_accepts_verified_same_origin_browser_fallback(tmp_path:
         headers={
             "Host": host,
             "Origin": "null",
-            "Referer": f"http://{host}/",
             "Sec-Fetch-Site": "same-origin",
             "Content-Type": "application/x-www-form-urlencoded",
         },
@@ -384,6 +383,7 @@ def test_dashboard_links_only_to_https_facebook_posts(
         ("http://127.0.0.1:9999", None, None, False),
         ("https://127.0.0.1:8765", None, None, False),
         ("https://attacker.invalid", None, None, False),
+        ("null", None, "same-origin", True),
         ("null", "http://127.0.0.1:8765/", "same-origin", True),
         ("codex://browser", "http://localhost:8765/?review=1", "same-origin", True),
         ("null", "http://127.0.0.1:8765/", "cross-site", False),

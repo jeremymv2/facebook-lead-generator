@@ -550,6 +550,12 @@ def _valid_local_origin(
     """Accept normalized loopback origins plus verified same-origin browser submissions."""
     if origin is None or _is_local_dashboard_url(origin, port=port, allow_path=False):
         return True
+    if origin == "null" and fetch_site == "same-origin":
+        return referer is None or _is_local_dashboard_url(
+            referer,
+            port=port,
+            allow_path=True,
+        )
     return fetch_site == "same-origin" and _is_local_dashboard_url(
         referer,
         port=port,
