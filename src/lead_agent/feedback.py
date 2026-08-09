@@ -32,10 +32,19 @@ def export_regression_fixtures(
     """Write deterministic, sanitized candidate fixtures from structured rejection feedback."""
     reviews = database.list_rejected_approval_reviews(limit=limit, lead_id=lead_id)
     fixtures: list[dict[str, object]] = []
+    seen_examples: set[tuple[str, str]] = set()
     for review in reviews:
         fixture = _fixture_from_review(review)
-        if fixture is not None:
-            fixtures.append(fixture)
+        if fixture is None:
+            continue
+        example_key = (
+            str(fixture["text"]),
+            json.dumps(fixture["expected"], sort_keys=True),
+        )
+        if example_key in seen_examples:
+            continue
+        seen_examples.add(example_key)
+        fixtures.append(fixture)
     output_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     output_path.parent.chmod(0o700)
     temporary = output_path.with_name(f".{output_path.name}.{os.getpid()}.tmp")
@@ -65,11 +74,19 @@ def sanitize_fixture_text(text: str, *, author_name: str | None = None) -> str:
     substitutions = (
         (r"https?://\S+|www\.\S+", "[url]"),
         (r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", "[email]"),
-        (r"(?<!\w)(?:\+?1[ .-]?)?\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4}(?!\w)", "[phone]"),
+        (
+            r"(?<!\w)(?:\+?1[ .-]?)?(?:\(\d{3}\)|\d{3})[ .-]?\d{3}[ .-]?\d{4}(?!\w)",
+            "[phone]",
+        ),
         (
             r"\b\d{1,6}\s+(?:[A-Z][\w'.-]+\s+){0,4}"
             r"(?:Street|St|Road|Rd|Avenue|Ave|Lane|Ln|Drive|Dr|Court|Ct|Boulevard|Blvd)\b\.?,?",
             "[address]",
+        ),
+        (
+            r"\bat\s+(?:[\w&'.-]+\s+){1,5}"
+            r"(?:services?|solutions|construction|contracting|renovations|remodeling)\b",
+            "[business]",
         ),
         (r"\b(?:[A-Z][\w&'.-]+\s+){1,4}(?:LLC|Inc\.?|Company|Co\.)\b", "[business]"),
         (r"#\w*(?:llc|company|service|services)\w*", "[business]"),

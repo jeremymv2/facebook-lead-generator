@@ -96,9 +96,33 @@ def test_non_classifier_rejection_reason_is_skipped(tmp_path: Path) -> None:
     assert summary.feedback_skipped == 1
 
 
+def test_duplicate_rejection_feedback_exports_one_training_example(tmp_path: Path) -> None:
+    database = Database(tmp_path / "deduplicated.sqlite3")
+    database.initialize()
+    first = create_candidate(database, external_id="first-copy")
+    second = create_candidate(database, external_id="second-copy")
+    service = LocalApprovalService(database, expiration_minutes=20)
+    for lead in (first, second):
+        service.decide_local_lead(
+            lead.id or 0,
+            ApprovalAction.REJECT,
+            rejection_reason=RejectionReason.PROVIDER_ADVERTISEMENT,
+        )
+
+    output = tmp_path / "fixtures.json"
+    summary = export_regression_fixtures(database, output, limit=10)
+
+    fixtures = json.loads(output.read_text(encoding="utf-8"))
+    assert summary.feedback_considered == 2
+    assert summary.fixtures_exported == 1
+    assert summary.feedback_skipped == 1
+    assert len(fixtures) == 1
+
+
 def test_sanitizer_normalizes_without_direct_identifiers() -> None:
     sanitized = sanitize_fixture_text(
-        "Call (502) 555-0199 or name@example.com. Visit www.example.com today."
+        "At Community Garage Door Services call (502)501-5060 or name@example.com. "
+        "Visit www.example.com today."
     )
 
-    assert sanitized == "Call [phone] or [email]. Visit [url] today."
+    assert sanitized == "[business] call [phone] or [email]. Visit [url] today."
