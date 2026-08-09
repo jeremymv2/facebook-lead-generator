@@ -106,6 +106,7 @@ class Settings(BaseSettings):
     operations_quiet_hours_end: time = time(hour=5)
     operations_degraded_cycle_limit: int = Field(default=2, ge=1, le=10)
     operations_incomplete_group_rate_threshold: float = Field(default=0.25, ge=0.1, le=1)
+    operations_minimum_group_post_yield_rate: float = Field(default=0.5, gt=0, le=1)
     cycle_classification_limit: int = Field(default=100, ge=1, le=1_000)
 
     data_dir: Path = Path("data")

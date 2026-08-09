@@ -97,6 +97,7 @@ def test_dashboard_renders_cycle_trends_and_current_group_health(tmp_path: Path)
                 "groups_scanned": 5,
                 "groups_failed": 3,
                 "groups_partial": 2,
+                "groups_severely_partial": 1,
                 "groups_retried": 4,
                 "groups_recovered": 1,
                 "posts_seen": 39,
@@ -122,6 +123,7 @@ def test_dashboard_renders_cycle_trends_and_current_group_health(tmp_path: Path)
     assert "68.8%" in page
     assert "Full group coverage" in page
     assert "Recent cycle details" in page
+    assert "Severe partial" in page
     assert "Current group health" in page
     assert "3/8" in page
     assert "4/1" in page

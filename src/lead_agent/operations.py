@@ -67,6 +67,7 @@ class ScanCycleSummary:
     groups_retried: int = 0
     groups_recovered: int = 0
     groups_partial: int = 0
+    groups_severely_partial: int = 0
     posts_requested: int = 0
 
     @property
@@ -80,6 +81,10 @@ class ScanCycleSummary:
     @property
     def groups_incomplete(self) -> int:
         return self.groups_failed + self.groups_partial
+
+    @property
+    def groups_materially_incomplete(self) -> int:
+        return self.groups_failed + self.groups_severely_partial
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +171,20 @@ def is_within_quiet_hours(
     if start < end:
         return start <= local_time < end
     return local_time >= start or local_time < end
+
+
+def is_severe_post_shortfall(
+    *,
+    posts_seen: int,
+    posts_requested: int,
+    minimum_yield_rate: float,
+) -> bool:
+    """Return whether one successful group produced materially too few readable posts."""
+    if posts_seen < 0 or posts_requested < 0:
+        raise ValueError("post counts cannot be negative")
+    if not 0 < minimum_yield_rate <= 1:
+        raise ValueError("minimum_yield_rate must be between zero and one")
+    return posts_requested > 0 and posts_seen / posts_requested < minimum_yield_rate
 
 
 class OperationsState:
@@ -405,8 +424,12 @@ class OperationsCycleRunner:
                 previous_streak = self.state.read_health().get("consecutive_degraded_cycles", 0)
                 degraded_streak = previous_streak if isinstance(previous_streak, int) else 0
                 attempts = scan_summary.groups_attempted
-                incomplete_rate = scan_summary.groups_incomplete / attempts if attempts else 0.0
-                severe_incomplete_cycle = incomplete_rate >= self.incomplete_group_rate_threshold
+                materially_incomplete_rate = (
+                    scan_summary.groups_materially_incomplete / attempts if attempts else 0.0
+                )
+                severe_incomplete_cycle = (
+                    materially_incomplete_rate >= self.incomplete_group_rate_threshold
+                )
                 degraded_streak = degraded_streak + 1 if severe_incomplete_cycle else 0
                 circuit_breaker_tripped = degraded_streak >= self.degraded_cycle_limit
                 summary = CycleSummary(

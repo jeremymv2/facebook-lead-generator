@@ -49,6 +49,7 @@ def test_doctor_reports_safe_state(
     assert payload["operations_quiet_hours_enabled"] is True
     assert payload["operations_quiet_hours_start"] == "22:00"
     assert payload["operations_quiet_hours_end"] == "05:00"
+    assert payload["operations_minimum_group_post_yield_rate"] == 0.5
     assert payload["ai_provider"] == "disabled"
     assert payload["ai_ready"] is False
 
@@ -629,7 +630,7 @@ def test_unattended_cycle_retries_only_transient_group_failures(
     outcomes: dict[str, list[ScanSummary | Exception]] = {
         "recovering": [
             TransientFacebookReadError(stage="feed", kind="timeout"),
-            ScanSummary(groups[0], posts_seen=4, new_posts=()),
+            ScanSummary(groups[0], posts_seen=4, new_posts=(), posts_requested=10),
         ],
         "failing": [
             TransientFacebookReadError(stage="navigation", kind="timeout"),
@@ -681,7 +682,10 @@ def test_unattended_cycle_retries_only_transient_group_failures(
     assert summary.groups_failed == 1
     assert summary.groups_retried == 2
     assert summary.groups_recovered == 1
+    assert summary.groups_partial == 1
+    assert summary.groups_severely_partial == 1
     assert summary.posts_seen == 4
+    assert summary.posts_requested == 20
     assert sleeps == [5, 2, 5]
 
 
@@ -799,6 +803,7 @@ def test_run_cycle_command_executes_content_free_pipeline(
         "duplicates": 4,
         "groups_failed": 0,
         "groups_partial": 0,
+        "groups_severely_partial": 0,
         "groups_recovered": 1,
         "groups_retried": 1,
         "groups_scanned": 1,
@@ -908,6 +913,7 @@ def test_cycle_gate_uses_eastern_wall_clock_and_manual_override(
 ) -> None:
     settings = Settings(
         _env_file=None,
+        data_dir=tmp_path / "data",
         database_path=tmp_path / "quiet.sqlite3",
         groups_config_path=tmp_path / "missing-groups.yaml",
         facebook_profile_path=tmp_path.parent / "browser-profile",

@@ -53,6 +53,7 @@ from lead_agent.operations import (
     RetentionService,
     RetentionSummary,
     ScanCycleSummary,
+    is_severe_post_shortfall,
     is_within_quiet_hours,
 )
 from lead_agent.posting import ApprovedPostingService, PostingError, PostingExecutionResult
@@ -304,6 +305,9 @@ def _doctor_payload(settings: Settings) -> dict[str, object]:
         "operations_incomplete_group_rate_threshold": (
             settings.operations_incomplete_group_rate_threshold
         ),
+        "operations_minimum_group_post_yield_rate": (
+            settings.operations_minimum_group_post_yield_rate
+        ),
         "cycle_classification_limit": settings.cycle_classification_limit,
         "candidate_duplicate_window_hours": settings.candidate_duplicate_window_hours,
         "operations_state_dir": str(settings.operations_state_dir),
@@ -492,6 +496,14 @@ async def _scan_groups_for_cycle(
         groups_retried=retried,
         groups_recovered=recovered,
         groups_partial=sum(summary.partial for summary in summaries),
+        groups_severely_partial=sum(
+            is_severe_post_shortfall(
+                posts_seen=summary.posts_seen,
+                posts_requested=summary.posts_requested,
+                minimum_yield_rate=settings.operations_minimum_group_post_yield_rate,
+            )
+            for summary in summaries
+        ),
         posts_requested=sum(summary.posts_requested for summary in summaries)
         + failures * max_posts,
     )
@@ -636,6 +648,7 @@ def _run_operations_cycle(
                     "groups_scanned": result.scan.groups_scanned,
                     "groups_failed": result.scan.groups_failed,
                     "groups_partial": result.scan.groups_partial,
+                    "groups_severely_partial": result.scan.groups_severely_partial,
                     "groups_retried": result.scan.groups_retried,
                     "groups_recovered": result.scan.groups_recovered,
                     "posts_seen": result.scan.posts_seen,

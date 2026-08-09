@@ -20,6 +20,7 @@ class CycleTrend:
     groups_scanned: int
     groups_failed: int
     groups_partial: int
+    groups_severely_partial: int
     groups_retried: int
     groups_recovered: int
     posts_seen: int
@@ -64,6 +65,10 @@ class DashboardTrendSnapshot:
     @property
     def groups_partial(self) -> int:
         return sum(cycle.groups_partial for cycle in self.cycles)
+
+    @property
+    def groups_severely_partial(self) -> int:
+        return sum(cycle.groups_severely_partial for cycle in self.cycles)
 
     @property
     def groups_complete(self) -> int:
@@ -137,6 +142,7 @@ def _cycle_from_event(event: AuditEvent) -> CycleTrend:
         groups_scanned=_counter(details, "groups_scanned"),
         groups_failed=_counter(details, "groups_failed"),
         groups_partial=_counter(details, "groups_partial"),
+        groups_severely_partial=_counter(details, "groups_severely_partial"),
         groups_retried=_counter(details, "groups_retried"),
         groups_recovered=_counter(details, "groups_recovered"),
         posts_seen=posts_seen,

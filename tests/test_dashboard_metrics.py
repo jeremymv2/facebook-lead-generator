@@ -45,6 +45,7 @@ def test_snapshot_reconstructs_legacy_and_rich_cycle_history(tmp_path: Path) -> 
                 "groups_scanned": 5,
                 "groups_failed": 3,
                 "groups_partial": 2,
+                "groups_severely_partial": 1,
                 "groups_retried": 4,
                 "groups_recovered": 1,
                 "posts_seen": 39,
@@ -66,6 +67,7 @@ def test_snapshot_reconstructs_legacy_and_rich_cycle_history(tmp_path: Path) -> 
     assert snapshot.groups_scanned == 13
     assert snapshot.groups_failed == 3
     assert snapshot.groups_partial == 2
+    assert snapshot.groups_severely_partial == 1
     assert snapshot.group_success_percent == 68.8
     assert snapshot.posts_seen == 119
     assert snapshot.posts_new == 10

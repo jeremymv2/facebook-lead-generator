@@ -35,6 +35,7 @@ def test_safe_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert settings.operations_quiet_hours_enabled is True
     assert settings.operations_quiet_hours_start == time(hour=22)
     assert settings.operations_quiet_hours_end == time(hour=5)
+    assert settings.operations_minimum_group_post_yield_rate == 0.5
     assert settings.browser_channel is None
     assert settings.browser_headless is False
     assert settings.facebook_group_max_retries == 1

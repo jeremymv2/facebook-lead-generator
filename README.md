@@ -169,7 +169,8 @@ Important settings include:
 | `OPERATIONS_QUIET_HOURS_START` | `22:00` | Inclusive local quiet-hours start |
 | `OPERATIONS_QUIET_HOURS_END` | `05:00` | Exclusive local quiet-hours end |
 | `OPERATIONS_DEGRADED_CYCLE_LIMIT` | `2` | Consecutive materially incomplete cycles before automatic pause |
-| `OPERATIONS_INCOMPLETE_GROUP_RATE_THRESHOLD` | `0.25` | Failed-plus-partial group rate that advances the circuit breaker |
+| `OPERATIONS_INCOMPLETE_GROUP_RATE_THRESHOLD` | `0.25` | Failed-plus-severely-partial group rate that advances the circuit breaker |
+| `OPERATIONS_MINIMUM_GROUP_POST_YIELD_RATE` | `0.50` | A group below this requested-post yield is severely partial |
 | `CYCLE_CLASSIFICATION_LIMIT` | `100` | Maximum saved posts classified per cycle |
 | `FACEBOOK_PROFILE_PATH` | `~/.jjmiller-lead-agent/facebook-profile` | Dedicated persistent profile |
 | `BROWSER_HEADLESS` | `false` | Keeps manual login and scan behavior visible |
@@ -339,8 +340,8 @@ text-bearing post. If containers appear but readable post text never loads, the 
 captures a local screenshot instead of recording a misleading successful zero-post scan.
 If Facebook yields fewer readable posts than the configured target, the group is recorded as
 `partial`, not fully successful. The dashboard reports full, partial, and failed group coverage
-separately. Two consecutive cycles with at least 25% failed-or-partial groups automatically pause
-future unattended cycles; two consecutive fatal cycle errors do the same. An operator must review
+separately. Two consecutive cycles with at least 25% failed-or-severely-partial groups automatically
+pause future unattended cycles; two consecutive fatal cycle errors do the same. An operator must review
 the content-free health details and explicitly resume the worker.
 Top-level post text is isolated from nested comment articles so a long reply is never paired with
 the parent post's permalink. Facebook comment and reply articles are also rejected by their
@@ -738,6 +739,13 @@ plus aggregate counts and a stale-health flag. Failure state stores only the exc
 Expired PNG/JPEG/WebP screenshots and rotated `.log`/`.jsonl` files are removed within their
 configured directories; databases, group configuration, browser profiles, and credentials are
 never retention targets.
+
+A group remains visibly `partial` whenever Facebook returns fewer posts than requested, but an
+ordinary short yield no longer advances the auto-pause streak. For circuit-breaker purposes, a
+group is materially incomplete only when it fails or returns less than 50% of its requested posts.
+Two consecutive cycles where at least 25% of attempted groups are materially incomplete still
+pause the worker. These thresholds are configurable, while the detailed per-group health remains
+available for diagnosing normal Facebook feed variability.
 
 Each successful cycle also creates at most one private SQLite backup per configured interval,
 verifies its integrity and schema by restoring it into a disposable database, and removes only
