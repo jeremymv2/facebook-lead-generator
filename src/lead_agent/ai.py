@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from lead_agent.config import Settings
 from lead_agent.models import FacebookPost, LeadIntent, normalize_post_text
 
-CLASSIFICATION_VERSION = "2026-08-08.v4"
+CLASSIFICATION_VERSION = "2026-08-09.v5"
 COMPANY_NAME = "JJ Miller & Co."
 COMPANY_WEBSITE = "https://jjmillerco.com"
 COMPANY_TEXT_PHONE = "502-528-0858"
@@ -222,8 +222,9 @@ class GeminiAIProvider:
             "or hired someone, is all set, or is no longer looking must use resolved intent and "
             "score at most 10. Posts that prohibit comments or require private messages must use "
             "private_contact_only intent and score at most 10. Advice-only posts must score at "
-            "most 40. Sales, competitor advertisements, spam, and unrelated posts must score at "
-            "most 10. Explicit locations "
+            "most 40. Employment recruiting and job advertisements are unrelated, even when "
+            "they name an enabled trade. Property listings, sales, competitor advertisements, "
+            "spam, and unrelated posts must score at most 10. Explicit locations "
             "outside the service area need a geographic score of 20 or less.\n\n"
             + json.dumps(payload, sort_keys=True)
         )
@@ -376,6 +377,11 @@ _SERVICE_TERMS: dict[str, tuple[str, ...]] = {
     "flooring": (
         "flooring",
         "floor install",
+        "carpet",
+        "carpeting",
+        "lay carpet",
+        "carpet installation",
+        "stair carpet",
         "lvp",
         "hardwood floor",
         "luxury vinyl plank",
@@ -883,6 +889,8 @@ def _infer_intent(text: str, service: str | None) -> LeadIntent:
         )
     ):
         return LeadIntent.PRIVATE_CONTACT_ONLY
+    if _is_employment_recruiting(text):
+        return LeadIntent.UNRELATED
     if _is_competitor_advertisement(text, service):
         return LeadIntent.COMPETITOR_ADVERTISEMENT
     if any(
@@ -894,6 +902,14 @@ def _infer_intent(text: str, service: str | None) -> LeadIntent:
             "open house",
             "price improvement",
             "zillow.com/homedetails",
+            "tenant in place",
+            "investment property",
+            "rental income",
+            "lease through",
+            "income-producing property",
+            "property highlights",
+            "off-market property",
+            "off market property",
         )
     ):
         return LeadIntent.SELLING
@@ -907,6 +923,13 @@ def _infer_intent(text: str, service: str | None) -> LeadIntent:
             "any tips",
             "need advice",
             "looking for advice",
+            "my question is",
+            "looking for opinions",
+            "what are your opinions",
+            "does that timeframe sound realistic",
+            "does this timeframe sound realistic",
+            "what would you expect",
+            "not looking for legal advice",
         )
     ):
         return LeadIntent.ADVICE
@@ -952,11 +975,40 @@ def _is_competitor_advertisement(text: str, service: str | None) -> bool:
         r"\bbook with me\b",
         r"\bbook (?:with us|now|today)\b",
         r"\b(?:i|we) can schedule your estimate\b",
+        r"\bwe (?:build|install|repair|replace|paint|remodel)\b",
+        r"\bcontact us (?:today|for|to)\b",
         r"\bwe(?:['\u2019]d| would) love (?:the opportunity )?to earn your business\b",
         r"\bwe(?:['\u2019]ll| will) (?:build|install|repair|replace|paint|remodel)\b",
         r"#(?:freeestimate|licensedandinsured|familyownedandoperated)\b",
     )
-    return any(re.search(pattern, text) for pattern in strong_patterns)
+    if any(re.search(pattern, text) for pattern in strong_patterns):
+        return True
+    provider_signals = (
+        r"\b(?:i|we) (?:offer|provide|specialize in)\b",
+        r"\b(?:licensed|fully insured|licensed and insured)\b",
+        r"\b(?:free estimates?|references available|openings available)\b",
+        r"\byour (?:home|property|project) could be next\b",
+        r"\bno job (?:is )?too (?:big|small)\b",
+        r"\b(?:call|text|dm|message) (?:me|us)\b",
+    )
+    return sum(bool(re.search(pattern, text)) for pattern in provider_signals) >= 2
+
+
+def _is_employment_recruiting(text: str) -> bool:
+    recruiting_patterns = (
+        r"\b(?:we(?:['\u2019]re| are)? )?hiring\b",
+        r"\bjoin (?:our|the) team\b",
+        r"\bjob openings?\b",
+        r"\bpositions? available\b",
+        r"\bapply (?:now|today|at|online|in person)\b",
+        r"\bpay (?:starts|starting) at \$?\d",
+        r"\b\$?\d+(?:\.\d{2})?\s*(?:/|per)\s*(?:hr|hour)\b",
+        r"\blooking (?:for|to add) .{0,80}\b(?:to join|employee|crew member)\b",
+        r"\blooking for (?:a little )?help .{0,120}\bi have (?:a )?(?:pretty )?"
+        r"(?:big|large) job to do\b",
+        r"\blooking for (?:a little )?help .{0,120}\banyone interested\b",
+    )
+    return any(re.search(pattern, text) for pattern in recruiting_patterns)
 
 
 def _infer_location(text: str, service_area: str) -> tuple[str | None, int]:

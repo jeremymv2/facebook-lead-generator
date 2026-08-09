@@ -80,6 +80,29 @@ def test_second_scan_reports_duplicate_without_reinserting(
     assert state.posts_new == 0
 
 
+def test_scan_with_fewer_posts_than_requested_is_recorded_as_partial(
+    database: Database,
+    group: FacebookGroup,
+) -> None:
+    scanner = ReadOnlyScanService(database, FakeReader([post(group)]))
+
+    summary = asyncio.run(scanner.scan_group(group, max_posts=10))
+
+    assert summary.partial is True
+    assert summary.posts_requested == 10
+    state = database.get_group_scan_state(group.id)
+    assert state is not None
+    assert state.posts_seen == 1
+    assert state.posts_requested == 10
+    assert state.last_scan_partial is True
+    assert state.last_success_at is None
+    group_event = next(
+        event for event in database.list_audit_events() if event.action == "group.scan"
+    )
+    assert group_event.result == "partial"
+    assert group_event.details["posts_requested"] == 10
+
+
 def test_scan_state_keeps_persisted_identity_when_permalink_hydrates(
     database: Database,
     group: FacebookGroup,

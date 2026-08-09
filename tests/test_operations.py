@@ -1,6 +1,7 @@
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -108,6 +109,82 @@ def test_cycle_runner_records_success_and_safe_failure_type(tmp_path: Path) -> N
     assert failed_health["status"] == "failed"
     assert failed_health["last_error"] == "RuntimeError"
     assert "private customer text" not in paths_text(state.paths.health_path)
+
+
+def test_repeated_incomplete_cycles_trip_pause_circuit_breaker(tmp_path: Path) -> None:
+    state = OperationsState(operation_paths(tmp_path))
+    runner = OperationsCycleRunner(
+        state,
+        degraded_cycle_limit=2,
+        incomplete_group_rate_threshold=0.25,
+    )
+    times = iter(datetime(2026, 8, 8, 12, minute, tzinfo=UTC) for minute in range(4))
+
+    first = runner.run(
+        scan=lambda: ScanCycleSummary(
+            groups_scanned=7,
+            groups_failed=1,
+            posts_seen=60,
+            posts_new=2,
+            duplicates=58,
+            groups_partial=1,
+            posts_requested=80,
+        ),
+        classify=lambda: ClassificationSummary(2, (), ()),
+        notify=None,
+        retain=RetentionSummary,
+        now=lambda: next(times),
+    )
+    second = runner.run(
+        scan=lambda: ScanCycleSummary(
+            groups_scanned=6,
+            groups_failed=2,
+            posts_seen=50,
+            posts_new=1,
+            duplicates=49,
+            posts_requested=80,
+        ),
+        classify=lambda: ClassificationSummary(1, (), ()),
+        notify=None,
+        retain=RetentionSummary,
+        now=lambda: next(times),
+    )
+
+    assert first is not None
+    assert first.status == "degraded"
+    assert first.circuit_breaker_tripped is False
+    assert second is not None
+    assert second.circuit_breaker_tripped is True
+    assert state.paused is True
+    health = state.read_health()
+    assert health["consecutive_degraded_cycles"] == 2
+    assert health["circuit_breaker_reason"] == "incomplete_group_rate"
+    summary = cast(dict[str, object], health["summary"])
+    scan = cast(dict[str, object], summary["scan"])
+    assert scan["groups_partial"] == 0
+
+
+def test_repeated_fatal_cycles_trip_pause_circuit_breaker(tmp_path: Path) -> None:
+    state = OperationsState(operation_paths(tmp_path))
+    runner = OperationsCycleRunner(state, degraded_cycle_limit=2)
+    times = iter(datetime(2026, 8, 8, 12, minute, tzinfo=UTC) for minute in range(4))
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="private failure details"):
+            runner.run(
+                scan=lambda: (_ for _ in ()).throw(RuntimeError("private failure details")),
+                classify=lambda: ClassificationSummary(0, (), ()),
+                notify=None,
+                retain=RetentionSummary,
+                now=lambda: next(times),
+            )
+
+    health = state.read_health()
+    assert state.paused is True
+    assert health["consecutive_failures"] == 2
+    assert health["circuit_breaker_tripped"] is True
+    assert health["circuit_breaker_reason"] == "consecutive_cycle_failures"
+    assert "private failure details" not in paths_text(state.paths.health_path)
 
 
 def test_retention_removes_only_expired_known_artifacts_and_rotates_logs(

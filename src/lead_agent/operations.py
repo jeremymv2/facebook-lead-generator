@@ -61,6 +61,20 @@ class ScanCycleSummary:
     duplicates: int
     groups_retried: int = 0
     groups_recovered: int = 0
+    groups_partial: int = 0
+    posts_requested: int = 0
+
+    @property
+    def groups_attempted(self) -> int:
+        return self.groups_scanned + self.groups_failed
+
+    @property
+    def groups_complete(self) -> int:
+        return max(0, self.groups_scanned - self.groups_partial)
+
+    @property
+    def groups_incomplete(self) -> int:
+        return self.groups_failed + self.groups_partial
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +99,7 @@ class CycleSummary:
     notifications_sent: int
     notifications_failed: int
     retention: RetentionSummary
+    circuit_breaker_tripped: bool = False
 
 
 class CycleLock:
@@ -207,6 +222,7 @@ class OperationsState:
         *,
         started_at: datetime,
         completed_at: datetime,
+        consecutive_degraded_cycles: int,
     ) -> None:
         previous = self.read_health()
         self._write_health(
@@ -218,6 +234,11 @@ class OperationsState:
                 "updated_at": completed_at.isoformat(),
                 "last_success_at": completed_at.isoformat(),
                 "consecutive_failures": 0,
+                "consecutive_degraded_cycles": consecutive_degraded_cycles,
+                "circuit_breaker_tripped": summary.circuit_breaker_tripped,
+                "circuit_breaker_reason": (
+                    "incomplete_group_rate" if summary.circuit_breaker_tripped else None
+                ),
                 "summary": asdict(summary),
                 "last_error": None,
             }
@@ -229,10 +250,13 @@ class OperationsState:
         *,
         started_at: datetime,
         failed_at: datetime,
-    ) -> None:
+        failure_limit: int,
+    ) -> bool:
         previous = self.read_health()
         previous_failures = previous.get("consecutive_failures", 0)
         failure_count = previous_failures if isinstance(previous_failures, int) else 0
+        next_failure_count = failure_count + 1
+        circuit_breaker_tripped = next_failure_count >= failure_limit
         self._write_health(
             {
                 **_preserved_health(previous),
@@ -240,10 +264,17 @@ class OperationsState:
                 "cycle_started_at": started_at.isoformat(),
                 "cycle_completed_at": failed_at.isoformat(),
                 "updated_at": failed_at.isoformat(),
-                "consecutive_failures": failure_count + 1,
+                "consecutive_failures": next_failure_count,
+                "circuit_breaker_tripped": circuit_breaker_tripped,
+                "circuit_breaker_reason": (
+                    "consecutive_cycle_failures" if circuit_breaker_tripped else None
+                ),
                 "last_error": type(error).__name__,
             }
         )
+        if circuit_breaker_tripped:
+            self.pause(now=failed_at)
+        return circuit_breaker_tripped
 
     def _ensure_state_dir(self) -> None:
         self.paths.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -300,8 +331,20 @@ class RetentionService:
 class OperationsCycleRunner:
     """Run one non-overlapping, pausable, health-tracked local cycle."""
 
-    def __init__(self, state: OperationsState) -> None:
+    def __init__(
+        self,
+        state: OperationsState,
+        *,
+        degraded_cycle_limit: int = 2,
+        incomplete_group_rate_threshold: float = 0.25,
+    ) -> None:
+        if degraded_cycle_limit < 1:
+            raise ValueError("degraded_cycle_limit must be positive")
+        if not 0 < incomplete_group_rate_threshold <= 1:
+            raise ValueError("incomplete_group_rate_threshold must be between zero and one")
         self.state = state
+        self.degraded_cycle_limit = degraded_cycle_limit
+        self.incomplete_group_rate_threshold = incomplete_group_rate_threshold
 
     def run(
         self,
@@ -329,8 +372,17 @@ class OperationsCycleRunner:
                 )
                 retention = retain()
                 status = (
-                    "degraded" if scan_summary.groups_failed or notification.failed else "success"
+                    "degraded"
+                    if scan_summary.groups_incomplete or notification.failed
+                    else "success"
                 )
+                previous_streak = self.state.read_health().get("consecutive_degraded_cycles", 0)
+                degraded_streak = previous_streak if isinstance(previous_streak, int) else 0
+                attempts = scan_summary.groups_attempted
+                incomplete_rate = scan_summary.groups_incomplete / attempts if attempts else 0.0
+                severe_incomplete_cycle = incomplete_rate >= self.incomplete_group_rate_threshold
+                degraded_streak = degraded_streak + 1 if severe_incomplete_cycle else 0
+                circuit_breaker_tripped = degraded_streak >= self.degraded_cycle_limit
                 summary = CycleSummary(
                     status=status,
                     scan=scan_summary,
@@ -341,15 +393,25 @@ class OperationsCycleRunner:
                     notifications_sent=notification.sent,
                     notifications_failed=notification.failed,
                     retention=retention,
+                    circuit_breaker_tripped=circuit_breaker_tripped,
                 )
             except Exception as error:
-                self.state.mark_failed(error, started_at=started_at, failed_at=clock())
+                self.state.mark_failed(
+                    error,
+                    started_at=started_at,
+                    failed_at=clock(),
+                    failure_limit=self.degraded_cycle_limit,
+                )
                 raise
+            completed_at = clock()
             self.state.mark_completed(
                 summary,
                 started_at=started_at,
-                completed_at=clock(),
+                completed_at=completed_at,
+                consecutive_degraded_cycles=degraded_streak,
             )
+            if summary.circuit_breaker_tripped:
+                self.state.pause(now=completed_at)
             return summary
 
 
@@ -366,7 +428,17 @@ def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
 
 
 def _preserved_health(payload: dict[str, object]) -> dict[str, object]:
-    keys = ("last_success_at", "consecutive_failures")
+    keys = (
+        "last_success_at",
+        "consecutive_failures",
+        "consecutive_degraded_cycles",
+        "cycle_started_at",
+        "cycle_completed_at",
+        "summary",
+        "last_error",
+        "circuit_breaker_tripped",
+        "circuit_breaker_reason",
+    )
     return {key: payload[key] for key in keys if key in payload}
 
 

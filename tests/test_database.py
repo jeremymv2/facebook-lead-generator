@@ -372,6 +372,39 @@ def test_empty_success_preserves_last_known_post(database: Database) -> None:
     assert state.last_error is None
 
 
+def test_partial_scan_preserves_last_complete_timestamp(database: Database) -> None:
+    complete_at = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
+    partial_at = datetime(2026, 8, 7, 12, 5, tzinfo=UTC)
+    database.record_group_scan_success(
+        group_id="group-123",
+        group_name="Louisville Homeowners",
+        group_url="https://www.facebook.com/groups/123",
+        posts_seen=10,
+        posts_new=1,
+        posts_requested=10,
+        is_partial=False,
+        last_known_post_identity="facebook-id:123",
+        occurred_at=complete_at,
+    )
+
+    state = database.record_group_scan_success(
+        group_id="group-123",
+        group_name="Louisville Homeowners",
+        group_url="https://www.facebook.com/groups/123",
+        posts_seen=4,
+        posts_new=0,
+        posts_requested=10,
+        is_partial=True,
+        last_known_post_identity="facebook-id:123",
+        occurred_at=partial_at,
+    )
+
+    assert state.last_attempt_at == partial_at
+    assert state.last_success_at == complete_at
+    assert state.posts_requested == 10
+    assert state.last_scan_partial is True
+
+
 def test_group_scan_failure_streak_resets_after_recovery(database: Database) -> None:
     first_failure = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
     second_failure = datetime(2026, 8, 7, 12, 5, tzinfo=UTC)
@@ -532,6 +565,8 @@ def test_initialize_migrates_v2_state_and_backfills_post_aliases(tmp_path: Path)
     assert state is not None
     assert state.consecutive_failures == 0
     assert state.last_failure_at is None
+    assert state.posts_requested == 0
+    assert state.last_scan_partial is False
     assert legacy_lead is not None
     assert legacy_lead.intent is None
     assert legacy_lead.is_residential is None

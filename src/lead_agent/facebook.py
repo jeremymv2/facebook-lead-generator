@@ -409,7 +409,12 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
             if scrolls >= self.settings.facebook_max_scrolls:
                 break
 
-            await self._scroll_for_more(page)
+            try:
+                await self._scroll_for_more(page)
+            except Error:
+                # The feed can replace its final story between the count and scroll calls.
+                # Keep already collected posts and let the next loop inspect the new DOM.
+                await page.wait_for_timeout(100)
             scrolls += 1
             remaining_seconds = max(deadline - loop.time(), 0)
             if remaining_seconds > 0:
@@ -457,30 +462,108 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         posts: list[FacebookPost] = []
         identities: set[str] = set()
 
-        for index in range(count):
-            message = messages.nth(index)
-            if not await message.is_visible(timeout=1000):
-                continue
-            comment_label = cast(
-                str | None,
-                await message.evaluate(
-                    "node => node.closest('article, [role=article]')?.getAttribute('aria-label')"
+        try:
+            snapshots = cast(
+                list[dict[str, object]],
+                await messages.evaluate_all(
+                    r"""
+                    (nodes, limit) => nodes.slice(0, limit).flatMap(node => {
+                        const visible = Boolean(
+                            node.getClientRects().length || node.offsetParent !== null
+                        );
+                        if (!visible) return [];
+                        const article = node.closest('article, [role=article]');
+                        let owner = node;
+                        let depth = 0;
+                        let hrefs = [];
+                        while (owner && depth < 60 && owner.getAttribute('role') !== 'feed') {
+                            hrefs = Array.from(owner.querySelectorAll('a[href]'))
+                                .map(link => link.href)
+                                .filter(href => (
+                                    /\/groups\/[^/]+\/(posts|permalink)\//i.test(href)
+                                    || /[?&](story_fbid|multi_permalinks)=/i.test(href)
+                                ));
+                            if (hrefs.length) break;
+                            owner = owner.parentElement;
+                            depth += 1;
+                        }
+                        return [{
+                            text: node.innerText || '',
+                            label: article?.getAttribute('aria-label') || null,
+                            hrefs,
+                        }];
+                    })
+                    """,
+                    count,
                 ),
             )
+        except Error:
+            snapshots = []
+
+        for snapshot in snapshots:
+            label_value = snapshot.get("label")
+            comment_label = label_value if isinstance(label_value, str) else None
             if is_facebook_comment_label(comment_label):
                 continue
-            post_text = clean_facebook_message_text(await message.inner_text(timeout=1000))
-            hrefs = await self._nearest_post_hrefs(message)
+            text_value = snapshot.get("text")
+            post_text = clean_facebook_message_text(
+                text_value if isinstance(text_value, str) else ""
+            )
+            href_values = snapshot.get("hrefs")
+            snapshot_hrefs = (
+                tuple(value for value in href_values if isinstance(value, str))
+                if isinstance(href_values, list)
+                else ()
+            )
             post = build_facebook_post(
                 FacebookPostCandidate(
                     full_text=post_text,
                     semantic_messages=(post_text,),
-                    hrefs=tuple(hrefs),
+                    hrefs=snapshot_hrefs,
                     article_label=comment_label,
                 ),
                 group,
                 min_length=self.settings.min_post_text_length,
             )
+            if post is None or post.identity_key in identities:
+                continue
+            identities.add(post.identity_key)
+            posts.append(post)
+            if len(posts) >= max_posts:
+                return posts
+
+        if snapshots:
+            return posts
+
+        for index in range(count):
+            try:
+                message = messages.nth(index)
+                if not await message.is_visible(timeout=1000):
+                    continue
+                comment_label = cast(
+                    str | None,
+                    await message.evaluate(
+                        "node => node.closest('article, [role=article]')"
+                        "?.getAttribute('aria-label')"
+                    ),
+                )
+                if is_facebook_comment_label(comment_label):
+                    continue
+                post_text = clean_facebook_message_text(await message.inner_text(timeout=1000))
+                hrefs = await self._nearest_post_hrefs(message)
+                post = build_facebook_post(
+                    FacebookPostCandidate(
+                        full_text=post_text,
+                        semantic_messages=(post_text,),
+                        hrefs=tuple(hrefs),
+                        article_label=comment_label,
+                    ),
+                    group,
+                    min_length=self.settings.min_post_text_length,
+                )
+            except Error:
+                # Preserve other messages when one story node is detached during hydration.
+                continue
             if post is None:
                 continue
             if post.identity_key in identities:

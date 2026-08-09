@@ -317,6 +317,8 @@ class GroupScanState:
     last_error: str | None = None
     posts_seen: int = 0
     posts_new: int = 0
+    posts_requested: int = 0
+    last_scan_partial: bool = False
     consecutive_failures: int = 0
     last_failure_at: datetime | None = None
 

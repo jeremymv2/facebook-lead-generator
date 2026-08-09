@@ -31,7 +31,7 @@ from lead_agent.models import (
     utc_now,
 )
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,11 +259,26 @@ class Database:
                     last_error TEXT,
                     posts_seen INTEGER NOT NULL DEFAULT 0 CHECK(posts_seen >= 0),
                     posts_new INTEGER NOT NULL DEFAULT 0 CHECK(posts_new >= 0),
+                    posts_requested INTEGER NOT NULL DEFAULT 0 CHECK(posts_requested >= 0),
+                    last_scan_partial INTEGER NOT NULL DEFAULT 0
+                        CHECK(last_scan_partial IN (0, 1)),
                     consecutive_failures INTEGER NOT NULL DEFAULT 0
                         CHECK(consecutive_failures >= 0),
                     last_failure_at TEXT
                 );
                 """
+            )
+            _add_column_if_missing(
+                connection,
+                "group_scan_state",
+                "posts_requested",
+                "INTEGER NOT NULL DEFAULT 0 CHECK(posts_requested >= 0)",
+            )
+            _add_column_if_missing(
+                connection,
+                "group_scan_state",
+                "last_scan_partial",
+                "INTEGER NOT NULL DEFAULT 0 CHECK(last_scan_partial IN (0, 1))",
             )
             _add_column_if_missing(
                 connection,
@@ -475,6 +490,8 @@ class Database:
         posts_seen: int,
         posts_new: int,
         last_known_post_identity: str | None,
+        posts_requested: int = 0,
+        is_partial: bool = False,
         occurred_at: datetime | None = None,
     ) -> GroupScanState:
         """Record a successful group scan while preserving a durable last-known post."""
@@ -485,13 +502,16 @@ class Database:
                 INSERT INTO group_scan_state (
                     group_id, group_name, group_url, last_attempt_at, last_success_at,
                     last_known_post_identity, last_error, posts_seen, posts_new,
-                    consecutive_failures
-                ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, 0)
+                    posts_requested, last_scan_partial, consecutive_failures
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 0)
                 ON CONFLICT(group_id) DO UPDATE SET
                     group_name = excluded.group_name,
                     group_url = excluded.group_url,
                     last_attempt_at = excluded.last_attempt_at,
-                    last_success_at = excluded.last_success_at,
+                    last_success_at = COALESCE(
+                        excluded.last_success_at,
+                        group_scan_state.last_success_at
+                    ),
                     last_known_post_identity = COALESCE(
                         excluded.last_known_post_identity,
                         group_scan_state.last_known_post_identity
@@ -499,6 +519,8 @@ class Database:
                     last_error = NULL,
                     posts_seen = excluded.posts_seen,
                     posts_new = excluded.posts_new,
+                    posts_requested = excluded.posts_requested,
+                    last_scan_partial = excluded.last_scan_partial,
                     consecutive_failures = 0
                 """,
                 (
@@ -506,10 +528,12 @@ class Database:
                     group_name,
                     group_url,
                     _serialize_datetime(timestamp),
-                    _serialize_datetime(timestamp),
+                    _serialize_datetime(timestamp) if not is_partial else None,
                     last_known_post_identity,
                     posts_seen,
                     posts_new,
+                    posts_requested,
+                    int(is_partial),
                 ),
             )
         state = self.get_group_scan_state(group_id)
@@ -524,6 +548,7 @@ class Database:
         group_name: str,
         group_url: str,
         error: str,
+        posts_requested: int = 0,
         occurred_at: datetime | None = None,
     ) -> GroupScanState:
         """Record a failed scan without erasing the last successful scan metadata."""
@@ -533,8 +558,8 @@ class Database:
                 """
                 INSERT INTO group_scan_state (
                     group_id, group_name, group_url, last_attempt_at, last_error,
-                    consecutive_failures, last_failure_at
-                ) VALUES (?, ?, ?, ?, ?, 1, ?)
+                    posts_requested, last_scan_partial, consecutive_failures, last_failure_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, 1, ?)
                 ON CONFLICT(group_id) DO UPDATE SET
                     group_name = excluded.group_name,
                     group_url = excluded.group_url,
@@ -542,6 +567,8 @@ class Database:
                     last_error = excluded.last_error,
                     posts_seen = 0,
                     posts_new = 0,
+                    posts_requested = excluded.posts_requested,
+                    last_scan_partial = 0,
                     consecutive_failures = group_scan_state.consecutive_failures + 1,
                     last_failure_at = excluded.last_failure_at
                 """,
@@ -551,6 +578,7 @@ class Database:
                     group_url,
                     _serialize_datetime(timestamp),
                     error,
+                    posts_requested,
                     _serialize_datetime(timestamp),
                 ),
             )
@@ -1869,6 +1897,8 @@ def _group_scan_state_from_row(row: sqlite3.Row) -> GroupScanState:
         last_error=row["last_error"],
         posts_seen=row["posts_seen"],
         posts_new=row["posts_new"],
+        posts_requested=row["posts_requested"],
+        last_scan_partial=bool(row["last_scan_partial"]),
         consecutive_failures=row["consecutive_failures"],
         last_failure_at=_parse_datetime(row["last_failure_at"]),
     )

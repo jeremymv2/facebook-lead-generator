@@ -98,6 +98,8 @@ class Settings(BaseSettings):
     screenshot_retention_days: int = Field(default=14, ge=1, le=365)
     operations_log_retention_days: int = Field(default=14, ge=1, le=365)
     operations_log_max_bytes: int = Field(default=5_000_000, ge=65_536, le=100_000_000)
+    operations_degraded_cycle_limit: int = Field(default=2, ge=1, le=10)
+    operations_incomplete_group_rate_threshold: float = Field(default=0.25, ge=0.1, le=1)
     cycle_classification_limit: int = Field(default=100, ge=1, le=1_000)
 
     data_dir: Path = Path("data")
@@ -114,7 +116,7 @@ class Settings(BaseSettings):
     facebook_group_delay_seconds: float = Field(default=2, ge=0.25, le=30)
     facebook_max_scrolls: int = Field(default=12, ge=0, le=30)
     facebook_scroll_settle_seconds: float = Field(default=0.75, ge=0.25, le=5)
-    max_posts_per_group: int = Field(default=20, ge=1, le=50)
+    max_posts_per_group: int = Field(default=10, ge=1, le=50)
     min_post_text_length: int = Field(default=15, ge=1, le=500)
 
     ai_provider: str = "disabled"

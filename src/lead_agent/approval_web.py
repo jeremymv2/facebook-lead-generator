@@ -164,6 +164,7 @@ def render_dashboard(
     .stack {{ background: #f6f8fa; border-radius: 999px; display: flex; height: 12px;
       overflow: hidden; }}
     .stack .success {{ background: #1f883d; }}
+    .stack .partial {{ background: #bf8700; }}
     .stack .failure {{ background: #cf222e; }}
     .throughput {{ align-items: end; display: flex; gap: 7px; height: 160px;
       justify-content: stretch; padding-top: 12px; }}
@@ -177,6 +178,7 @@ def render_dashboard(
     .dot {{ border-radius: 999px; display: inline-block; height: 9px; margin-right: 4px;
       width: 9px; }}
     .dot.success {{ background: #1f883d; }}
+    .dot.partial {{ background: #bf8700; margin-left: 12px; }}
     .dot.failure {{ background: #cf222e; margin-left: 12px; }}
     .table-wrap {{ overflow-x: auto; }}
     table {{ border-collapse: collapse; font-size: .86rem; width: 100%; }}
@@ -187,7 +189,8 @@ def render_dashboard(
     .status {{ border-radius: 999px; display: inline-block; font-size: .75rem;
       font-weight: 700; padding: 3px 8px; }}
     .status.success, .health.healthy {{ background: #dafbe1; color: #116329; }}
-    .status.degraded, .health.degraded {{ background: #fff8c5; color: #633c01; }}
+    .status.degraded, .health.degraded, .health.partial {{
+      background: #fff8c5; color: #633c01; }}
     .status.failed, .status.unknown {{ background: #ffebe9; color: #82071e; }}
     .health {{ border-radius: 999px; display: inline-block; font-size: .75rem;
       font-weight: 700; padding: 3px 8px; }}
@@ -230,7 +233,7 @@ def _render_trends(trends: DashboardTrendSnapshot, *, display_timezone: tzinfo) 
     kpis = f"""
     <div class="kpis">
       <div class="kpi"><strong>{trends.group_success_percent:g}%</strong>
-        <span>Group success rate</span></div>
+        <span>Full group coverage</span></div>
       <div class="kpi"><strong>{trends.posts_seen}</strong><span>Posts seen</span></div>
       <div class="kpi"><strong>{trends.posts_new}</strong><span>New posts</span></div>
       <div class="kpi"><strong>{trends.candidates_created}</strong><span>Candidates</span></div>
@@ -262,7 +265,8 @@ def _render_trends(trends: DashboardTrendSnapshot, *, display_timezone: tzinfo) 
         <div class="trend-grid">
           <section class="panel">
             <h3>Group scan reliability</h3>
-            <p class="legend"><span class="dot success"></span>Succeeded
+            <p class="legend"><span class="dot success"></span>Complete
+              <span class="dot partial"></span>Partial
               <span class="dot failure"></span>Failed</p>
             <div class="trend-list">{reliability_rows}</div>
           </section>
@@ -290,20 +294,23 @@ def _render_trends(trends: DashboardTrendSnapshot, *, display_timezone: tzinfo) 
 
 def _render_reliability_row(cycle: CycleTrend, *, display_timezone: tzinfo) -> str:
     attempted = cycle.groups_attempted
-    success_width = cycle.groups_scanned * 100 / attempted if attempted else 0
+    success_width = cycle.groups_complete * 100 / attempted if attempted else 0
+    partial_width = cycle.groups_partial * 100 / attempted if attempted else 0
     failure_width = cycle.groups_failed * 100 / attempted if attempted else 0
     time_label = _short_time(cycle.occurred_at, display_timezone)
     aria = (
-        f"{cycle.groups_scanned} groups succeeded and {cycle.groups_failed} failed at {time_label}"
+        f"{cycle.groups_complete} groups complete, {cycle.groups_partial} partial, and "
+        f"{cycle.groups_failed} failed at {time_label}"
     )
     return f"""
     <div class="trend-row">
       <time datetime="{html.escape(cycle.occurred_at.isoformat(), quote=True)}">{time_label}</time>
       <div class="stack" role="img" aria-label="{html.escape(aria, quote=True)}">
         <span class="success" style="width:{success_width:.1f}%"></span>
+        <span class="partial" style="width:{partial_width:.1f}%"></span>
         <span class="failure" style="width:{failure_width:.1f}%"></span>
       </div>
-      <span class="trend-value">{cycle.groups_scanned}/{attempted} groups</span>
+      <span class="trend-value">{cycle.groups_complete}/{attempted} full</span>
     </div>"""
 
 
@@ -333,7 +340,8 @@ def _render_cycle_table(cycles: tuple[CycleTrend, ...], *, display_timezone: tzi
               <td><time datetime="{html.escape(value.occurred_at.isoformat(), quote=True)}">
                 {timestamp}</time></td>
               <td><span class="status {status}">{status.title()}</span></td>
-              <td>{value.groups_scanned}/{value.groups_attempted}</td>
+              <td>{value.groups_complete}/{value.groups_attempted}</td>
+              <td>{value.groups_partial}</td>
               <td>{value.groups_retried}/{value.groups_recovered}</td>
               <td>{value.posts_seen}</td><td>{value.posts_new}</td>
               <td>{value.posts_classified}</td><td>{value.candidates_created}</td>
@@ -343,7 +351,8 @@ def _render_cycle_table(cycles: tuple[CycleTrend, ...], *, display_timezone: tzi
     <section class="panel">
       <h3>Recent cycle details</h3>
       <div class="table-wrap"><table>
-        <thead><tr><th>Completed</th><th>Status</th><th>Groups</th><th>Retries/recovered</th>
+        <thead><tr><th>Completed</th><th>Status</th><th>Full groups</th><th>Partial</th>
+          <th>Retries/recovered</th>
           <th>Seen</th><th>New</th><th>Classified</th><th>Candidates</th></tr></thead>
         <tbody>{"".join(rows)}</tbody>
       </table></div>
@@ -359,7 +368,13 @@ def _render_group_health_table(
         return ""
     rows: list[str] = []
     for group in sorted(trends.groups, key=lambda item: item.group_name.casefold()):
-        health = "healthy" if group.last_error is None else "degraded"
+        health = (
+            "degraded"
+            if group.last_error is not None
+            else "partial"
+            if group.last_scan_partial
+            else "healthy"
+        )
         last_success = (
             _full_time(group.last_success_at, display_timezone)
             if group.last_success_at
@@ -370,7 +385,8 @@ def _render_group_health_table(
               <td>{html.escape(group.group_name)}</td>
               <td><span class="health {health}">{health.title()}</span></td>
               <td>{group.consecutive_failures}</td>
-              <td>{last_success}</td><td>{group.posts_seen}</td><td>{group.posts_new}</td>
+              <td>{last_success}</td><td>{group.posts_seen}/{group.posts_requested}</td>
+              <td>{group.posts_new}</td>
             </tr>"""
         )
     return f"""
@@ -378,7 +394,7 @@ def _render_group_health_table(
       <h3>Current group health</h3>
       <div class="table-wrap"><table>
         <thead><tr><th>Group</th><th>Health</th><th>Failure streak</th>
-          <th>Last success</th><th>Latest seen</th><th>Latest new</th></tr></thead>
+          <th>Last complete</th><th>Latest seen/requested</th><th>Latest new</th></tr></thead>
         <tbody>{"".join(rows)}</tbody>
       </table></div>
     </section>"""

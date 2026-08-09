@@ -95,6 +95,7 @@ def test_dashboard_renders_cycle_trends_and_current_group_health(tmp_path: Path)
             details={
                 "groups_scanned": 5,
                 "groups_failed": 3,
+                "groups_partial": 2,
                 "groups_retried": 4,
                 "groups_recovered": 1,
                 "posts_seen": 39,
@@ -116,10 +117,11 @@ def test_dashboard_renders_cycle_trends_and_current_group_health(tmp_path: Path)
     page = controller.render(now=now)
 
     assert "Historical trends" in page
-    assert "81.2%" in page
+    assert "68.8%" in page
+    assert "Full group coverage" in page
     assert "Recent cycle details" in page
     assert "Current group health" in page
-    assert "5/8" in page
+    assert "3/8" in page
     assert "4/1" in page
     assert "&lt;script&gt;Degraded Group&lt;/script&gt;" in page
     assert "<script>Degraded Group</script>" not in page
