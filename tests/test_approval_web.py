@@ -17,7 +17,7 @@ from lead_agent.approval_web import (
 )
 from lead_agent.approvals import ApprovalAction, LocalApprovalService
 from lead_agent.database import Database
-from lead_agent.models import FacebookPost, Lead, LeadIntent, LeadStatus
+from lead_agent.models import AuditEvent, FacebookPost, Lead, LeadIntent, LeadStatus
 
 VALID_DRAFT = (
     "JJ Miller & Co. can help with your deck project. Free estimates. "
@@ -64,6 +64,65 @@ def test_dashboard_escapes_facebook_content_and_states_safety_boundary(tmp_path:
     assert "This dashboard cannot post to Facebook" in page
     assert 'name="csrf_token" value="fixture-csrf"' in page
     assert "javascript:alert" not in page
+
+
+def test_dashboard_renders_cycle_trends_and_current_group_health(tmp_path: Path) -> None:
+    controller, _, now = prepared_controller(tmp_path)
+    database = controller.service.database
+    database.record_audit_event(
+        AuditEvent(
+            component="operations",
+            action="cycle.run",
+            result="success",
+            occurred_at=now,
+            details={
+                "groups_scanned": 8,
+                "groups_failed": 0,
+                "posts_seen": 80,
+                "posts_new": 5,
+                "posts_classified": 5,
+                "candidates_created": 1,
+                "notifications_sent": 0,
+            },
+        )
+    )
+    database.record_audit_event(
+        AuditEvent(
+            component="operations",
+            action="cycle.run",
+            result="degraded",
+            occurred_at=now,
+            details={
+                "groups_scanned": 5,
+                "groups_failed": 3,
+                "groups_retried": 4,
+                "groups_recovered": 1,
+                "posts_seen": 39,
+                "posts_new": 5,
+                "posts_classified": 5,
+                "candidates_created": 0,
+                "notifications_sent": 0,
+            },
+        )
+    )
+    database.record_group_scan_failure(
+        group_id="group-degraded",
+        group_name="<script>Degraded Group</script>",
+        group_url="https://www.facebook.com/groups/999",
+        error="TransientFacebookReadError:feed:timeout",
+        occurred_at=now,
+    )
+
+    page = controller.render(now=now)
+
+    assert "Historical trends" in page
+    assert "81.2%" in page
+    assert "Recent cycle details" in page
+    assert "Current group health" in page
+    assert "5/8" in page
+    assert "4/1" in page
+    assert "&lt;script&gt;Degraded Group&lt;/script&gt;" in page
+    assert "<script>Degraded Group</script>" not in page
 
 
 def test_controller_rejects_missing_csrf_and_accepts_once(tmp_path: Path) -> None:
