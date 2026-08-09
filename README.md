@@ -504,8 +504,16 @@ lead-agent export-regression-fixtures --limit 100
 ```
 
 The exporter redacts names, businesses, email addresses, phone numbers, street addresses, and URLs,
-writes with private permissions under `data/`, and marks every fixture for manual review. Duplicate
-and `other` reasons are intentionally skipped because they do not imply a classifier expectation.
+writes with private permissions under `data/`, and marks every fixture for manual review. Repeated
+copies of the same sanitized post and expected result collapse into one example so cross-group
+reposts cannot overweight a rule. Duplicate and `other` rejection reasons are intentionally skipped
+because they do not imply a classifier expectation.
+
+The private export is an input to review, not automatic model fine-tuning. After checking the
+redactions, translate unique examples into generalized fixtures under `tests/fixtures/` and update
+classifier rules without copying customer or provider identifiers. Replay all saved classifications
+before applying a new classifier version, and use approved reviews as positive guardrails against
+over-suppressing legitimate requests.
 
 The same page includes a content-free historical operations dashboard. It summarizes the newest 48
 completed cycles, charts the latest 12 for group reliability and posts seen, lists recent cycle

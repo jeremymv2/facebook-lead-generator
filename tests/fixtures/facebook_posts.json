@@ -88,5 +88,40 @@
     "name": "contractor_seeking_same_day_pressure_washing_labor",
     "text": "Looking for help pressure washing today. I have a pretty big job to do and need a little help surface cleaning a large driveway. Anyone interested?",
     "expected": {"service": "pressure_washing", "intent": "unrelated", "maximum_score": 10}
+  },
+  {
+    "name": "review_feedback_garage_door_provider_advertisement",
+    "text": "When you need a new garage door spring, choose a long-life spring. At [business], we only carry long-life solutions. Call or text today for same-day spring repair and follow us for future service.",
+    "expected": {"service": "doors", "intent": "competitor_advertisement", "maximum_score": 10}
+  },
+  {
+    "name": "review_feedback_home_improvement_endorsement_advertisement",
+    "text": "Anyone needing home improvements such as tiling or flooring, [business] is the one to go with. Family owned, quality work, and free estimates.",
+    "expected": {"service": "flooring", "intent": "competitor_advertisement", "maximum_score": 10}
+  },
+  {
+    "name": "review_feedback_high_end_landscaping_request_guardrail",
+    "text": "Who is the best landscaping company in Louisville? Looking for a modern design with lighting, pavers, and plants for a high-end residential project.",
+    "expected": {"service": "landscaping", "intent": "hiring", "minimum_score": 80}
+  },
+  {
+    "name": "review_feedback_multi_trade_mobile_home_request_guardrail",
+    "text": "Need someone to install a door and casing on a mobile home and add a deck handrail. There is also subfloor, drywall, and flooring work. Can anyone help?",
+    "expected": {"intent": "hiring", "minimum_score": 80}
+  },
+  {
+    "name": "review_feedback_drywall_painting_request_guardrail",
+    "text": "Any good drywall professionals looking for work this morning? I would prefer someone who can also do painting and trim.",
+    "expected": {"intent": "hiring", "minimum_score": 80}
+  },
+  {
+    "name": "review_feedback_attic_vent_recommendation_guardrail",
+    "text": "Who is the go-to in Louisville for exterior attic vents? Water intrusion has already damaged drywall in one room. Any recommendations?",
+    "expected": {"intent": "recommendation", "minimum_score": 80}
+  },
+  {
+    "name": "review_feedback_window_and_paint_request_guardrail",
+    "text": "Looking for someone to replace broken window glass and complete a few paint touch-ups.",
+    "expected": {"service": "windows", "intent": "hiring", "minimum_score": 80}
   }
 ]
