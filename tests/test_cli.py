@@ -352,9 +352,11 @@ def test_approval_dashboard_command_uses_local_service_without_facebook(
         *,
         port: int,
         candidate_limit: int,
+        business_timezone: str,
     ) -> None:
         calls["port"] = port
         calls["candidate_limit"] = candidate_limit
+        assert business_timezone == "America/New_York"
         assert service.__class__.__name__ == "LocalApprovalService"
 
     monkeypatch.setattr(cli_module, "run_local_approval_dashboard", fake_dashboard)
@@ -618,7 +620,47 @@ def test_run_cycle_command_executes_content_free_pipeline(
     assert payload["scan"]["groups_retried"] == 1
     assert payload["scan"]["groups_recovered"] == 1
     database = Database(tmp_path / "data" / "cycle.sqlite3")
-    assert [event.action for event in database.list_audit_events()] == ["cycle.run"]
+    events = database.list_audit_events()
+    assert [event.action for event in events] == ["cycle.run"]
+    assert events[0].details == {
+        "candidates_created": 0,
+        "duplicates": 4,
+        "groups_failed": 0,
+        "groups_recovered": 1,
+        "groups_retried": 1,
+        "groups_scanned": 1,
+        "notifications_considered": 0,
+        "notifications_failed": 0,
+        "notifications_sent": 0,
+        "posts_classified": 0,
+        "posts_ignored": 0,
+        "posts_new": 0,
+        "posts_seen": 4,
+    }
+
+
+def test_run_cycle_records_only_safe_failure_type_for_dashboard_history(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_cycle_fixture(monkeypatch, tmp_path)
+
+    async def failed_scan(*args: object, **kwargs: object) -> ScanCycleSummary:
+        del args, kwargs
+        raise RuntimeError("private Facebook content must not enter history")
+
+    monkeypatch.setattr(cli_module, "_scan_groups_for_cycle", failed_scan)
+
+    result = main(["run-cycle", "--skip-notifications"])
+
+    assert result == 2
+    assert "private Facebook content" not in capsys.readouterr().err
+    database = Database(tmp_path / "data" / "cycle.sqlite3")
+    events = database.list_audit_events(component="operations", action="cycle.run")
+    assert len(events) == 1
+    assert events[0].result == "failed"
+    assert events[0].details == {"error_code": "RuntimeError"}
 
 
 @pytest.mark.parametrize(

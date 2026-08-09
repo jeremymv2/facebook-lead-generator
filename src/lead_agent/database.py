@@ -1482,17 +1482,40 @@ class Database:
                 details=event.details,
             )
 
-    def list_audit_events(self, *, lead_id: int | None = None) -> list[AuditEvent]:
+    def list_audit_events(
+        self,
+        *,
+        lead_id: int | None = None,
+        component: str | None = None,
+        action: str | None = None,
+        limit: int | None = None,
+        newest_first: bool = False,
+    ) -> list[AuditEvent]:
+        """List filtered audit events without loading unrelated history."""
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be positive")
+        filters: list[str] = []
+        parameters: list[object] = []
+        if lead_id is not None:
+            filters.append("lead_id = ?")
+            parameters.append(lead_id)
+        if component is not None:
+            filters.append("component = ?")
+            parameters.append(component)
+        if action is not None:
+            filters.append("action = ?")
+            parameters.append(action)
+        where_clause = f" WHERE {' AND '.join(filters)}" if filters else ""
+        direction = "DESC" if newest_first else "ASC"
+        limit_clause = " LIMIT ?" if limit is not None else ""
+        if limit is not None:
+            parameters.append(limit)
         with self.connection() as connection:
-            if lead_id is None:
-                rows = connection.execute(
-                    "SELECT * FROM audit_events ORDER BY occurred_at, id"
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    "SELECT * FROM audit_events WHERE lead_id = ? ORDER BY occurred_at, id",
-                    (lead_id,),
-                ).fetchall()
+            rows = connection.execute(
+                f"SELECT * FROM audit_events{where_clause} "
+                f"ORDER BY occurred_at {direction}, id {direction}{limit_clause}",
+                parameters,
+            ).fetchall()
         return [_audit_event_from_row(row) for row in rows]
 
 

@@ -445,6 +445,13 @@ response, and remaining review time. Each candidate can be approved exactly as d
 approved, or rejected. Edited responses must still satisfy the local company identity, free
 estimate, full website URL, text-number, and length rules.
 
+The same page includes a content-free historical operations dashboard. It summarizes the newest 48
+completed cycles, charts the latest 12 for group reliability and posts seen, lists recent cycle
+counts, and shows the current failure streak and last success for every configured group. Existing
+`cycle.run` audit events appear immediately; future events also retain retry, recovery, duplicate,
+classification, candidate, and notification counters. Times use `BUSINESS_TIMEZONE`. No post text,
+draft response, Facebook URL, phone number, or credential is copied into trend records.
+
 Starting review changes a candidate to `pending_approval` and snapshots the draft so later data
 changes cannot silently alter what was reviewed. The default review window is 20 minutes. A terminal
 decision cannot be changed or replayed; expired requests require a new review workflow. Every state
@@ -680,9 +687,11 @@ is idempotent.
 8. **Local unattended operations:** locked scan/classify/notify cycles, macOS
    launch agents, pause controls, content-free health, retention, duplicate review suppression,
    and group-quality reporting.
-9. **Reliability and coverage hardening (this milestone):** conservative scheduling, bounded
+9. **Reliability and coverage hardening:** conservative scheduling, bounded
    transient group retries, safe retry diagnostics, security-boundary tests, and an enforced 90%
    branch-coverage floor.
+10. **Historical operations dashboard (this milestone):** local-only cycle charts, bounded audit
+    queries, current group health, mobile-responsive tables, and richer content-free run counters.
 
 The first browser milestone is successful only when a second read-only run stores no duplicate
 posts and the software remains incapable of commenting.

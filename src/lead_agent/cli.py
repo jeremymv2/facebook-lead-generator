@@ -476,12 +476,23 @@ def _run_operations_cycle(
         return notifier.notify_candidates(limit=settings.ai_max_posts_per_run)
 
     notify_callback = notify_cycle if notifier is not None else None
-    result = runner.run(
-        scan=lambda: asyncio.run(_scan_groups_for_cycle(settings, groups, max_posts=max_posts)),
-        classify=lambda: classifier.classify_posts(limit=classification_limit),
-        notify=notify_callback,
-        retain=retention.cleanup,
-    )
+    try:
+        result = runner.run(
+            scan=lambda: asyncio.run(_scan_groups_for_cycle(settings, groups, max_posts=max_posts)),
+            classify=lambda: classifier.classify_posts(limit=classification_limit),
+            notify=notify_callback,
+            retain=retention.cleanup,
+        )
+    except Exception as error:
+        database.record_audit_event(
+            AuditEvent(
+                component="operations",
+                action="cycle.run",
+                result="failed",
+                details={"error_code": type(error).__name__},
+            )
+        )
+        raise
     if result is not None:
         database.record_audit_event(
             AuditEvent(
@@ -491,11 +502,17 @@ def _run_operations_cycle(
                 details={
                     "groups_scanned": result.scan.groups_scanned,
                     "groups_failed": result.scan.groups_failed,
+                    "groups_retried": result.scan.groups_retried,
+                    "groups_recovered": result.scan.groups_recovered,
                     "posts_seen": result.scan.posts_seen,
                     "posts_new": result.scan.posts_new,
+                    "duplicates": result.scan.duplicates,
                     "posts_classified": result.posts_classified,
                     "candidates_created": result.candidates_created,
+                    "posts_ignored": result.posts_ignored,
+                    "notifications_considered": result.notifications_considered,
                     "notifications_sent": result.notifications_sent,
+                    "notifications_failed": result.notifications_failed,
                 },
             )
         )
@@ -661,6 +678,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 service,
                 port=args.port or settings.approval_local_port,
                 candidate_limit=args.limit or settings.ai_max_posts_per_run,
+                business_timezone=settings.business_timezone,
             )
         except (ApprovalError, OSError, UnsafeReadOnlyModeError) as error:
             print(f"Stopped safely: {error}", file=sys.stderr)
