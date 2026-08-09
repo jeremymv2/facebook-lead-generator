@@ -520,6 +520,43 @@ def _safe_facebook_post_url(value: str | None) -> str | None:
     return value
 
 
+def _is_local_dashboard_url(value: str | None, *, port: int, allow_path: bool) -> bool:
+    if not value:
+        return False
+    parts = urlsplit(value)
+    try:
+        parsed_port = parts.port
+    except ValueError:
+        return False
+    if (
+        parts.scheme.casefold() != "http"
+        or (parts.hostname or "").casefold() not in {"127.0.0.1", "localhost"}
+        or parsed_port != port
+        or parts.username is not None
+        or parts.password is not None
+        or parts.fragment
+    ):
+        return False
+    return allow_path or (parts.path in {"", "/"} and not parts.query)
+
+
+def _valid_local_origin(
+    origin: str | None,
+    *,
+    referer: str | None,
+    fetch_site: str | None,
+    port: int,
+) -> bool:
+    """Accept normalized loopback origins plus verified same-origin browser submissions."""
+    if origin is None or _is_local_dashboard_url(origin, port=port, allow_path=False):
+        return True
+    return fetch_site == "same-origin" and _is_local_dashboard_url(
+        referer,
+        port=port,
+        allow_path=True,
+    )
+
+
 class LocalApprovalHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -555,7 +592,6 @@ def _handler_class(
     port: int,
 ) -> type[BaseHTTPRequestHandler]:
     allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
-    allowed_origins = {f"http://{host}" for host in allowed_hosts}
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "JJMillerLocalApproval/1"
@@ -586,7 +622,12 @@ def _handler_class(
                 self._send_text(HTTPStatus.MISDIRECTED_REQUEST, "Invalid local Host header")
                 return
             origin = self.headers.get("Origin")
-            if origin is not None and origin not in allowed_origins:
+            if not _valid_local_origin(
+                origin,
+                referer=self.headers.get("Referer"),
+                fetch_site=self.headers.get("Sec-Fetch-Site"),
+                port=port,
+            ):
                 self._send_text(HTTPStatus.FORBIDDEN, "Invalid local Origin header")
                 return
             match = LOCAL_REVIEW_PATH.fullmatch(urlsplit(self.path).path)

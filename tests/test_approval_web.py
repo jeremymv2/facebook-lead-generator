@@ -15,6 +15,7 @@ from lead_agent.approval_web import (
     LocalApprovalController,
     _handler_class,
     _safe_facebook_post_url,
+    _valid_local_origin,
 )
 from lead_agent.approvals import ApprovalAction, LocalApprovalService
 from lead_agent.database import Database
@@ -299,6 +300,29 @@ def test_loopback_server_enforces_headers_csrf_and_one_time_decision(tmp_path: P
     assert "already been decided" in page
 
 
+def test_loopback_server_accepts_verified_same_origin_browser_fallback(tmp_path: Path) -> None:
+    controller, lead_id, _ = prepared_controller(tmp_path)
+    host = f"{LOOPBACK_HOST}:8765"
+    form = urlencode({"csrf_token": "fixture-csrf"})
+
+    status, headers, _ = handle_request(
+        controller,
+        "POST",
+        f"/leads/{lead_id}/approve",
+        body=form,
+        headers={
+            "Host": host,
+            "Origin": "null",
+            "Referer": f"http://{host}/",
+            "Sec-Fetch-Site": "same-origin",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+    )
+
+    assert status == HTTPStatus.SEE_OTHER
+    assert headers["Location"] == "/?result=approved"
+
+
 def test_controller_supports_explicit_edit_and_reject_decisions(tmp_path: Path) -> None:
     edit_directory = tmp_path / "edit"
     edit_directory.mkdir()
@@ -348,6 +372,39 @@ def test_dashboard_links_only_to_https_facebook_posts(
     expected: str | None,
 ) -> None:
     assert _safe_facebook_post_url(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("origin", "referer", "fetch_site", "expected"),
+    [
+        (None, None, None, True),
+        ("http://127.0.0.1:8765", None, None, True),
+        ("http://localhost:8765/", None, None, True),
+        ("http://LOCALHOST:8765", None, None, True),
+        ("http://127.0.0.1:9999", None, None, False),
+        ("https://127.0.0.1:8765", None, None, False),
+        ("https://attacker.invalid", None, None, False),
+        ("null", "http://127.0.0.1:8765/", "same-origin", True),
+        ("codex://browser", "http://localhost:8765/?review=1", "same-origin", True),
+        ("null", "http://127.0.0.1:8765/", "cross-site", False),
+        ("null", "https://attacker.invalid/", "same-origin", False),
+    ],
+)
+def test_local_origin_accepts_safe_browser_variants(
+    origin: str | None,
+    referer: str | None,
+    fetch_site: str | None,
+    expected: bool,
+) -> None:
+    assert (
+        _valid_local_origin(
+            origin,
+            referer=referer,
+            fetch_site=fetch_site,
+            port=8765,
+        )
+        is expected
+    )
 
 
 def test_loopback_server_rejects_malformed_requests(tmp_path: Path) -> None:
