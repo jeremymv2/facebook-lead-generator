@@ -1,5 +1,9 @@
 # JJ Miller & Co. Facebook Lead Agent
 
+[![Coverage gate](https://github.com/jeremymv2/facebook-lead-generator/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/jeremymv2/facebook-lead-generator/actions/workflows/test.yml)
+[![Lint](https://github.com/jeremymv2/facebook-lead-generator/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/jeremymv2/facebook-lead-generator/actions/workflows/lint.yml)
+[![Secret scan](https://github.com/jeremymv2/facebook-lead-generator/actions/workflows/secret-scan.yml/badge.svg?branch=main)](https://github.com/jeremymv2/facebook-lead-generator/actions/workflows/secret-scan.yml)
+
 A local-first, AI-assisted lead workflow for identifying high-value contracting requests in an
 explicitly approved set of Louisville-area Facebook groups. The intended product flow is:
 
@@ -216,8 +220,10 @@ pre-commit run --all-files --hook-stage pre-commit
 pre-commit run --all-files --hook-stage pre-push
 ```
 
-Pull requests run formatting, lint, type, unit-test, and independent full-history secret checks.
-Live Facebook tests must never run in GitHub Actions.
+Pull requests expose separate required-ready status checks for lint/type safety, unit-test coverage,
+and independent full-history secret scanning. Coverage fails below 85% and publishes its full
+terminal report in the GitHub Actions job summary. Live Facebook tests must never run in GitHub
+Actions.
 
 ## Secrets and local data
 
