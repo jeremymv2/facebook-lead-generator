@@ -28,6 +28,9 @@ def test_safe_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert settings.daily_posting_limit == 5
     assert settings.per_group_daily_posting_limit == 2
     assert settings.business_timezone == "America/New_York"
+    assert settings.database_backup_retention_days == 14
+    assert settings.database_backup_interval_hours == 24
+    assert settings.database_backup_dir == Path("data/backups")
     assert settings.browser_channel is None
     assert settings.browser_headless is False
     assert settings.facebook_group_max_retries == 1
@@ -41,6 +44,16 @@ def test_safe_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert settings.ai_max_posts_per_run == 20
     assert settings.sms_provider == "disabled"
     assert settings.remote_approval_ready is False
+
+
+def test_backup_directory_expands_user_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_env_file=None, database_backup_dir=Path("~/private-lead-backups"))
+
+    assert settings.database_backup_dir == Path.home() / "private-lead-backups"
 
 
 def test_business_timezone_must_be_valid(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -10,6 +10,7 @@ import sys
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import asdict
+from pathlib import Path
 
 from lead_agent.ai import (
     CLASSIFICATION_VERSION,
@@ -19,6 +20,7 @@ from lead_agent.ai import (
 )
 from lead_agent.approval_web import run_local_approval_dashboard
 from lead_agent.approvals import ApprovalError, LocalApprovalService
+from lead_agent.backups import BackupError, DatabaseBackupService
 from lead_agent.classifier import ClassificationSummary, LeadClassificationService
 from lead_agent.config import (
     NotificationConfigurationError,
@@ -31,6 +33,7 @@ from lead_agent.database import Database
 from lead_agent.facebook import FacebookBrowserError, FacebookReadOnlyBrowser
 from lead_agent.facebook_posting import FacebookCommentBrowser
 from lead_agent.facebook_state import FacebookSafetyStop
+from lead_agent.feedback import export_regression_fixtures
 from lead_agent.groups import FacebookGroup, GroupsConfigError, load_group_catalog
 from lead_agent.logging_config import configure_logging
 from lead_agent.models import AuditEvent, GroupScanState
@@ -46,6 +49,7 @@ from lead_agent.operations import (
     OperationsCycleRunner,
     OperationsState,
     RetentionService,
+    RetentionSummary,
     ScanCycleSummary,
 )
 from lead_agent.posting import ApprovedPostingService, PostingError, PostingExecutionResult
@@ -101,6 +105,51 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit",
         type=_positive_int,
         help="Maximum posts to classify (defaults to AI_MAX_POSTS_PER_RUN)",
+    )
+    reclassify_parser = subparsers.add_parser(
+        "reclassify-leads",
+        help="Safely update stale unreviewed classifications without touching reviewed leads",
+    )
+    reclassify_parser.add_argument(
+        "--lead-id",
+        type=_positive_int,
+        help="Reclassify one unreviewed lead, including a lead already on the current version",
+    )
+    reclassify_parser.add_argument("--limit", type=_positive_int, help="Maximum leads to update")
+    replay_parser = subparsers.add_parser(
+        "classification-replay",
+        help="Compare current classifier rules with saved results without changing state",
+    )
+    replay_parser.add_argument("--lead-id", type=_positive_int, help="Replay one saved lead")
+    replay_parser.add_argument("--limit", type=_positive_int, help="Maximum saved leads to replay")
+    replay_parser.add_argument(
+        "--changed-only",
+        action="store_true",
+        help="Print only results whose status, service, intent, or score would change",
+    )
+    export_parser = subparsers.add_parser(
+        "export-regression-fixtures",
+        help="Export sanitized classifier fixtures from structured human rejection feedback",
+    )
+    export_parser.add_argument("--lead-id", type=_positive_int, help="Export one rejected lead")
+    export_parser.add_argument("--limit", type=_positive_int, help="Maximum feedback records")
+    export_parser.add_argument(
+        "--output",
+        type=Path,
+        help="Private JSON output path (defaults under DATA_DIR)",
+    )
+    subparsers.add_parser(
+        "database-backup",
+        help="Create and verify a private SQLite backup immediately",
+    )
+    restore_parser = subparsers.add_parser(
+        "database-restore-test",
+        help="Restore a private backup into a disposable database and verify integrity",
+    )
+    restore_parser.add_argument(
+        "--backup-path",
+        type=Path,
+        help="Backup inside DATABASE_BACKUP_DIR (defaults to latest)",
     )
     approval_parser = subparsers.add_parser(
         "approval-dashboard",
@@ -251,6 +300,9 @@ def _doctor_payload(settings: Settings) -> dict[str, object]:
         "candidate_duplicate_window_hours": settings.candidate_duplicate_window_hours,
         "operations_state_dir": str(settings.operations_state_dir),
         "operations_log_dir": str(settings.operations_log_dir),
+        "database_backup_dir": str(settings.database_backup_dir),
+        "database_backup_retention_days": settings.database_backup_retention_days,
+        "database_backup_interval_hours": settings.database_backup_interval_hours,
     }
 
 
@@ -486,6 +538,12 @@ def _run_operations_cycle(
         log_retention_days=settings.operations_log_retention_days,
         log_max_bytes=settings.operations_log_max_bytes,
     )
+    backups = DatabaseBackupService(
+        settings.database_path,
+        settings.database_backup_dir,
+        retention_days=settings.database_backup_retention_days,
+        interval_hours=settings.database_backup_interval_hours,
+    )
     notifier = None
     if settings.notifications_enabled and not skip_notifications:
         notifier = _build_approval_notifier(settings, database)
@@ -502,12 +560,25 @@ def _run_operations_cycle(
         return notifier.notify_candidates(limit=settings.ai_max_posts_per_run)
 
     notify_callback = notify_cycle if notifier is not None else None
+
+    def retain_cycle() -> RetentionSummary:
+        retained = retention.cleanup()
+        backup = backups.run()
+        return RetentionSummary(
+            screenshots_removed=retained.screenshots_removed,
+            logs_removed=retained.logs_removed,
+            logs_rotated=retained.logs_rotated,
+            backups_created=backup.created,
+            backups_verified=backup.verified,
+            backups_removed=backup.removed,
+        )
+
     try:
         result = runner.run(
             scan=lambda: asyncio.run(_scan_groups_for_cycle(settings, groups, max_posts=max_posts)),
             classify=lambda: classifier.classify_posts(limit=classification_limit),
             notify=notify_callback,
-            retain=retention.cleanup,
+            retain=retain_cycle,
         )
     except Exception as error:
         health = state.read_health()
@@ -546,6 +617,9 @@ def _run_operations_cycle(
                     "notifications_sent": result.notifications_sent,
                     "notifications_failed": result.notifications_failed,
                     "circuit_breaker_tripped": result.circuit_breaker_tripped,
+                    "backups_created": result.retention.backups_created,
+                    "backups_verified": result.retention.backups_verified,
+                    "backups_removed": result.retention.backups_removed,
                 },
             )
         )
@@ -694,6 +768,96 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Stopped safely: {error}", file=sys.stderr)
             return 2
         _print_classification_results(summary)
+        return 0
+
+    if args.command in {"reclassify-leads", "classification-replay"}:
+        try:
+            settings.require_read_only_mode()
+            database = Database(settings.database_path)
+            database.initialize()
+            classifier = LeadClassificationService(
+                database,
+                build_ai_provider(settings),
+                classification_context(settings),
+            )
+            limit = args.limit or settings.ai_max_posts_per_run
+            if args.command == "reclassify-leads":
+                reclassification_result = classifier.reclassify_leads(
+                    limit=limit, lead_id=args.lead_id
+                )
+                print(json.dumps(asdict(reclassification_result), indent=2, sort_keys=True))
+            else:
+                replay_result = classifier.replay_history(limit=limit, lead_id=args.lead_id)
+                outcomes = [
+                    asdict(outcome)
+                    for outcome in replay_result.outcomes
+                    if not args.changed_only or outcome.changed
+                ]
+                print(
+                    json.dumps(
+                        {
+                            "leads_considered": replay_result.leads_considered,
+                            "changed": replay_result.changed,
+                            "outcomes": outcomes,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+        except (AIProviderError, UnsafeReadOnlyModeError, ValueError) as error:
+            print(f"Stopped safely: {error}", file=sys.stderr)
+            return 2
+        return 0
+
+    if args.command == "export-regression-fixtures":
+        database = Database(settings.database_path)
+        database.initialize()
+        output_path = args.output or settings.data_dir / "regression-fixtures.json"
+        export_summary = export_regression_fixtures(
+            database,
+            output_path,
+            limit=args.limit or 100,
+            lead_id=args.lead_id,
+        )
+        print(
+            json.dumps(
+                {
+                    **asdict(export_summary),
+                    "output_path": str(export_summary.output_path),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    if args.command in {"database-backup", "database-restore-test"}:
+        try:
+            database = Database(settings.database_path)
+            database.initialize()
+            backups = DatabaseBackupService(
+                settings.database_path,
+                settings.database_backup_dir,
+                retention_days=settings.database_backup_retention_days,
+                interval_hours=settings.database_backup_interval_hours,
+            )
+            if args.command == "database-backup":
+                backup_summary = backups.run(force=True)
+                payload = {
+                    "created": backup_summary.created,
+                    "verified": backup_summary.verified,
+                    "removed": backup_summary.removed,
+                    "backup_path": (
+                        str(backup_summary.backup_path) if backup_summary.backup_path else None
+                    ),
+                }
+            else:
+                verified_path = backups.verify_restore(args.backup_path)
+                payload = {"verified": True, "backup_path": str(verified_path)}
+        except BackupError as error:
+            print(f"Stopped safely: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
 
     if args.command == "approval-dashboard":

@@ -98,12 +98,15 @@ class Settings(BaseSettings):
     screenshot_retention_days: int = Field(default=14, ge=1, le=365)
     operations_log_retention_days: int = Field(default=14, ge=1, le=365)
     operations_log_max_bytes: int = Field(default=5_000_000, ge=65_536, le=100_000_000)
+    database_backup_retention_days: int = Field(default=14, ge=1, le=365)
+    database_backup_interval_hours: int = Field(default=24, ge=1, le=168)
     operations_degraded_cycle_limit: int = Field(default=2, ge=1, le=10)
     operations_incomplete_group_rate_threshold: float = Field(default=0.25, ge=0.1, le=1)
     cycle_classification_limit: int = Field(default=100, ge=1, le=1_000)
 
     data_dir: Path = Path("data")
     database_path: Path = Path("data/lead_agent.sqlite3")
+    database_backup_dir: Path = Path("data/backups")
     screenshot_dir: Path = Path("screenshots")
     groups_config_path: Path = Path("config/groups.yaml")
     facebook_profile_path: Path = Path("~/.jjmiller-lead-agent/facebook-profile")
@@ -159,7 +162,13 @@ class Settings(BaseSettings):
             ]
         return value
 
-    @field_validator("data_dir", "database_path", "screenshot_dir", "groups_config_path")
+    @field_validator(
+        "data_dir",
+        "database_path",
+        "database_backup_dir",
+        "screenshot_dir",
+        "groups_config_path",
+    )
     @classmethod
     def normalize_local_path(cls, value: Path) -> Path:
         return value.expanduser()

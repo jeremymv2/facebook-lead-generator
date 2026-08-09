@@ -4,8 +4,17 @@ from pathlib import Path
 
 import pytest
 
+from lead_agent.approvals import ApprovalAction, LocalApprovalService
 from lead_agent.database import SCHEMA_VERSION, Database
-from lead_agent.models import AuditEvent, FacebookPost, Lead, LeadIntent, LeadStatus, PostStatus
+from lead_agent.models import (
+    AuditEvent,
+    FacebookPost,
+    Lead,
+    LeadIntent,
+    LeadStatus,
+    PostStatus,
+    RejectionReason,
+)
 
 
 @pytest.fixture
@@ -318,6 +327,30 @@ def test_list_unclassified_posts_rejects_non_positive_limit(database: Database) 
         database.list_unclassified_posts(limit=0)
 
 
+def test_reviewed_lead_cannot_be_reclassified(database: Database) -> None:
+    post = database.save_post(make_post()).post
+    lead = database.create_lead(
+        Lead(
+            facebook_post_id=post.id or 0,
+            status=LeadStatus.APPROVED,
+            service_category="decks",
+            intent=LeadIntent.HIRING,
+            overall_score=90,
+            approved_response="Approved fixture response",
+        )
+    )
+    replacement = Lead(
+        id=lead.id,
+        facebook_post_id=post.id or 0,
+        status=LeadStatus.IGNORED,
+        intent=LeadIntent.UNRELATED,
+        overall_score=10,
+    )
+
+    with pytest.raises(ValueError, match="Reviewed or terminal"):
+        database.replace_unreviewed_classification(replacement)
+
+
 def test_group_scan_state_preserves_success_across_failure(database: Database) -> None:
     success_at = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
     failure_at = datetime(2026, 8, 7, 12, 5, tzinfo=UTC)
@@ -601,3 +634,41 @@ def test_initialize_migrates_v2_state_and_backfills_post_aliases(tmp_path: Path)
     assert "remote_token_hash" in approval_columns
     assert notification_table is not None
     assert posting_table is not None
+
+
+def test_initialize_backfills_legacy_rejections_with_other_reason(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-rejection.sqlite3"
+    database = Database(path)
+    database.initialize()
+    post = database.save_post(make_post(external_post_id="legacy-rejection")).post
+    assert post.id is not None
+    lead = database.create_lead(
+        Lead(
+            facebook_post_id=post.id,
+            status=LeadStatus.CANDIDATE,
+            service_category="decks",
+            intent=LeadIntent.HIRING,
+            overall_score=90,
+            drafted_response=(
+                "JJ Miller & Co. provides free estimates for deck work. We'd be happy to help. "
+                "Text me at 502-528-0858. https://jjmillerco.com"
+            ),
+        )
+    )
+    service = LocalApprovalService(database, expiration_minutes=20)
+    request_id = service.prepare_candidates(limit=1)[0].request.id
+    assert lead.id is not None and request_id is not None
+    service.decide(
+        request_id,
+        ApprovalAction.REJECT,
+        rejection_reason=RejectionReason.IRRELEVANT_SERVICE,
+    )
+    with database.connection() as connection:
+        connection.execute("ALTER TABLE approval_requests DROP COLUMN rejection_reason")
+        connection.execute("UPDATE schema_metadata SET value = '8' WHERE key = 'schema_version'")
+
+    database.initialize()
+
+    reviews = database.list_rejected_approval_reviews(limit=10, lead_id=lead.id)
+    assert len(reviews) == 1
+    assert reviews[0].request.rejection_reason is RejectionReason.OTHER

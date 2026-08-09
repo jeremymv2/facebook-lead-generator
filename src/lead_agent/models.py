@@ -87,6 +87,18 @@ class ApprovalStatus(StrEnum):
     EXPIRED = "expired"
 
 
+class RejectionReason(StrEnum):
+    PROVIDER_ADVERTISEMENT = "provider_advertisement"
+    EMPLOYMENT_RECRUITING = "employment_recruiting"
+    SALE_LISTING = "sale_listing"
+    ADVICE_ONLY = "advice_only"
+    WRONG_GEOGRAPHY = "wrong_geography"
+    IRRELEVANT_SERVICE = "irrelevant_service"
+    DUPLICATE_OR_REPOST = "duplicate_or_repost"
+    RESOLVED = "resolved"
+    OTHER = "other"
+
+
 class NotificationStatus(StrEnum):
     SENDING = "sending"
     SENT = "sent"
@@ -214,6 +226,7 @@ class ApprovalRequest:
     requested_at: datetime = field(default_factory=utc_now)
     decided_at: datetime | None = None
     decided_response: str | None = None
+    rejection_reason: RejectionReason | None = None
     id: int | None = None
 
     def __post_init__(self) -> None:
@@ -222,6 +235,10 @@ class ApprovalRequest:
             raise ValueError("draft_response cannot be empty")
         if self.expires_at <= self.requested_at:
             raise ValueError("approval expiration must follow its request time")
+        if self.status is ApprovalStatus.REJECTED and self.rejection_reason is None:
+            raise ValueError("rejected approvals require a rejection reason")
+        if self.status is not ApprovalStatus.REJECTED and self.rejection_reason is not None:
+            raise ValueError("only rejected approvals may have a rejection reason")
 
 
 @dataclass(frozen=True, slots=True)

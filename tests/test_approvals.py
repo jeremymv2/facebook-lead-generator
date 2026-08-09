@@ -11,7 +11,14 @@ from lead_agent.approvals import (
     LocalApprovalService,
 )
 from lead_agent.database import Database
-from lead_agent.models import ApprovalStatus, FacebookPost, Lead, LeadIntent, LeadStatus
+from lead_agent.models import (
+    ApprovalStatus,
+    FacebookPost,
+    Lead,
+    LeadIntent,
+    LeadStatus,
+    RejectionReason,
+)
 
 VALID_DRAFT = (
     "JJ Miller & Co. can help with your deck project. Free estimates. "
@@ -91,6 +98,10 @@ def test_approve_is_one_time_and_preserves_exact_draft(database: Database) -> No
     assert approved.request.decided_response == VALID_DRAFT
     assert approved.lead.status is LeadStatus.APPROVED
     assert approved.lead.approved_response == VALID_DRAFT
+    feedback = database.approval_feedback_summary()
+    assert feedback.reviewed == 1
+    assert feedback.accepted == 1
+    assert feedback.acceptance_percent == 100.0
     with pytest.raises(ApprovalStateError, match="already been decided"):
         service.decide(
             request_id,
@@ -133,12 +144,24 @@ def test_reject_never_creates_an_approved_response(database: Database) -> None:
     service = LocalApprovalService(database, expiration_minutes=20)
     request_id = service.prepare_candidates(limit=10, now=now)[0].request.id or 0
 
-    rejected = service.decide(request_id, ApprovalAction.REJECT, now=now + timedelta(minutes=1))
+    with pytest.raises(ApprovalValidationError, match="rejection reason"):
+        service.decide(request_id, ApprovalAction.REJECT, now=now + timedelta(seconds=30))
+
+    rejected = service.decide(
+        request_id,
+        ApprovalAction.REJECT,
+        rejection_reason=RejectionReason.PROVIDER_ADVERTISEMENT,
+        now=now + timedelta(minutes=1),
+    )
 
     assert rejected.request.status is ApprovalStatus.REJECTED
     assert rejected.request.decided_response is None
+    assert rejected.request.rejection_reason is RejectionReason.PROVIDER_ADVERTISEMENT
     assert rejected.lead.status is LeadStatus.REJECTED
     assert rejected.lead.approved_response is None
+    feedback = database.approval_feedback_summary()
+    assert feedback.rejected == 1
+    assert feedback.rejection_reasons == (("provider_advertisement", 1),)
 
 
 def test_expired_approval_requires_re_review_and_cannot_be_decided(database: Database) -> None:

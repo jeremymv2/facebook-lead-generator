@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from lead_agent.database import Database
+from lead_agent.database import ApprovalFeedbackSummary, Database
 from lead_agent.models import AuditEvent, GroupScanState
 
 DEFAULT_HISTORY_LIMIT = 48
@@ -51,6 +51,7 @@ class DashboardTrendSnapshot:
 
     cycles: tuple[CycleTrend, ...]
     groups: tuple[GroupScanState, ...]
+    feedback: ApprovalFeedbackSummary
 
     @property
     def groups_scanned(self) -> int:
@@ -120,6 +121,7 @@ class DashboardMetricsService:
         return DashboardTrendSnapshot(
             cycles=cycles,
             groups=tuple(self.database.list_group_scan_states()),
+            feedback=self.database.approval_feedback_summary(),
         )
 
 

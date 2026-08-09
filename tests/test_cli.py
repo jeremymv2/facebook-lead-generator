@@ -6,12 +6,13 @@ from types import SimpleNamespace
 import pytest
 
 import lead_agent.cli as cli_module
+from lead_agent.approvals import ApprovalAction, LocalApprovalService
 from lead_agent.cli import build_parser, main
 from lead_agent.config import Settings
 from lead_agent.database import Database
 from lead_agent.facebook_state import FacebookPageState, FacebookSafetyStop
 from lead_agent.groups import FacebookGroup
-from lead_agent.models import FacebookPost, Lead, LeadIntent, LeadStatus
+from lead_agent.models import FacebookPost, Lead, LeadIntent, LeadStatus, RejectionReason
 from lead_agent.notifications import SmsDeliveryReceipt, SmsMessage
 from lead_agent.operations import CycleAlreadyRunningError, ScanCycleSummary
 from lead_agent.scanner import ScanSummary, TransientFacebookReadError
@@ -102,6 +103,107 @@ def test_init_db_creates_database(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert Database(database_path).list_posts() == []
 
 
+def test_replay_reclassify_and_feedback_export_commands_stay_local(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    database_path = tmp_path / "data" / "maintenance.sqlite3"
+    monkeypatch.setenv("DATABASE_PATH", str(database_path))
+    monkeypatch.setenv("FACEBOOK_PROFILE_PATH", str(tmp_path.parent / "browser-profile"))
+    monkeypatch.setenv("AI_PROVIDER", "heuristic")
+    database = Database(database_path)
+    database.initialize()
+    saved = database.save_post(
+        FacebookPost(
+            external_post_id="maintenance-fixture",
+            group_id="fixture-group",
+            group_name="Synthetic Group",
+            author_name="Fixture Person",
+            post_text=(
+                "Need someone to repair a leaking roof at my Louisville home this week. "
+                "Please provide an estimate."
+            ),
+        )
+    ).post
+    assert saved.id is not None
+
+    assert main(["classify-posts", "--post-id", str(saved.id)]) == 0
+    capsys.readouterr()
+    lead = database.get_lead_for_post(saved.id)
+    assert lead is not None and lead.id is not None
+
+    assert main(["classification-replay", "--lead-id", str(lead.id), "--changed-only"]) == 0
+    replay = json.loads(capsys.readouterr().out)
+    assert replay == {"changed": 0, "leads_considered": 1, "outcomes": []}
+
+    assert main(["reclassify-leads", "--lead-id", str(lead.id)]) == 0
+    reclassified = json.loads(capsys.readouterr().out)
+    assert reclassified["leads_considered"] == 1
+    assert reclassified["changes"][0]["lead_id"] == lead.id
+
+    service = LocalApprovalService(database, expiration_minutes=20)
+    request_id = service.prepare_candidates(limit=1)[0].request.id
+    assert request_id is not None
+    service.decide(
+        request_id,
+        ApprovalAction.REJECT,
+        rejection_reason=RejectionReason.WRONG_GEOGRAPHY,
+    )
+    output_path = tmp_path / "private" / "feedback.json"
+
+    assert (
+        main(
+            [
+                "export-regression-fixtures",
+                "--lead-id",
+                str(lead.id),
+                "--output",
+                str(output_path),
+            ]
+        )
+        == 0
+    )
+    exported = json.loads(capsys.readouterr().out)
+    assert exported["fixtures_exported"] == 1
+    assert output_path.exists()
+
+
+def test_database_backup_and_restore_test_commands_are_disposable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    database_path = tmp_path / "data" / "backup-source.sqlite3"
+    backup_dir = tmp_path / "private-backups"
+    monkeypatch.setenv("DATABASE_PATH", str(database_path))
+    monkeypatch.setenv("DATABASE_BACKUP_DIR", str(backup_dir))
+    monkeypatch.setenv("FACEBOOK_PROFILE_PATH", str(tmp_path.parent / "browser-profile"))
+    database = Database(database_path)
+    database.initialize()
+    database.save_post(
+        FacebookPost(
+            external_post_id="backup-command-fixture",
+            group_id="fixture-group",
+            group_name="Synthetic Group",
+            post_text="Synthetic database backup command fixture.",
+        )
+    )
+
+    assert main(["database-backup"]) == 0
+    created = json.loads(capsys.readouterr().out)
+    assert created["created"] == created["verified"] == 1
+    backup_path = Path(created["backup_path"])
+    assert backup_path.exists()
+
+    assert main(["database-restore-test", "--backup-path", str(backup_path)]) == 0
+    restored = json.loads(capsys.readouterr().out)
+    assert restored == {"backup_path": str(backup_path.resolve()), "verified": True}
+    assert not list(backup_dir.glob(".restore-test.*"))
+
+
 def test_scan_status_reports_health_without_post_or_url_data(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -153,6 +255,26 @@ def test_classify_parser_accepts_bounded_post_selection() -> None:
 
     assert args.post_id == 12
     assert args.limit == 3
+
+
+def test_feedback_replay_and_backup_parsers_accept_bounded_options(tmp_path: Path) -> None:
+    replay = build_parser().parse_args(
+        ["classification-replay", "--lead-id", "12", "--limit", "20", "--changed-only"]
+    )
+    reclassify = build_parser().parse_args(["reclassify-leads", "--lead-id", "12"])
+    exported = build_parser().parse_args(
+        ["export-regression-fixtures", "--limit", "25", "--output", str(tmp_path / "out.json")]
+    )
+    restored = build_parser().parse_args(
+        ["database-restore-test", "--backup-path", str(tmp_path / "backup.sqlite3")]
+    )
+
+    assert replay.lead_id == reclassify.lead_id == 12
+    assert replay.limit == 20
+    assert replay.changed_only is True
+    assert exported.limit == 25
+    assert exported.output == tmp_path / "out.json"
+    assert restored.backup_path == tmp_path / "backup.sqlite3"
 
 
 def test_approval_parser_accepts_local_port_and_candidate_limit() -> None:
@@ -639,6 +761,9 @@ def test_run_cycle_command_executes_content_free_pipeline(
         "posts_seen": 4,
         "posts_requested": 0,
         "circuit_breaker_tripped": False,
+        "backups_created": 1,
+        "backups_verified": 1,
+        "backups_removed": 0,
     }
 
 

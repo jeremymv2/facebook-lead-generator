@@ -28,10 +28,11 @@ from lead_agent.models import (
     PostingAttemptStatus,
     PostingWorkItem,
     PostStatus,
+    RejectionReason,
     utc_now,
 )
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +49,26 @@ class LeadSaveResult:
 
     lead: Lead
     created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ClassificationWorkItem:
+    """A saved classification joined to its immutable source post."""
+
+    lead: Lead
+    post: FacebookPost
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalFeedbackSummary:
+    reviewed: int
+    accepted: int
+    rejected: int
+    rejection_reasons: tuple[tuple[str, int], ...]
+
+    @property
+    def acceptance_percent(self) -> float:
+        return round(self.accepted * 100 / self.reviewed, 1) if self.reviewed else 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +193,7 @@ class Database:
                     expires_at TEXT NOT NULL,
                     decided_at TEXT,
                     decided_response TEXT,
+                    rejection_reason TEXT,
                     remote_token_hash TEXT,
                     FOREIGN KEY(lead_id) REFERENCES leads(id) ON DELETE RESTRICT
                 );
@@ -309,6 +331,14 @@ class Database:
             _add_column_if_missing(connection, "leads", "ai_model", "TEXT")
             _add_column_if_missing(connection, "leads", "classification_version", "TEXT")
             _add_column_if_missing(connection, "approval_requests", "remote_token_hash", "TEXT")
+            _add_column_if_missing(connection, "approval_requests", "rejection_reason", "TEXT")
+            connection.execute(
+                """
+                UPDATE approval_requests SET rejection_reason = ?
+                WHERE status = ? AND rejection_reason IS NULL
+                """,
+                (RejectionReason.OTHER.value, ApprovalStatus.REJECTED.value),
+            )
             connection.execute(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_requests_remote_token
@@ -668,6 +698,116 @@ class Database:
             ).fetchone()
         return _lead_from_row(row) if row is not None else None
 
+    def list_classification_work_items(
+        self,
+        *,
+        limit: int,
+        lead_id: int | None = None,
+        current_version: str | None = None,
+        reclassifiable_only: bool = False,
+    ) -> list[ClassificationWorkItem]:
+        """Return bounded lead/post pairs for replay or safe unreviewed reclassification."""
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        filters: list[str] = []
+        parameters: list[object] = []
+        if lead_id is not None:
+            filters.append("leads.id = ?")
+            parameters.append(lead_id)
+        if reclassifiable_only:
+            filters.extend(
+                (
+                    "leads.status IN (?, ?)",
+                    "NOT EXISTS (SELECT 1 FROM approval_requests "
+                    "WHERE approval_requests.lead_id = leads.id)",
+                )
+            )
+            parameters.extend((LeadStatus.CANDIDATE.value, LeadStatus.IGNORED.value))
+            if lead_id is None and current_version is not None:
+                filters.append(
+                    "(leads.classification_version IS NULL OR leads.classification_version != ?)"
+                )
+                parameters.append(current_version)
+        where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+        parameters.append(limit)
+        with self.connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT leads.id AS selected_lead_id, posts.id AS selected_post_id
+                FROM leads
+                JOIN facebook_posts AS posts ON posts.id = leads.facebook_post_id
+                {where_clause}
+                ORDER BY leads.updated_at, leads.id
+                LIMIT ?
+                """,
+                parameters,
+            ).fetchall()
+            return [
+                _classification_work_item_from_connection(
+                    connection,
+                    lead_id=int(row["selected_lead_id"]),
+                    post_id=int(row["selected_post_id"]),
+                )
+                for row in rows
+            ]
+
+    def replace_unreviewed_classification(self, lead: Lead) -> Lead:
+        """Replace only candidate/ignored classifications that never entered human review."""
+        if lead.id is None:
+            raise ValueError("Replacement classification requires a persisted lead ID")
+        if lead.status not in {LeadStatus.CANDIDATE, LeadStatus.IGNORED}:
+            raise ValueError("Replacement classification must be candidate or ignored")
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute("SELECT * FROM leads WHERE id = ?", (lead.id,)).fetchone()
+            if current is None:
+                raise LookupError(f"Lead {lead.id} does not exist")
+            current_lead = _lead_from_row(current)
+            reviewed = connection.execute(
+                "SELECT 1 FROM approval_requests WHERE lead_id = ? LIMIT 1",
+                (lead.id,),
+            ).fetchone()
+            if current_lead.status not in {LeadStatus.CANDIDATE, LeadStatus.IGNORED} or reviewed:
+                raise ValueError("Reviewed or terminal leads cannot be reclassified")
+            if current_lead.facebook_post_id != lead.facebook_post_id:
+                raise ValueError("Replacement classification cannot change its source post")
+            connection.execute(
+                """
+                UPDATE leads SET
+                    status = ?, service_category = ?, location = ?, intent = ?,
+                    is_residential = ?, is_spam = ?, relevance_score = ?,
+                    geographic_score = ?, urgency_score = ?, overall_score = ?,
+                    confidence = ?, reasoning_summary = ?, drafted_response = ?,
+                    ai_provider = ?, ai_model = ?, classification_version = ?,
+                    updated_at = ?, error_state = NULL
+                WHERE id = ?
+                """,
+                (
+                    lead.status.value,
+                    lead.service_category,
+                    lead.location,
+                    lead.intent.value if lead.intent else None,
+                    lead.is_residential,
+                    lead.is_spam,
+                    lead.relevance_score,
+                    lead.geographic_score,
+                    lead.urgency_score,
+                    lead.overall_score,
+                    lead.confidence,
+                    lead.reasoning_summary,
+                    lead.drafted_response,
+                    lead.ai_provider,
+                    lead.ai_model,
+                    lead.classification_version,
+                    _serialize_datetime(lead.updated_at),
+                    lead.id,
+                ),
+            )
+            row = connection.execute("SELECT * FROM leads WHERE id = ?", (lead.id,)).fetchone()
+            if row is None:  # pragma: no cover - protected by transaction
+                raise RuntimeError("Failed to retrieve reclassified lead")
+            return _lead_from_row(row)
+
     def update_lead_status(
         self,
         lead_id: int,
@@ -764,8 +904,8 @@ class Database:
                 """
                 INSERT INTO approval_requests (
                     lead_id, status, draft_response, requested_at, expires_at,
-                    decided_at, decided_response
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    decided_at, decided_response, rejection_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     request.lead_id,
@@ -775,6 +915,7 @@ class Database:
                     _serialize_datetime(request.expires_at),
                     _serialize_datetime(request.decided_at),
                     request.decided_response,
+                    request.rejection_reason.value if request.rejection_reason else None,
                 ),
             )
             request_id = cursor.lastrowid
@@ -820,6 +961,72 @@ class Database:
                 _approval_review_from_connection(connection, request_id)
                 for request_id in request_ids
             ]
+
+    def list_rejected_approval_reviews(
+        self,
+        *,
+        limit: int,
+        lead_id: int | None = None,
+    ) -> list[ApprovalReview]:
+        """Return bounded reason-bearing feedback records for sanitized fixture export."""
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        filters = ["status = ?", "rejection_reason IS NOT NULL"]
+        parameters: list[object] = [ApprovalStatus.REJECTED.value]
+        if lead_id is not None:
+            filters.append("lead_id = ?")
+            parameters.append(lead_id)
+        parameters.append(limit)
+        with self.connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id FROM approval_requests
+                WHERE {" AND ".join(filters)}
+                ORDER BY decided_at, id
+                LIMIT ?
+                """,
+                parameters,
+            ).fetchall()
+            return [_approval_review_from_connection(connection, int(row["id"])) for row in rows]
+
+    def approval_feedback_summary(self) -> ApprovalFeedbackSummary:
+        """Return content-free human-review accuracy and rejection-reason counts."""
+        with self.connection() as connection:
+            counts = connection.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN status IN (?, ?, ?) THEN 1 ELSE 0 END) AS reviewed,
+                    SUM(CASE WHEN status IN (?, ?) THEN 1 ELSE 0 END) AS accepted,
+                    SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS rejected
+                FROM approval_requests
+                """,
+                (
+                    ApprovalStatus.APPROVED.value,
+                    ApprovalStatus.EDITED.value,
+                    ApprovalStatus.REJECTED.value,
+                    ApprovalStatus.APPROVED.value,
+                    ApprovalStatus.EDITED.value,
+                    ApprovalStatus.REJECTED.value,
+                ),
+            ).fetchone()
+            reason_rows = connection.execute(
+                """
+                SELECT rejection_reason, COUNT(*) AS reason_count
+                FROM approval_requests
+                WHERE status = ? AND rejection_reason IS NOT NULL
+                GROUP BY rejection_reason
+                ORDER BY reason_count DESC, rejection_reason
+                """,
+                (ApprovalStatus.REJECTED.value,),
+            ).fetchall()
+        return ApprovalFeedbackSummary(
+            reviewed=int(counts["reviewed"] or 0),
+            accepted=int(counts["accepted"] or 0),
+            rejected=int(counts["rejected"] or 0),
+            rejection_reasons=tuple(
+                (str(row["rejection_reason"]), int(row["reason_count"])) for row in reason_rows
+            ),
+        )
 
     def list_notifiable_approval_reviews(
         self,
@@ -998,6 +1205,7 @@ class Database:
         *,
         decided_at: datetime,
         edited_response: str | None = None,
+        rejection_reason: RejectionReason | None = None,
     ) -> tuple[ApprovalReview, bool]:
         """Apply one terminal review decision; return false when already terminal or expired."""
         allowed = {ApprovalStatus.APPROVED, ApprovalStatus.EDITED, ApprovalStatus.REJECTED}
@@ -1042,16 +1250,19 @@ class Database:
             else:
                 decided_response = None
                 lead_status = LeadStatus.REJECTED
+                if rejection_reason is None:
+                    raise ValueError("Rejected approvals require a rejection reason")
             connection.execute(
                 """
                 UPDATE approval_requests SET
-                    status = ?, decided_at = ?, decided_response = ?
+                    status = ?, decided_at = ?, decided_response = ?, rejection_reason = ?
                 WHERE id = ?
                 """,
                 (
                     decision.value,
                     _serialize_datetime(decided_at),
                     decided_response,
+                    rejection_reason.value if rejection_reason is not None else None,
                     request_id,
                 ),
             )
@@ -1600,6 +1811,24 @@ def _insert_lead(connection: sqlite3.Connection, lead: Lead) -> Lead:
     return _lead_from_row(row)
 
 
+def _classification_work_item_from_connection(
+    connection: sqlite3.Connection,
+    *,
+    lead_id: int,
+    post_id: int,
+) -> ClassificationWorkItem:
+    lead_row = connection.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
+    post_row = connection.execute(
+        "SELECT * FROM facebook_posts WHERE id = ?", (post_id,)
+    ).fetchone()
+    if lead_row is None or post_row is None:  # pragma: no cover - joined query contract
+        raise RuntimeError("Classification work item is incomplete")
+    return ClassificationWorkItem(
+        lead=_lead_from_row(lead_row),
+        post=_post_from_row(post_row),
+    )
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection,
     table: str,
@@ -1784,6 +2013,11 @@ def _approval_request_from_row(row: sqlite3.Row) -> ApprovalRequest:
         expires_at=expires_at,
         decided_at=_parse_datetime(row["decided_at"]),
         decided_response=row["decided_response"],
+        rejection_reason=(
+            RejectionReason(row["rejection_reason"])
+            if row["rejection_reason"] is not None
+            else None
+        ),
     )
 
 

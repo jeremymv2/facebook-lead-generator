@@ -9,7 +9,7 @@ explicitly approved set of Louisville-area Facebook groups. The intended product
 
 > Detect → classify → score → draft → notify → human approve/edit/reject → validate → post once
 
-This repository is currently at **Phase 9: reliability and coverage hardening**. It includes safe
+This repository is currently at **Phase 11: review feedback and recovery hardening**. It includes safe
 configuration, a dedicated persistent Playwright profile, explicit group allowlisting, visible-post
 extraction, alias-based SQLite duplicate prevention, durable per-group scan health, synthetic
 selector fixtures, swappable structured lead providers, candidate-only response drafting,
@@ -39,6 +39,10 @@ The project fails closed:
 - The local approval dashboard binds only to `127.0.0.1`, validates CSRF and local Host/Origin
   headers, and remains incapable of Facebook submission.
 - Approval decisions are atomic, expire quickly, and can transition only once.
+- Rejections require a structured reason, making classifier quality measurable without placing
+  source post text in operations history.
+- Historical classifier replay is read-only. Reclassification is limited transactionally to
+  candidate/ignored leads that have never entered review.
 - The tunneled mobile surface has no lead-listing route. Each link uses a 256-bit random token,
   token-bound CSRF protection, strict Host/Origin validation, and no application request logging.
 - SMS is not attempted until the configured HTTPS relay successfully reaches the Mac health check.
@@ -54,6 +58,8 @@ The project fails closed:
   moved to `needs_attention` for manual inspection.
 - Browser profiles, cookies, databases, screenshots, `.env`, and local group configuration are
   excluded from Git.
+- SQLite backups use the online backup API, private filesystem permissions, integrity checks, and
+  disposable restore drills; they are never committed.
 - The browser never enters Facebook credentials, handles MFA, solves CAPTCHA, bypasses checkpoints,
   or attempts to defeat platform security.
 
@@ -155,6 +161,9 @@ Important settings include:
 | `BUSINESS_TIMEZONE` | `America/New_York` | Local calendar used by posting limits |
 | `OPERATIONS_LOG_RETENTION_DAYS` | `14` | Rotated local operations-log retention |
 | `OPERATIONS_LOG_MAX_BYTES` | `5000000` | Rotate an operations log after this size |
+| `DATABASE_BACKUP_RETENTION_DAYS` | `14` | Private verified-backup retention |
+| `DATABASE_BACKUP_INTERVAL_HOURS` | `24` | Minimum interval between automatic backups |
+| `DATABASE_BACKUP_DIR` | `data/backups` | Gitignored directory for private SQLite backups |
 | `OPERATIONS_DEGRADED_CYCLE_LIMIT` | `2` | Consecutive materially incomplete cycles before automatic pause |
 | `OPERATIONS_INCOMPLETE_GROUP_RATE_THRESHOLD` | `0.25` | Failed-plus-partial group rate that advances the circuit breaker |
 | `CYCLE_CLASSIFICATION_LIMIT` | `100` | Maximum saved posts classified per cycle |
@@ -204,7 +213,8 @@ decision per request. Schema version 6 adds hashed remote tokens and durable pro
 metadata without storing SMS bodies, destination numbers, or plaintext review tokens. Schema
 version 7 adds immutable posting inputs, dry-run outcomes, the no-retry submission boundary,
 evidence paths, safe error codes, and a partial uniqueness constraint that permits only one live
-attempt per lead.
+attempt per lead. Schema version 8 adds bounded historical operations reporting. Schema version 9
+adds structured rejection reasons and safely backfills earlier rejected reviews as `other`.
 
 ## Development commands
 
@@ -439,6 +449,29 @@ Review Google's
 [current pricing/data-use terms](https://ai.google.dev/gemini-api/docs/pricing) before processing
 real customer content. Keep `AI_PROVIDER=disabled` if external processing is not acceptable.
 
+### Replay and safely reclassify saved leads
+
+Preview how current classifier rules would treat historical leads without drafting responses or
+changing SQLite:
+
+```bash
+lead-agent classification-replay --limit 100 --changed-only
+lead-agent classification-replay --lead-id 168
+```
+
+Bulk reclassification selects only stale `candidate` or `ignored` leads that have never had an
+approval request. A targeted ID may be on the current classifier version, but the same review and
+status protections still apply. The database enforces these restrictions inside the update
+transaction:
+
+```bash
+lead-agent reclassify-leads --limit 100
+lead-agent reclassify-leads --lead-id 168
+```
+
+Neither command opens Facebook, sends SMS, approves a response, or posts a comment. Start with
+`classification-replay`; use `reclassify-leads` only after reviewing the reported differences.
+
 ## Test local human approval
 
 Use the same copied database after it contains classified candidate leads:
@@ -451,6 +484,21 @@ Open `http://127.0.0.1:8765` on the same Mac. The page displays the source post,
 response, and remaining review time. Each candidate can be approved exactly as drafted, edited and
 approved, or rejected. Edited responses must still satisfy the local company identity, free
 estimate, full website URL, text-number, and length rules.
+
+Every rejection requires one structured reason such as provider advertisement, employment
+recruiting, wrong geography, irrelevant service, resolved, or duplicate/repost. The dashboard shows
+the reviewed, accepted, and rejected totals, acceptance rate, and rejection-reason counts. These
+metrics contain no source post text.
+
+To turn eligible rejection feedback into a private, review-before-commit classifier fixture file:
+
+```bash
+lead-agent export-regression-fixtures --limit 100
+```
+
+The exporter redacts names, businesses, email addresses, phone numbers, street addresses, and URLs,
+writes with private permissions under `data/`, and marks every fixture for manual review. Duplicate
+and `other` reasons are intentionally skipped because they do not imply a classifier expectation.
 
 The same page includes a content-free historical operations dashboard. It summarizes the newest 48
 completed cycles, charts the latest 12 for group reliability and posts seen, lists recent cycle
@@ -670,6 +718,20 @@ Expired PNG/JPEG/WebP screenshots and rotated `.log`/`.jsonl` files are removed 
 configured directories; databases, group configuration, browser profiles, and credentials are
 never retention targets.
 
+Each successful cycle also creates at most one private SQLite backup per configured interval,
+verifies its integrity and schema by restoring it into a disposable database, and removes only
+expired files matching the application's backup naming convention. Create and test a backup
+manually without opening Facebook or sending SMS:
+
+```bash
+lead-agent database-backup
+lead-agent database-restore-test
+```
+
+`database-restore-test --backup-path PATH` accepts only a named backup inside
+`DATABASE_BACKUP_DIR`. It never replaces the production database. Backups are useful only if they
+can be restored, so investigate any backup or restore-test failure before resuming unattended runs.
+
 ## Runtime and troubleshooting
 
 For current configuration errors, run `lead-agent doctor`. For database initialization errors,
@@ -697,8 +759,11 @@ is idempotent.
 9. **Reliability and coverage hardening:** conservative scheduling, bounded
    transient group retries, safe retry diagnostics, security-boundary tests, and an enforced 90%
    branch-coverage floor.
-10. **Historical operations dashboard (this milestone):** local-only cycle charts, bounded audit
+10. **Historical operations dashboard:** local-only cycle charts, bounded audit
     queries, current group health, mobile-responsive tables, and richer content-free run counters.
+11. **Review feedback and recovery hardening (this milestone):** structured rejection reasons,
+    review-quality metrics, read-only historical replay, transactionally safe reclassification,
+    sanitized regression exports, private automatic backups, and disposable restore drills.
 
 The first browser milestone is successful only when a second read-only run stores no duplicate
 posts and the software remains incapable of commenting.
