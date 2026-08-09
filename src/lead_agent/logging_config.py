@@ -18,6 +18,10 @@ class JsonFormatter(logging.Formatter):
         "lead_id",
         "post_id",
         "group",
+        "group_id",
+        "attempt",
+        "error_code",
+        "retry_in_seconds",
         "result",
     )
 

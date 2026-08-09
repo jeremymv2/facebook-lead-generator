@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   coverage:
-    name: Coverage (minimum 85%)
+    name: Coverage (minimum 90%)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -30,7 +30,7 @@ jobs:
           --cov=scripts
           --cov-report=term-missing
           --cov-report=xml
-          --cov-fail-under=85
+          --cov-fail-under=90
       - name: Publish coverage summary
         if: success()
         run: |

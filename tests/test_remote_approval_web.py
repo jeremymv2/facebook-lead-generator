@@ -1,22 +1,31 @@
 import re
 import socket
+import time
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from http.server import HTTPServer
 from pathlib import Path
 from typing import cast
+from urllib.error import URLError
 from urllib.parse import urlencode
 
 import pytest
 
 import lead_agent.remote_approval_web as remote_web_module
-from lead_agent.approvals import ApprovalAction, ApprovalStateError, LocalApprovalService
+from lead_agent.approvals import (
+    ApprovalAction,
+    ApprovalExpiredError,
+    ApprovalStateError,
+    LocalApprovalService,
+)
 from lead_agent.database import Database
 from lead_agent.models import FacebookPost, Lead, LeadIntent, LeadStatus
 from lead_agent.notifications import remote_token_hash
 from lead_agent.remote_approval_web import (
     LOOPBACK_HOST,
     RemoteApprovalController,
+    RemoteApprovalHTTPServer,
+    RemoteApprovalTokenError,
     RemoteCSRFFailure,
     _handler_class,
     relay_is_healthy,
@@ -117,6 +126,30 @@ def test_remote_decision_requires_token_bound_csrf_and_is_one_time(tmp_path: Pat
         )
 
 
+def test_remote_controller_rejects_weak_or_unknown_tokens(tmp_path: Path) -> None:
+    controller, _, _, now = prepared_controller(tmp_path)
+
+    with pytest.raises(ValueError, match="at least 32"):
+        RemoteApprovalController(controller.approvals, signing_key="short")
+    with pytest.raises(RemoteApprovalTokenError, match="invalid"):
+        controller.resolve("not-a-valid-token", now=now)
+    with pytest.raises(RemoteApprovalTokenError, match="invalid"):
+        controller.resolve("B" * 43, now=now)
+
+
+def test_remote_controller_expires_before_accepting_a_decision(tmp_path: Path) -> None:
+    controller, _, _, now = prepared_controller(tmp_path)
+    csrf = csrf_from_page(controller.render(TOKEN, now=now))
+
+    with pytest.raises(ApprovalExpiredError, match="expired"):
+        controller.submit(
+            TOKEN,
+            ApprovalAction.APPROVE.value,
+            {"csrf_token": [csrf]},
+            now=now + timedelta(minutes=21),
+        )
+
+
 class FakeHTTPServer:
     server_name = LOOPBACK_HOST
     server_port = 8766
@@ -127,18 +160,18 @@ def handle_request(
     method: str,
     path: str,
     *,
-    body: str | None = None,
+    body: str | bytes | None = None,
     headers: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, str], str]:
     client, server = socket.socketpair()
     try:
-        payload = (body or "").encode()
+        payload = body if isinstance(body, bytes) else (body or "").encode()
         request_headers = {
             "Host": "approve.example",
             "Connection": "close",
             **(headers or {}),
         }
-        if payload:
+        if payload and "Content-Length" not in request_headers:
             request_headers["Content-Length"] = str(len(payload))
         header_lines = "\r\n".join(f"{name}: {value}" for name, value in request_headers.items())
         client.sendall(f"{method} {path} HTTP/1.1\r\n{header_lines}\r\n\r\n".encode() + payload)
@@ -232,3 +265,168 @@ def test_relay_healthcheck_requires_exact_success_response(
     monkeypatch.setattr(remote_web_module, "urlopen", lambda request, timeout: FakeResponse())
 
     assert relay_is_healthy("https://approve.example") is True
+
+
+def test_tunneled_http_surface_rejects_malformed_requests(tmp_path: Path) -> None:
+    controller, _, _, _ = prepared_controller(tmp_path)
+    valid_path = f"/review/{TOKEN}/approve"
+    base_headers = {"Origin": PUBLIC_BASE_URL}
+
+    status, _, body = handle_request(
+        controller,
+        "GET",
+        "/health",
+        headers={"Host": "127.0.0.1:8766"},
+    )
+    assert status == HTTPStatus.OK
+    assert body == "ok"
+
+    cases: list[tuple[str, str | bytes, dict[str, str], HTTPStatus]] = [
+        (
+            valid_path,
+            "",
+            {**base_headers, "Host": "attacker.invalid"},
+            HTTPStatus.MISDIRECTED_REQUEST,
+        ),
+        ("/not-a-decision", "", base_headers, HTTPStatus.NOT_FOUND),
+        (valid_path, "x", base_headers, HTTPStatus.UNSUPPORTED_MEDIA_TYPE),
+        (
+            valid_path,
+            "x",
+            {
+                **base_headers,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Length": "bad",
+            },
+            HTTPStatus.BAD_REQUEST,
+        ),
+        (
+            valid_path,
+            "",
+            {**base_headers, "Content-Type": "application/x-www-form-urlencoded"},
+            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+        ),
+        (
+            valid_path,
+            "x",
+            {
+                **base_headers,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Length": "4097",
+            },
+            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+        ),
+        (
+            valid_path,
+            b"\xff",
+            {**base_headers, "Content-Type": "application/x-www-form-urlencoded"},
+            HTTPStatus.BAD_REQUEST,
+        ),
+    ]
+    for path, body_value, headers, expected in cases:
+        status, _, _ = handle_request(
+            controller,
+            "POST",
+            path,
+            body=body_value,
+            headers=headers,
+        )
+        assert status == expected
+
+
+def test_tunneled_http_surface_maps_review_errors_without_leaking_content(tmp_path: Path) -> None:
+    controller, _, _, now = prepared_controller(tmp_path)
+    csrf = csrf_from_page(controller.render(TOKEN, now=now))
+    headers = {
+        "Origin": PUBLIC_BASE_URL,
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+
+    status, _, _ = handle_request(
+        controller,
+        "POST",
+        f"/review/{TOKEN}/approve",
+        body=urlencode({"csrf_token": "wrong"}),
+        headers=headers,
+    )
+    assert status == HTTPStatus.FORBIDDEN
+
+    status, _, _ = handle_request(
+        controller,
+        "POST",
+        f"/review/{'B' * 43}/approve",
+        body=urlencode({"csrf_token": csrf}),
+        headers=headers,
+    )
+    assert status == HTTPStatus.NOT_FOUND
+
+    status, _, _ = handle_request(
+        controller,
+        "POST",
+        f"/review/{TOKEN}/approve",
+        body=urlencode({"csrf_token": csrf}),
+        headers=headers,
+    )
+    assert status == HTTPStatus.SEE_OTHER
+
+    status, _, _ = handle_request(
+        controller,
+        "POST",
+        f"/review/{TOKEN}/reject",
+        body=urlencode({"csrf_token": csrf}),
+        headers=headers,
+    )
+    assert status == HTTPStatus.CONFLICT
+
+
+def test_remote_server_runs_periodic_callback_only_when_due(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    times = iter((100.0, 100.0, 105.0, 111.0, 111.0))
+    monkeypatch.setattr(time, "monotonic", lambda: next(times))
+    server = object.__new__(RemoteApprovalHTTPServer)
+    server.periodic_callback = lambda: calls.append("called")
+    server.callback_interval_seconds = 10
+    server.next_callback_at = 0
+
+    server.service_actions()
+    server.service_actions()
+    server.service_actions()
+
+    assert calls == ["called", "called"]
+
+
+@pytest.mark.parametrize("response_body", [b"no", b"ok"])
+def test_relay_healthcheck_rejects_wrong_response(
+    monkeypatch: pytest.MonkeyPatch,
+    response_body: bytes,
+) -> None:
+    class FakeResponse:
+        status = HTTPStatus.BAD_GATEWAY if response_body == b"ok" else HTTPStatus.OK
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def read(self, limit: int) -> bytes:
+            del limit
+            return response_body
+
+    monkeypatch.setattr(remote_web_module, "urlopen", lambda request, timeout: FakeResponse())
+
+    assert relay_is_healthy(PUBLIC_BASE_URL) is False
+
+
+def test_relay_healthcheck_reduces_network_errors_to_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(request: object, timeout: int) -> object:
+        del request, timeout
+        raise URLError("private network detail")
+
+    monkeypatch.setattr(remote_web_module, "urlopen", fail)
+
+    assert relay_is_healthy(PUBLIC_BASE_URL) is False

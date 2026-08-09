@@ -19,7 +19,7 @@ def test_safe_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert settings.posting_enabled is False
     assert settings.dry_run is True
     assert settings.posting_allowed is False
-    assert settings.scan_interval_seconds == 300
+    assert settings.scan_interval_seconds == 900
     assert settings.lead_threshold == 75
     assert settings.approval_expiration_minutes == 20
     assert settings.approval_local_port == 8765
@@ -30,6 +30,9 @@ def test_safe_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert settings.business_timezone == "America/New_York"
     assert settings.browser_channel is None
     assert settings.browser_headless is False
+    assert settings.facebook_group_max_retries == 1
+    assert settings.facebook_group_retry_backoff_seconds == 5
+    assert settings.facebook_group_delay_seconds == 2
     assert settings.facebook_max_scrolls == 12
     assert settings.facebook_scroll_settle_seconds == 0.75
     assert settings.ai_provider == "disabled"

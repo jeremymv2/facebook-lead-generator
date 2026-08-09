@@ -7,7 +7,11 @@ from lead_agent.database import Database
 from lead_agent.facebook_state import FacebookPageState, FacebookSafetyStop
 from lead_agent.groups import FacebookGroup
 from lead_agent.models import FacebookPost
-from lead_agent.scanner import ReadOnlyScanService
+from lead_agent.scanner import (
+    ReadOnlyScanService,
+    TransientFacebookReadError,
+    safe_scan_error_code,
+)
 
 
 class FakeReader:
@@ -162,3 +166,25 @@ def test_reader_cannot_cross_the_group_allowlist_boundary(
     state = database.get_group_scan_state(group.id)
     assert state is not None
     assert state.last_error == "ValueError"
+
+
+def test_transient_error_records_only_stage_and_kind(
+    database: Database,
+    group: FacebookGroup,
+    tmp_path: Path,
+) -> None:
+    error = TransientFacebookReadError(
+        stage="feed",
+        kind="timeout",
+        screenshot_path=tmp_path / "local-only.png",
+    )
+    scanner = ReadOnlyScanService(database, FakeReader(error=error))
+
+    with pytest.raises(TransientFacebookReadError, match="feed:timeout"):
+        asyncio.run(scanner.scan_group(group, max_posts=20))
+
+    state = database.get_group_scan_state(group.id)
+    assert state is not None
+    assert state.last_error == "TransientFacebookReadError:feed:timeout"
+    assert "local-only" not in state.last_error
+    assert safe_scan_error_code(error) == "TransientFacebookReadError:feed:timeout"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from lead_agent.database import Database
@@ -18,6 +19,26 @@ class FacebookReader(Protocol):
         *,
         max_posts: int,
     ) -> list[FacebookPost]: ...
+
+
+class TransientFacebookReadError(RuntimeError):
+    """A content-free Playwright failure that may be retried once by an unattended cycle."""
+
+    def __init__(
+        self,
+        *,
+        stage: str,
+        kind: str,
+        screenshot_path: Path | None = None,
+    ) -> None:
+        self.stage = stage
+        self.kind = kind
+        self.screenshot_path = screenshot_path
+        super().__init__(self.safe_code)
+
+    @property
+    def safe_code(self) -> str:
+        return f"{self.stage}:{self.kind}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +65,7 @@ class ReadOnlyScanService:
             if any(post.group_id != group.id for post in discovered):
                 raise ValueError("Facebook reader returned a post for an unexpected group")
         except Exception as error:
-            safe_error = _safe_error_name(error)
+            safe_error = safe_scan_error_code(error)
             self.database.record_group_scan_failure(
                 group_id=group.id,
                 group_name=group.name,
@@ -105,7 +126,10 @@ class ReadOnlyScanService:
         )
 
 
-def _safe_error_name(error: Exception) -> str:
+def safe_scan_error_code(error: Exception) -> str:
+    """Return a stable diagnostic code without exception messages or page content."""
     if isinstance(error, FacebookSafetyStop):
         return f"{type(error).__name__}:{error.state.value}"
+    if isinstance(error, TransientFacebookReadError):
+        return f"{type(error).__name__}:{error.safe_code}"
     return type(error).__name__

@@ -54,7 +54,12 @@ from lead_agent.remote_approval_web import (
     relay_is_healthy,
     run_remote_approval_server,
 )
-from lead_agent.scanner import ReadOnlyScanService, ScanSummary
+from lead_agent.scanner import (
+    ReadOnlyScanService,
+    ScanSummary,
+    TransientFacebookReadError,
+    safe_scan_error_code,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -234,6 +239,9 @@ def _doctor_payload(settings: Settings) -> dict[str, object]:
         "per_group_daily_posting_limit": settings.per_group_daily_posting_limit,
         "business_timezone": settings.business_timezone,
         "scan_interval_seconds": settings.scan_interval_seconds,
+        "facebook_group_max_retries": settings.facebook_group_max_retries,
+        "facebook_group_retry_backoff_seconds": settings.facebook_group_retry_backoff_seconds,
+        "facebook_group_delay_seconds": settings.facebook_group_delay_seconds,
         "cycle_classification_limit": settings.cycle_classification_limit,
         "candidate_duplicate_window_hours": settings.candidate_duplicate_window_hours,
         "operations_state_dir": str(settings.operations_state_dir),
@@ -331,12 +339,42 @@ async def _scan_groups_for_cycle(
     database.initialize()
     summaries: list[ScanSummary] = []
     failures = 0
+    retried = 0
+    recovered = 0
     logger = logging.getLogger("lead_agent.operations")
     async with FacebookReadOnlyBrowser(settings) as browser:
         scanner = ReadOnlyScanService(database, browser)
-        for group in groups:
+        for group_index, group in enumerate(groups):
+            if group_index:
+                await asyncio.sleep(settings.facebook_group_delay_seconds)
+            retry_count = 0
             try:
-                summaries.append(await scanner.scan_group(group, max_posts=max_posts))
+                while True:
+                    try:
+                        summary = await scanner.scan_group(group, max_posts=max_posts)
+                        summaries.append(summary)
+                        if retry_count:
+                            recovered += 1
+                        break
+                    except FacebookSafetyStop:
+                        raise
+                    except TransientFacebookReadError as error:
+                        if retry_count >= settings.facebook_group_max_retries:
+                            raise
+                        retry_count += 1
+                        retried += 1
+                        logger.warning(
+                            "Transient group scan failure; one bounded retry is scheduled",
+                            extra={
+                                "action": "cycle.group_scan.retry",
+                                "result": "retrying",
+                                "group_id": group.id,
+                                "attempt": retry_count + 1,
+                                "error_code": error.safe_code,
+                                "retry_in_seconds": (settings.facebook_group_retry_backoff_seconds),
+                            },
+                        )
+                        await asyncio.sleep(settings.facebook_group_retry_backoff_seconds)
             except FacebookSafetyStop:
                 raise
             except Exception as error:
@@ -347,7 +385,8 @@ async def _scan_groups_for_cycle(
                         "action": "cycle.group_scan",
                         "result": "failed",
                         "group_id": group.id,
-                        "error": type(error).__name__,
+                        "attempt": retry_count + 1,
+                        "error_code": safe_scan_error_code(error),
                     },
                 )
     return ScanCycleSummary(
@@ -356,6 +395,8 @@ async def _scan_groups_for_cycle(
         posts_seen=sum(summary.posts_seen for summary in summaries),
         posts_new=sum(len(summary.new_posts) for summary in summaries),
         duplicates=sum(summary.duplicates for summary in summaries),
+        groups_retried=retried,
+        groups_recovered=recovered,
     )
 
 
