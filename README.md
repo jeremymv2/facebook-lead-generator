@@ -17,7 +17,8 @@ an expiring loopback-only approve/edit/reject dashboard, a separately isolated t
 review origin, provider-independent SMS delivery with a Telnyx adapter, structured logging, tests,
 and CI. A macOS user launch agent can run locked scan/classify/notify cycles with pause controls,
 content-free health, bounded scheduling, retention, duplicate-review suppression, and group-yield
-reporting. It includes a manually invoked, triple-gated Facebook commenting path, but it does
+reporting. Configurable overnight quiet hours prevent scheduled work when reviews are unlikely to
+receive a prompt response. It includes a manually invoked, triple-gated Facebook commenting path, but it does
 **not** include inbound SMS commands or autonomous posting.
 
 ## Safety status
@@ -164,6 +165,9 @@ Important settings include:
 | `DATABASE_BACKUP_RETENTION_DAYS` | `14` | Private verified-backup retention |
 | `DATABASE_BACKUP_INTERVAL_HOURS` | `24` | Minimum interval between automatic backups |
 | `DATABASE_BACKUP_DIR` | `data/backups` | Gitignored directory for private SQLite backups |
+| `OPERATIONS_QUIET_HOURS_ENABLED` | `true` | Skip scheduled work during the configured local window |
+| `OPERATIONS_QUIET_HOURS_START` | `22:00` | Inclusive local quiet-hours start |
+| `OPERATIONS_QUIET_HOURS_END` | `05:00` | Exclusive local quiet-hours end |
 | `OPERATIONS_DEGRADED_CYCLE_LIMIT` | `2` | Consecutive materially incomplete cycles before automatic pause |
 | `OPERATIONS_INCOMPLETE_GROUP_RATE_THRESHOLD` | `0.25` | Failed-plus-partial group rate that advances the circuit breaker |
 | `CYCLE_CLASSIFICATION_LIMIT` | `100` | Maximum saved posts classified per cycle |
@@ -657,6 +661,23 @@ after any controlled live test.
 The cycle launch agent invokes one process at `SCAN_INTERVAL_SECONDS`; launchd does not overlap an
 already-running interval, and the application also takes a non-blocking file lock. The worker never
 posts to Facebook. Keep `POSTING_ENABLED=false` and `DRY_RUN=true`.
+
+By default, invocations from 10:00 PM through 4:59 AM in `BUSINESS_TIMEZONE` exit before loading the
+group allowlist, opening SQLite or Facebook, classifying posts, creating backups, or sending SMS.
+At exactly 5:00 AM, cycles are eligible again. launchd remains loaded during this window; the gate
+is enforced inside `run-cycle`, so reinstalling the launch agent is unnecessary. The next normal
+15-minute launchd interval performs the first eligible cycle.
+
+`lead-agent doctor` and `lead-agent operations-status` show the configured window and whether it is
+currently active. Expected inactivity during quiet hours is not reported as stale health. For an
+intentional attended run during the window, use the explicit override:
+
+```bash
+lead-agent run-cycle --ignore-quiet-hours --skip-notifications
+```
+
+The override affects only that invocation and does not change the saved schedule. To disable the
+gate persistently, set `OPERATIONS_QUIET_HOURS_ENABLED=false` in the ignored `.env` file.
 
 For local-only classification, set this in the ignored `.env`:
 

@@ -10,6 +10,7 @@ import sys
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 
 from lead_agent.ai import (
@@ -48,9 +49,11 @@ from lead_agent.operations import (
     OperationPaths,
     OperationsCycleRunner,
     OperationsState,
+    QuietHoursActiveError,
     RetentionService,
     RetentionSummary,
     ScanCycleSummary,
+    is_within_quiet_hours,
 )
 from lead_agent.posting import ApprovedPostingService, PostingError, PostingExecutionResult
 from lead_agent.remote_approval_web import (
@@ -225,6 +228,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Never send SMS in this manually invoked cycle",
     )
+    cycle_parser.add_argument(
+        "--ignore-quiet-hours",
+        action="store_true",
+        help="Explicitly allow this manual cycle during configured quiet hours",
+    )
     posting_parser = subparsers.add_parser(
         "post-approved",
         help="Validate one approved lead; submit only with --submit and both safety flags",
@@ -303,7 +311,22 @@ def _doctor_payload(settings: Settings) -> dict[str, object]:
         "database_backup_dir": str(settings.database_backup_dir),
         "database_backup_retention_days": settings.database_backup_retention_days,
         "database_backup_interval_hours": settings.database_backup_interval_hours,
+        "operations_quiet_hours_enabled": settings.operations_quiet_hours_enabled,
+        "operations_quiet_hours_active": _quiet_hours_active(settings),
+        "operations_quiet_hours_start": settings.operations_quiet_hours_start.strftime("%H:%M"),
+        "operations_quiet_hours_end": settings.operations_quiet_hours_end.strftime("%H:%M"),
     }
+
+
+def _quiet_hours_active(settings: Settings, *, now: datetime | None = None) -> bool:
+    if not settings.operations_quiet_hours_enabled:
+        return False
+    return is_within_quiet_hours(
+        now or datetime.now(UTC),
+        timezone=settings.business_timezone,
+        start=settings.operations_quiet_hours_start,
+        end=settings.operations_quiet_hours_end,
+    )
 
 
 def _scan_state_payload(state: GroupScanState) -> dict[str, object]:
@@ -509,6 +532,8 @@ def _run_operations_cycle(
     max_posts: int,
     classification_limit: int,
     skip_notifications: bool,
+    ignore_quiet_hours: bool = False,
+    now: datetime | None = None,
 ) -> tuple[CycleSummary | None, OperationsState]:
     settings.require_read_only_mode()
     state = OperationsState(_operation_paths(settings))
@@ -519,6 +544,13 @@ def _run_operations_cycle(
         raise GroupsConfigError("--max-posts cannot exceed the read-only safety cap of 50")
     if classification_limit > 1_000:
         raise AIProviderError("--classification-limit cannot exceed 1000")
+    if not ignore_quiet_hours and _quiet_hours_active(settings, now=now):
+        window = (
+            f"{settings.operations_quiet_hours_start.strftime('%H:%M')}-"
+            f"{settings.operations_quiet_hours_end.strftime('%H:%M')} "
+            f"{settings.business_timezone}"
+        )
+        raise QuietHoursActiveError(f"overnight quiet hours are active ({window})")
     catalog = load_group_catalog(settings.groups_config_path)
     groups = catalog.enabled_groups()
     if not groups:
@@ -672,12 +704,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         state = OperationsState(_operation_paths(settings))
         stale_after = max(600, settings.scan_interval_seconds * 3)
         payload = state.status_payload(stale_after_seconds=stale_after)
+        quiet_hours_active = _quiet_hours_active(settings)
+        if quiet_hours_active:
+            payload["stale"] = False
         payload.update(
             {
                 "ai_ready": _doctor_payload(settings)["ai_ready"],
                 "notifications_enabled": settings.notifications_enabled,
                 "remote_approval_ready": settings.remote_approval_ready,
                 "read_only_mode_ready": not settings.posting_enabled and settings.dry_run,
+                "quiet_hours_enabled": settings.operations_quiet_hours_enabled,
+                "quiet_hours_active": quiet_hours_active,
+                "quiet_hours_start": settings.operations_quiet_hours_start.strftime("%H:%M"),
+                "quiet_hours_end": settings.operations_quiet_hours_end.strftime("%H:%M"),
+                "quiet_hours_timezone": settings.business_timezone,
             }
         )
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -728,8 +768,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.classification_limit or settings.cycle_classification_limit
                 ),
                 skip_notifications=args.skip_notifications,
+                ignore_quiet_hours=args.ignore_quiet_hours,
             )
         except CycleAlreadyRunningError as error:
+            print(f"No action taken: {error}")
+            return 0
+        except QuietHoursActiveError as error:
             print(f"No action taken: {error}")
             return 0
         except Exception as error:

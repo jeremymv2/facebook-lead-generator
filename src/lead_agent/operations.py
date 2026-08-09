@@ -7,10 +7,11 @@ import json
 import os
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from types import TracebackType
 from typing import TextIO
+from zoneinfo import ZoneInfo
 
 from lead_agent.classifier import ClassificationSummary
 from lead_agent.notifications import NotificationSummary
@@ -27,6 +28,10 @@ class OperationsError(RuntimeError):
 
 class CycleAlreadyRunningError(OperationsError):
     """Raised when a second cycle tries to overlap an active cycle."""
+
+
+class QuietHoursActiveError(OperationsError):
+    """Raised when a scheduled cycle reaches the configured overnight quiet window."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +148,24 @@ class CycleLock:
         self._handle = None
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         handle.close()
+
+
+def is_within_quiet_hours(
+    timestamp: datetime,
+    *,
+    timezone: str,
+    start: time,
+    end: time,
+) -> bool:
+    """Return whether an aware timestamp falls in a local half-open quiet-hours window."""
+    if timestamp.tzinfo is None:
+        raise ValueError("quiet-hours checks require a timezone-aware timestamp")
+    if start == end:
+        raise ValueError("quiet-hours start and end must differ")
+    local_time = timestamp.astimezone(ZoneInfo(timezone)).time().replace(tzinfo=None)
+    if start < end:
+        return start <= local_time < end
+    return local_time >= start or local_time < end
 
 
 class OperationsState:

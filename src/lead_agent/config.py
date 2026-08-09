@@ -1,12 +1,13 @@
 """Application configuration and posting safety interlocks."""
 
 import re
+from datetime import time
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Self
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, HttpUrl, SecretStr, field_validator
+from pydantic import Field, HttpUrl, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 DEFAULT_SERVICES = [
@@ -100,6 +101,9 @@ class Settings(BaseSettings):
     operations_log_max_bytes: int = Field(default=5_000_000, ge=65_536, le=100_000_000)
     database_backup_retention_days: int = Field(default=14, ge=1, le=365)
     database_backup_interval_hours: int = Field(default=24, ge=1, le=168)
+    operations_quiet_hours_enabled: bool = True
+    operations_quiet_hours_start: time = time(hour=22)
+    operations_quiet_hours_end: time = time(hour=5)
     operations_degraded_cycle_limit: int = Field(default=2, ge=1, le=10)
     operations_incomplete_group_rate_threshold: float = Field(default=0.25, ge=0.1, le=1)
     cycle_classification_limit: int = Field(default=100, ge=1, le=1_000)
@@ -172,6 +176,21 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_local_path(cls, value: Path) -> Path:
         return value.expanduser()
+
+    @field_validator("operations_quiet_hours_start", "operations_quiet_hours_end")
+    @classmethod
+    def validate_quiet_hours_time(cls, value: time) -> time:
+        if value.tzinfo is not None:
+            raise ValueError("quiet-hours times must be local wall-clock times")
+        if value.second or value.microsecond:
+            raise ValueError("quiet-hours times must use hour-and-minute precision")
+        return value
+
+    @model_validator(mode="after")
+    def validate_quiet_hours_window(self) -> Self:
+        if self.operations_quiet_hours_start == self.operations_quiet_hours_end:
+            raise ValueError("quiet-hours start and end must differ")
+        return self
 
     @field_validator("facebook_profile_path")
     @classmethod
