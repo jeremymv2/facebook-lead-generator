@@ -931,7 +931,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_local_approval_dashboard(
                 service,
                 port=args.port or settings.approval_local_port,
-                candidate_limit=args.limit or settings.ai_max_posts_per_run,
+                candidate_limit=args.limit,
                 business_timezone=settings.business_timezone,
             )
         except (ApprovalError, OSError, UnsafeReadOnlyModeError) as error:

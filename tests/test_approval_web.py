@@ -38,7 +38,7 @@ def prepared_controller(tmp_path: Path) -> tuple[LocalApprovalController, int, d
             post_text="<img src=x onerror=alert(1)> Need a deck repair in Louisville.",
         )
     ).post
-    database.create_lead(
+    lead = database.create_lead(
         Lead(
             facebook_post_id=post.id or 0,
             status=LeadStatus.CANDIDATE,
@@ -50,8 +50,7 @@ def prepared_controller(tmp_path: Path) -> tuple[LocalApprovalController, int, d
     )
     now = datetime.now(UTC)
     service = LocalApprovalService(database, expiration_minutes=20)
-    request_id = service.prepare_candidates(limit=10, now=now)[0].request.id or 0
-    return LocalApprovalController(service, csrf_token="fixture-csrf"), request_id, now
+    return LocalApprovalController(service, csrf_token="fixture-csrf"), lead.id or 0, now
 
 
 def test_dashboard_escapes_facebook_content_and_states_safety_boundary(tmp_path: Path) -> None:
@@ -63,7 +62,9 @@ def test_dashboard_escapes_facebook_content_and_states_safety_boundary(tmp_path:
     assert "&lt;img src=x onerror=alert(1)&gt;" in page
     assert "<script>Fixture Group</script>" not in page
     assert "This dashboard cannot post to Facebook" in page
+    assert "Remains in this local backlog until you approve or reject it" in page
     assert 'name="csrf_token" value="fixture-csrf"' in page
+    assert controller.service.database.list_pending_approval_reviews() == []
     assert "javascript:alert" not in page
 
 
@@ -129,6 +130,39 @@ def test_dashboard_renders_cycle_trends_and_current_group_health(tmp_path: Path)
     assert "4/1" in page
     assert "&lt;script&gt;Degraded Group&lt;/script&gt;" in page
     assert "<script>Degraded Group</script>" not in page
+
+
+def test_dashboard_refresh_adds_candidates_without_starting_expiration(tmp_path: Path) -> None:
+    controller, _, now = prepared_controller(tmp_path)
+    database = controller.service.database
+    first_page = controller.render(now=now)
+    post = database.save_post(
+        FacebookPost(
+            external_post_id="new-after-dashboard-start",
+            group_id="fixture-group",
+            group_name="Synthetic Fixture Group",
+            post_text="Looking for someone to replace a window in Louisville.",
+        )
+    ).post
+    new_lead = database.create_lead(
+        Lead(
+            facebook_post_id=post.id or 0,
+            status=LeadStatus.CANDIDATE,
+            service_category="windows",
+            intent=LeadIntent.HIRING,
+            overall_score=90,
+            drafted_response=VALID_DRAFT,
+        )
+    )
+
+    refreshed_page = controller.render(now=now)
+
+    assert "replace a window" not in first_page
+    assert "replace a window" in refreshed_page
+    persisted = database.get_lead(new_lead.id or 0)
+    assert persisted is not None
+    assert persisted.status is LeadStatus.CANDIDATE
+    assert database.list_pending_approval_reviews() == []
 
 
 def test_controller_rejects_missing_csrf_and_accepts_once(tmp_path: Path) -> None:
@@ -205,7 +239,7 @@ def handle_request(
 
 
 def test_loopback_server_enforces_headers_csrf_and_one_time_decision(tmp_path: Path) -> None:
-    controller, request_id, _ = prepared_controller(tmp_path)
+    controller, lead_id, _ = prepared_controller(tmp_path)
     host = f"{LOOPBACK_HOST}:8765"
     origin = f"http://{host}"
 
@@ -227,7 +261,7 @@ def test_loopback_server_enforces_headers_csrf_and_one_time_decision(tmp_path: P
     status, _, _ = handle_request(
         controller,
         "POST",
-        f"/approvals/{request_id}/approve",
+        f"/leads/{lead_id}/approve",
         body=form,
         headers=form_headers,
     )
@@ -238,7 +272,7 @@ def test_loopback_server_enforces_headers_csrf_and_one_time_decision(tmp_path: P
     status, _, _ = handle_request(
         controller,
         "POST",
-        f"/approvals/{request_id}/approve",
+        f"/leads/{lead_id}/approve",
         body=wrong_csrf,
         headers=form_headers,
     )
@@ -247,7 +281,7 @@ def test_loopback_server_enforces_headers_csrf_and_one_time_decision(tmp_path: P
     status, headers, _ = handle_request(
         controller,
         "POST",
-        f"/approvals/{request_id}/approve",
+        f"/leads/{lead_id}/approve",
         body=form,
         headers=form_headers,
     )
@@ -257,7 +291,7 @@ def test_loopback_server_enforces_headers_csrf_and_one_time_decision(tmp_path: P
     status, _, page = handle_request(
         controller,
         "POST",
-        f"/approvals/{request_id}/reject",
+        f"/leads/{lead_id}/reject",
         body=form,
         headers=form_headers,
     )
@@ -318,7 +352,7 @@ def test_dashboard_links_only_to_https_facebook_posts(
 
 def test_loopback_server_rejects_malformed_requests(tmp_path: Path) -> None:
     controller, request_id, _ = prepared_controller(tmp_path)
-    valid_path = f"/approvals/{request_id}/approve"
+    valid_path = f"/leads/{request_id}/approve"
     host = f"{LOOPBACK_HOST}:8765"
     origin = f"http://{host}"
 

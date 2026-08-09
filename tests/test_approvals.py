@@ -1,3 +1,4 @@
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -37,12 +38,18 @@ def database(tmp_path: Path) -> Database:
     return database
 
 
-def create_candidate(database: Database, *, draft: str | None = VALID_DRAFT) -> Lead:
+def create_candidate(
+    database: Database,
+    *,
+    draft: str | None = VALID_DRAFT,
+    external_post_id: str = "222",
+    group_id: str = "fixture-group",
+) -> Lead:
     post = database.save_post(
         FacebookPost(
-            external_post_id="approval-fixture",
-            post_url="https://www.facebook.com/groups/111/posts/222",
-            group_id="fixture-group",
+            external_post_id=external_post_id,
+            post_url=f"https://www.facebook.com/groups/111/posts/{external_post_id}",
+            group_id=group_id,
             group_name="Synthetic Fixture Group",
             author_name="Fixture Customer",
             post_text="Looking for someone in Louisville to repair our deck this week.",
@@ -185,6 +192,75 @@ def test_expired_approval_requires_re_review_and_cannot_be_decided(database: Dat
             ApprovalAction.APPROVE,
             now=now + timedelta(minutes=21),
         )
+
+
+def test_local_backlog_restores_expired_candidate_and_decides_at_click_time(
+    database: Database,
+) -> None:
+    lead = create_candidate(database)
+    now = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    service = LocalApprovalService(database, expiration_minutes=20)
+    expired_request_id = service.prepare_candidates(limit=10, now=now)[0].request.id or 0
+
+    backlog = service.list_local_backlog(now=now + timedelta(hours=2))
+
+    assert len(backlog) == 1
+    assert backlog[0].lead.id == lead.id
+    assert backlog[0].request is None
+    expired_request = database.get_approval_request(expired_request_id)
+    assert expired_request is not None
+    assert expired_request.status is ApprovalStatus.EXPIRED
+    restored = database.get_lead(lead.id or 0)
+    assert restored is not None
+    assert restored.status is LeadStatus.CANDIDATE
+
+    approved = service.decide_local_lead(
+        lead.id or 0,
+        ApprovalAction.APPROVE,
+        now=now + timedelta(hours=2, minutes=1),
+    )
+
+    assert approved.request.id != expired_request_id
+    assert approved.request.status is ApprovalStatus.APPROVED
+    assert approved.lead.status is LeadStatus.APPROVED
+    assert Counter(event.action for event in database.list_audit_events()) == Counter(
+        {
+            "approval.approved": 1,
+            "approval.requested": 2,
+            "approval.restored": 1,
+            "approval.expired": 1,
+        }
+    )
+
+
+def test_local_backlog_does_not_start_expiration_for_new_candidates(database: Database) -> None:
+    lead = create_candidate(database)
+    now = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    service = LocalApprovalService(database, expiration_minutes=20)
+
+    first = service.list_local_backlog(now=now)
+    later = service.list_local_backlog(now=now + timedelta(days=30))
+
+    assert [item.lead.id for item in first] == [lead.id]
+    assert [item.lead.id for item in later] == [lead.id]
+    assert database.list_pending_approval_reviews() == []
+    persisted = database.get_lead(lead.id or 0)
+    assert persisted is not None
+    assert persisted.status is LeadStatus.CANDIDATE
+
+
+def test_local_backlog_includes_exact_reposts_for_training(database: Database) -> None:
+    first = create_candidate(database)
+    second = create_candidate(
+        database,
+        external_post_id="333",
+        group_id="second-fixture-group",
+    )
+    service = LocalApprovalService(database, expiration_minutes=20)
+
+    backlog = service.list_local_backlog()
+
+    assert {item.lead.id for item in backlog} == {first.id, second.id}
 
 
 def test_candidates_without_drafts_do_not_enter_approval(database: Database) -> None:

@@ -832,12 +832,13 @@ class Database:
     def list_candidate_leads(
         self,
         *,
-        limit: int,
+        limit: int | None,
         duplicate_window_hours: int = 72,
         classification_version: str | None = None,
+        suppress_duplicates: bool = True,
     ) -> list[Lead]:
         """Return review-ready candidates, suppressing nearby exact-text duplicates."""
-        if limit < 1:
+        if limit is not None and limit < 1:
             raise ValueError("limit must be positive")
         if duplicate_window_hours < 1:
             raise ValueError("duplicate_window_hours must be positive")
@@ -849,7 +850,7 @@ class Database:
                 JOIN facebook_posts AS posts ON posts.id = leads.facebook_post_id
                 WHERE leads.status = ? AND leads.drafted_response IS NOT NULL
                   AND (? IS NULL OR leads.classification_version = ?)
-                  AND NOT EXISTS (
+                  AND (? = 0 OR NOT EXISTS (
                     SELECT 1
                     FROM leads AS prior_leads
                     JOIN facebook_posts AS prior_posts
@@ -866,19 +867,70 @@ class Database:
                       AND (
                         julianday(posts.discovered_at) - julianday(prior_posts.discovered_at)
                       ) * 24 <= ?
-                  )
+                  ))
                 ORDER BY leads.overall_score DESC, leads.created_at, leads.id
-                LIMIT ?
+                LIMIT COALESCE(?, -1)
                 """,
                 (
                     LeadStatus.CANDIDATE.value,
                     classification_version,
                     classification_version,
+                    int(suppress_duplicates),
                     duplicate_window_hours,
                     limit,
                 ),
             ).fetchall()
         return [_lead_from_row(row) for row in rows]
+
+    def restore_expired_candidate_leads(
+        self,
+        *,
+        restored_at: datetime,
+        classification_version: str | None = None,
+    ) -> list[Lead]:
+        """Return undecided expired approvals to the candidate backlog."""
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT DISTINCT leads.id
+                FROM leads
+                JOIN approval_requests AS requests ON requests.lead_id = leads.id
+                WHERE leads.status = ? AND requests.status = ?
+                  AND leads.drafted_response IS NOT NULL
+                  AND (? IS NULL OR leads.classification_version = ?)
+                ORDER BY leads.id
+                """,
+                (
+                    LeadStatus.EXPIRED.value,
+                    ApprovalStatus.EXPIRED.value,
+                    classification_version,
+                    classification_version,
+                ),
+            ).fetchall()
+            lead_ids = [int(row["id"]) for row in rows]
+            if not lead_ids:
+                return []
+            placeholders = ",".join("?" for _ in lead_ids)
+            connection.execute(
+                f"""
+                UPDATE leads SET
+                    status = ?, updated_at = ?, approval_expires_at = NULL,
+                    error_state = NULL
+                WHERE id IN ({placeholders}) AND status = ?
+                """,
+                (
+                    LeadStatus.CANDIDATE.value,
+                    _serialize_datetime(restored_at),
+                    *lead_ids,
+                    LeadStatus.EXPIRED.value,
+                ),
+            )
+            restored_rows = connection.execute(
+                f"SELECT * FROM leads WHERE id IN ({placeholders}) ORDER BY id",
+                lead_ids,
+            ).fetchall()
+            return [_lead_from_row(row) for row in restored_rows]
 
     def create_approval_request(self, request: ApprovalRequest) -> ApprovalReview:
         """Atomically snapshot a candidate draft and move its lead into pending review."""

@@ -19,13 +19,14 @@ from lead_agent.approvals import (
     ApprovalExpiredError,
     ApprovalStateError,
     LocalApprovalService,
+    LocalReviewItem,
 )
 from lead_agent.dashboard_metrics import CycleTrend, DashboardMetricsService, DashboardTrendSnapshot
-from lead_agent.models import ApprovalReview, RejectionReason, utc_now
+from lead_agent.models import RejectionReason, utc_now
 
 LOOPBACK_HOST = "127.0.0.1"
 MAX_FORM_BYTES = 4096
-APPROVAL_PATH = re.compile(r"^/approvals/(\d+)/(approve|edit|reject)$")
+LOCAL_REVIEW_PATH = re.compile(r"^/leads/(\d+)/(approve|edit|reject)$")
 
 
 class CSRFFailure(ApprovalError):
@@ -47,14 +48,16 @@ class LocalApprovalController:
         *,
         csrf_token: str | None = None,
         display_timezone: tzinfo = UTC,
+        candidate_limit: int | None = None,
     ) -> None:
         self.service = service
         self.csrf_token = csrf_token or secrets.token_urlsafe(32)
         self.display_timezone = display_timezone
+        self.candidate_limit = candidate_limit
         self.metrics = DashboardMetricsService(service.database)
 
     def render(self, *, message: str | None = None, now: datetime | None = None) -> str:
-        reviews = self.service.list_pending(now=now)
+        reviews = self.service.list_local_backlog(limit=self.candidate_limit, now=now)
         return render_dashboard(
             reviews,
             trends=self.metrics.snapshot(),
@@ -66,7 +69,7 @@ class LocalApprovalController:
 
     def submit(
         self,
-        request_id: int,
+        lead_id: int,
         action_value: str,
         form: dict[str, list[str]],
         *,
@@ -84,8 +87,8 @@ class LocalApprovalController:
             raise ApprovalStateError("Unknown approval action") from error
         edited_response = _one_form_value(form, "response", required=False)
         rejection_reason = _one_form_value(form, "rejection_reason", required=False)
-        review = self.service.decide(
-            request_id,
+        review = self.service.decide_local_lead(
+            lead_id,
             action,
             edited_response=edited_response,
             rejection_reason=rejection_reason,
@@ -115,7 +118,7 @@ def _one_form_value(
 
 
 def render_dashboard(
-    reviews: list[ApprovalReview],
+    reviews: list[LocalReviewItem],
     *,
     trends: DashboardTrendSnapshot,
     csrf_token: str,
@@ -123,11 +126,11 @@ def render_dashboard(
     now: datetime,
     display_timezone: tzinfo = UTC,
 ) -> str:
-    cards = "".join(_render_review(review, csrf_token=csrf_token, now=now) for review in reviews)
+    cards = "".join(_render_review(review, csrf_token=csrf_token) for review in reviews)
     if not cards:
         cards = (
             '<section class="empty"><h2>No leads awaiting review</h2>'
-            "<p>Classify new posts, then refresh this page.</p></section>"
+            "<p>New candidates will appear here when you refresh this page.</p></section>"
         )
     flash = f'<p class="flash">{html.escape(message)}</p>' if message else ""
     trend_content = _render_trends(trends, display_timezone=display_timezone)
@@ -444,14 +447,12 @@ def _full_time(value: datetime, display_timezone: tzinfo) -> str:
     return value.astimezone(display_timezone).strftime("%b %-d, %-I:%M %p")
 
 
-def _render_review(review: ApprovalReview, *, csrf_token: str, now: datetime) -> str:
-    request_id = review.request.id
-    if request_id is None:  # pragma: no cover - persisted review contract
-        raise RuntimeError("Approval review is missing its request ID")
+def _render_review(review: LocalReviewItem, *, csrf_token: str) -> str:
+    lead_id = review.lead.id
+    if lead_id is None:  # pragma: no cover - persisted lead contract
+        raise RuntimeError("Approval review is missing its lead ID")
     lead = review.lead
     post = review.post
-    remaining_seconds = max(0, int((review.request.expires_at - now).total_seconds()))
-    remaining_minutes = (remaining_seconds + 59) // 60
     score = lead.overall_score if lead.overall_score is not None else "—"
     service = (lead.service_category or "unknown").replace("_", " ")
     post_link = ""
@@ -462,7 +463,7 @@ def _render_review(review: ApprovalReview, *, csrf_token: str, now: datetime) ->
             f'<p><a href="{safe_url}" target="_blank" rel="noreferrer">Open Facebook post</a></p>'
         )
     csrf = html.escape(csrf_token, quote=True)
-    draft = html.escape(review.request.draft_response)
+    draft = html.escape(review.draft_response)
     rejection_options = "".join(
         f'<option value="{reason.value}">{html.escape(reason.value.replace("_", " ").title())}'
         "</option>"
@@ -476,12 +477,12 @@ def _render_review(review: ApprovalReview, *, csrf_token: str, now: datetime) ->
     <span>Score: {score}</span>
     <span>Intent: {html.escape(lead.intent.value if lead.intent else "unknown")}</span>
   </div>
-  <p class="expiry">Expires in approximately {remaining_minutes} minute(s).</p>
+  <p class="expiry">Remains in this local backlog until you approve or reject it.</p>
   <h3>Facebook post</h3>
   <p class="post">{html.escape(post.post_text)}</p>
   {post_link}
   <h3>Proposed response</h3>
-  <form method="post" action="/approvals/{request_id}/edit">
+  <form method="post" action="/leads/{lead_id}/edit">
     <input type="hidden" name="csrf_token" value="{csrf}">
     <textarea name="response" maxlength="300" required>{draft}</textarea>
     <div class="actions">
@@ -489,11 +490,11 @@ def _render_review(review: ApprovalReview, *, csrf_token: str, now: datetime) ->
     </div>
   </form>
   <div class="actions">
-    <form method="post" action="/approvals/{request_id}/approve">
+    <form method="post" action="/leads/{lead_id}/approve">
       <input type="hidden" name="csrf_token" value="{csrf}">
       <button class="approve" type="submit">Approve draft</button>
     </form>
-    <form method="post" action="/approvals/{request_id}/reject">
+    <form method="post" action="/leads/{lead_id}/reject">
       <input type="hidden" name="csrf_token" value="{csrf}">
       <label>Reason for rejection
         <select name="rejection_reason" required>
@@ -528,11 +529,14 @@ def run_local_approval_dashboard(
     service: LocalApprovalService,
     *,
     port: int,
-    candidate_limit: int,
+    candidate_limit: int | None,
     business_timezone: str,
 ) -> None:  # pragma: no cover - interactive local server
-    service.prepare_candidates(limit=candidate_limit)
-    controller = LocalApprovalController(service, display_timezone=ZoneInfo(business_timezone))
+    controller = LocalApprovalController(
+        service,
+        display_timezone=ZoneInfo(business_timezone),
+        candidate_limit=candidate_limit,
+    )
     handler = _handler_class(controller, port=port)
     server = LocalApprovalHTTPServer((LOOPBACK_HOST, port), handler)
     print(f"Local approval dashboard: http://{LOOPBACK_HOST}:{port}")
@@ -585,7 +589,7 @@ def _handler_class(
             if origin is not None and origin not in allowed_origins:
                 self._send_text(HTTPStatus.FORBIDDEN, "Invalid local Origin header")
                 return
-            match = APPROVAL_PATH.fullmatch(urlsplit(self.path).path)
+            match = LOCAL_REVIEW_PATH.fullmatch(urlsplit(self.path).path)
             if match is None:
                 self._send_text(HTTPStatus.NOT_FOUND, "Not found")
                 return
