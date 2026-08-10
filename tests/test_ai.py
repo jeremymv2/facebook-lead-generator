@@ -200,6 +200,22 @@ def test_heuristic_rejects_commercial_property_request() -> None:
             "In need a lawn care, landscaping, pressure wash, or junk removal? Book with me at "
             "502-555-0100. #HeavyLawnCareService"
         ),
+        (
+            "We cleaned the concrete, pressure washed the walkways, and restored the patio. "
+            "Now booking pressure-washing jobs in Louisville."
+        ),
+        (
+            "If your porch, deck, steps, or railings need attention, call Example Home Services "
+            "and let's get started."
+        ),
+        (
+            "This deck needed structural work. We reinforced it and replaced damaged stairs. "
+            "Contact Example Deck Company for an estimate."
+        ),
+        (
+            "She just needed a trim and the yard looks much better. In need of lawn care or "
+            "landscaping? Call/text 502-555-0100."
+        ),
     ],
 )
 def test_heuristic_suppresses_realistic_contractor_advertisements(text: str) -> None:

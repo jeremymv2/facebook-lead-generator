@@ -84,12 +84,25 @@ def sanitize_fixture_text(text: str, *, author_name: str | None = None) -> str:
             "[address]",
         ),
         (
+            r"\bthank you to\s+.{1,80}?\s+for choosing\b",
+            "thank you to [business] for choosing",
+        ),
+        (
             r"\bat\s+(?:[\w&'.-]+\s+){1,5}"
             r"(?:services?|solutions|construction|contracting|renovations|remodeling)\b",
             "[business]",
         ),
+        (
+            r"\b(?-i:(?!(?:Message|Contact|Call|Text)\b)"
+            r"(?:[A-Z][\w&'\u2019.-]*\s+){1,5}"
+            r"(?:Services?|Solutions|Experts|Construction|Contracting|Renovations|Remodeling))\b",
+            "[business]",
+        ),
         (r"\b(?:[A-Z][\w&'.-]+\s+){1,4}(?:LLC|Inc\.?|Company|Co\.)\b", "[business]"),
-        (r"#\w*(?:llc|company|service|services)\w*", "[business]"),
+        (
+            r"#[\w'\u2019&.-]*(?:llc|company|experts|service|services)[\w'\u2019&.-]*",
+            "[business]",
+        ),
     )
     for pattern, replacement in substitutions:
         sanitized = re.sub(pattern, replacement, sanitized, flags=re.IGNORECASE)

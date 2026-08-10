@@ -126,3 +126,17 @@ def test_sanitizer_normalizes_without_direct_identifiers() -> None:
     )
 
     assert sanitized == "[business] call [phone] or [email]. Visit [url] today."
+
+
+def test_sanitizer_redacts_named_providers_in_calls_to_action() -> None:
+    sanitized = sanitize_fixture_text(
+        "Message Example\u2019s Touch Services today. "
+        "Contact Sample Home Experts for an estimate. "
+        "A big thank you to Fixture Hall for choosing us. "
+        "#SampleHomeExperts #Example\u2019sLawnCareService"
+    )
+
+    assert sanitized == (
+        "Message [business] today. Contact [business] for an estimate. "
+        "A big thank you to [business] for choosing us. [business] [business]"
+    )
