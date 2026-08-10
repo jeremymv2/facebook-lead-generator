@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from lead_agent.config import Settings
 from lead_agent.models import FacebookPost, LeadIntent, normalize_post_text
 
-CLASSIFICATION_VERSION = "2026-08-09.v6"
+CLASSIFICATION_VERSION = "2026-08-09.v7"
 COMPANY_NAME = "JJ Miller & Co."
 COMPANY_WEBSITE = "https://jjmillerco.com"
 COMPANY_TEXT_PHONE = "502-528-0858"
@@ -1009,6 +1009,15 @@ def _is_competitor_advertisement(text: str, service: str | None) -> bool:
         return True
     provider_signals = (
         r"\b(?:i|we) (?:offer|provide|specialize in)\b",
+        r"\bwe (?:cleaned|completed|corrected|reinforced|replaced|installed|built|painted|"
+        r"stained|pressure washed|sanded|refinished|renovated|restored)\b",
+        r"\b(?:he|she|they|the (?:customer|client|homeowner)) (?:just )?needed\b",
+        r"\b(?:now )?booking\b",
+        r"\bresults speak for themselves\b",
+        r"\bif your .{0,140}\bneed(?:s)? (?:attention|repairs?|work|an? update)\b",
+        r"\b(?:call|text|contact|message)\b.{0,100}\b(?:today|estimate|quote|schedule|"
+        r"let['\u2019]s|get started)\b",
+        r"\b(?:call(?:\s+or\s+|/)text|call|text)\b.{0,40}(?:\d{3}|\[phone\])",
         r"\b(?:licensed|fully insured|licensed and insured)\b",
         r"\b(?:free estimates?|references available|openings available)\b",
         r"\byour (?:home|property|project) could be next\b",

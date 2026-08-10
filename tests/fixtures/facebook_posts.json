@@ -123,5 +123,40 @@
     "name": "review_feedback_window_and_paint_request_guardrail",
     "text": "Looking for someone to replace broken window glass and complete a few paint touch-ups.",
     "expected": {"service": "windows", "intent": "hiring", "minimum_score": 80}
+  },
+  {
+    "name": "review_feedback_pressure_washing_showcase_advertisement",
+    "text": "Commercial pressure washing complete. We cleaned concrete walkways, sidewalks, and courtyard areas, and the results speak for themselves. We are now booking residential and commercial pressure-washing jobs. Serving Louisville and surrounding areas. Message [business] today for a free estimate.",
+    "expected": {"service": "pressure_washing", "intent": "competitor_advertisement", "maximum_score": 10}
+  },
+  {
+    "name": "review_feedback_porch_renewal_advertisement",
+    "text": "Front porch renewal with new composite decking and railing. If your porch, deck, steps, or railings need attention, call [business] and let's get your project started.",
+    "expected": {"service": "decks", "intent": "competitor_advertisement", "maximum_score": 10}
+  },
+  {
+    "name": "review_feedback_deck_repair_showcase_advertisement",
+    "text": "This deck needed more than a fresh coat of stain. We corrected the instability, reinforced the structure, replaced damaged stairs and deck boards, then pressure washed, sanded, and refinished the deck. Need a deck repaired instead of replaced? Contact [business] for an estimate.",
+    "expected": {"service": "decks", "intent": "competitor_advertisement", "maximum_score": 10}
+  },
+  {
+    "name": "review_feedback_lawn_service_menu_advertisement",
+    "text": "Even though she just needed a trim, everything looks much better. In need of lawn care, landscaping, pressure washing, junk removal, or hauling? Call/text [phone].",
+    "expected": {"service": "landscaping", "intent": "competitor_advertisement", "maximum_score": 10}
+  },
+  {
+    "name": "review_feedback_customer_prior_deck_work_guardrail",
+    "text": "We replaced a few deck boards last summer, but the deck is unstable again. Need someone to inspect and repair it. Looking for estimates in Louisville.",
+    "expected": {"service": "decks", "intent": "hiring", "minimum_score": 80}
+  },
+  {
+    "name": "review_feedback_customer_multi_service_request_guardrail",
+    "text": "I am in need of lawn care, pressure washing, and junk removal at my Louisville home. Looking for someone who can provide an estimate.",
+    "expected": {"intent": "hiring", "minimum_score": 80}
+  },
+  {
+    "name": "review_feedback_named_provider_question_guardrail",
+    "text": "Has anyone used [business] for deck repair? Looking for recommendations and an estimate in Louisville.",
+    "expected": {"service": "decks", "intent": "recommendation", "minimum_score": 80}
   }
 ]
