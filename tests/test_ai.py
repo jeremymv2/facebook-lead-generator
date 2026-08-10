@@ -136,8 +136,8 @@ def test_heuristic_lawn_draft_uses_natural_service_language() -> None:
     draft = provider.draft_response(source, classification, context())
 
     assert classification.service_category == "landscaping"
-    assert "free estimates for lawn services" in draft.response.casefold()
-    assert "we'd be" in draft.response.casefold()
+    assert "free estimate" in draft.response.casefold()
+    assert "lawn services" in draft.response.casefold()
     assert "landscaping" not in draft.response.casefold()
     assert "need help" not in draft.response.casefold()
 
@@ -355,12 +355,27 @@ def test_heuristic_draft_does_not_use_an_unsafe_author_fragment() -> None:
 def test_heuristic_drafts_vary_by_stable_post_content() -> None:
     provider = HeuristicAIProvider()
     drafts: set[str] = set()
-    for index in range(10):
+    openings: set[str] = set()
+    for index in range(100):
         source = post(f"Looking for deck repair in Louisville this week. Fixture {index}.")
         classification = provider.classify_post(source, context())
-        drafts.add(provider.draft_response(source, classification, context()).response)
+        response = provider.draft_response(source, classification, context()).response
+        drafts.add(response)
+        openings.add(response.split(".", maxsplit=1)[0])
 
-    assert len(drafts) > 1
+    assert len(drafts) == 12
+    assert len(openings) >= 6
+
+
+def test_heuristic_draft_variation_is_stable_for_the_same_post() -> None:
+    provider = HeuristicAIProvider()
+    source = post("Looking for deck repair in Louisville this week.")
+    classification = provider.classify_post(source, context())
+
+    first = provider.draft_response(source, classification, context())
+    second = provider.draft_response(source, classification, context())
+
+    assert first == second
 
 
 @pytest.mark.parametrize(

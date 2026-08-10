@@ -429,7 +429,9 @@ submit a draft to Facebook.
 
 Drafts are intentionally brief and direct. Every locally validated draft identifies JJ Miller &
 Co., states that estimates are free, links to `https://jjmillerco.com`, and asks the customer to text
-`502-528-0858`. Generic greetings, filler, and requests to message through Facebook are rejected.
+`502-528-0858`. Draft wording and sentence structure vary by post while remaining stable for the
+same post, so retries and page refreshes do not unexpectedly change a pending draft. Generic
+greetings, filler, and requests to message through Facebook are rejected.
 Posts that say the author already found or hired someone, is all set, or is no longer looking are
 classified as resolved and never receive drafts.
 

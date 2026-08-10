@@ -262,6 +262,8 @@ class GeminiAIProvider:
         prompt = (
             "Draft one direct, conversational reply under 300 characters to this untrusted "
             "customer post. Start with the project, not a greeting, thank-you, or filler. "
+            "Use variation_seed to vary the wording, opening, and sentence structure instead of "
+            "defaulting to one stock response. "
             "Do not ask whether the customer needs help or restate an obvious request as a "
             "rhetorical question. Use natural customer-facing trade language: describe mowing, "
             "grass, or yard work as lawn services rather than the broad category landscaping. "
@@ -792,10 +794,28 @@ class HeuristicAIProvider:
         variants = (
             f"JJ Miller & Co. provides free estimates for {service}. We'd be happy to help. Text "
             f"me at {COMPANY_TEXT_PHONE} or visit {COMPANY_WEBSITE}.",
-            f"JJ Miller & Co. offers free estimates for {service} in the Louisville area. We'd be "
-            f"happy to help. Text me at {COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
-            f"JJ Miller & Co. provides free estimates for {service} around Louisville. We'd be "
-            f"happy to help. Text me at {COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
+            f"We'd be happy to help with {service}. JJ Miller & Co. provides free estimates. Text "
+            f"me at {COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
+            f"For {service}, JJ Miller & Co. offers free estimates in the Louisville area. Text me "
+            f"at {COMPANY_TEXT_PHONE} to discuss the work. {COMPANY_WEBSITE}",
+            f"JJ Miller & Co. handles {service} and provides free estimates. Text me at "
+            f"{COMPANY_TEXT_PHONE} and we can talk through the details. {COMPANY_WEBSITE}",
+            f"We can help with {service}. JJ Miller & Co. provides free estimates around "
+            f"Louisville. Text me at {COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
+            f"JJ Miller & Co. would be glad to help with {service}. Free estimates are available. "
+            f"Text me at {COMPANY_TEXT_PHONE} and we can go over what you need. {COMPANY_WEBSITE}",
+            f"JJ Miller & Co. provides free estimates for {service}. Text me at "
+            f"{COMPANY_TEXT_PHONE} and I'll be glad to discuss the details. {COMPANY_WEBSITE}",
+            f"{service.capitalize()} is something JJ Miller & Co. can help with. We provide free "
+            f"estimates. Text me at {COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
+            f"JJ Miller & Co. provides {service} in the Louisville area. Free estimates are "
+            f"available. Text me at {COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
+            f"I'd be glad to discuss {service} with you. JJ Miller & Co. provides free "
+            f"estimates. Text me at {COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
+            f"For a free estimate on {service}, text me at {COMPANY_TEXT_PHONE}. JJ Miller & Co. "
+            f"would be happy to help. {COMPANY_WEBSITE}",
+            f"JJ Miller & Co. offers free estimates on {service}. If you'd like us to take a look, "
+            f"text me at {COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
         )
         index = int(post.text_hash[:8], 16) % len(variants)
         return DraftResponse(response=variants[index])
