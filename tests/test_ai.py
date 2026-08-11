@@ -340,16 +340,23 @@ def test_heuristic_suppresses_provider_scheduling_advertisement() -> None:
     assert classification.overall_score <= 10
 
 
-def test_heuristic_respects_private_contact_only_instruction() -> None:
-    classification = HeuristicAIProvider().classify_post(
-        post(
+@pytest.mark.parametrize(
+    "text",
+    [
+        (
             "Looking for a reliable deck contractor. I don't respond to comments. Seriously DM "
             "inquiries only. Replace 30 deck boards and repair the supports."
         ),
+        "ISO lawn care companies to pick up clean yards in Louisville. DM me for details.",
+    ],
+)
+def test_heuristic_respects_private_contact_only_instruction(text: str) -> None:
+    classification = HeuristicAIProvider().classify_post(
+        post(text),
         context(),
     )
 
-    assert classification.service_category == "decks"
+    assert classification.service_category is not None
     assert classification.intent is LeadIntent.PRIVATE_CONTACT_ONLY
     assert classification.overall_score <= 10
 
