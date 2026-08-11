@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from lead_agent.config import Settings
 from lead_agent.models import FacebookPost, LeadIntent, normalize_post_text
 
-CLASSIFICATION_VERSION = "2026-08-10.v8"
+CLASSIFICATION_VERSION = "2026-08-10.v9"
 COMPANY_NAME = "JJ Miller & Co."
 COMPANY_WEBSITE = "https://jjmillerco.com"
 COMPANY_TEXT_PHONE = "502-528-0858"
@@ -903,7 +903,7 @@ def _infer_intent(text: str, service: str | None) -> LeadIntent:
     )
     if any(re.search(pattern, text) for pattern in resolved_patterns):
         return LeadIntent.RESOLVED
-    if any(
+    private_contact_only = any(
         term in text
         for term in (
             "do not comment",
@@ -913,7 +913,11 @@ def _infer_intent(text: str, service: str | None) -> LeadIntent:
             "dm inquiries only",
             "private message only",
         )
-    ):
+    ) or re.search(
+        r"\b(?:dm|pm|message|inbox) me (?:for )?(?:details|more info(?:rmation)?)\b",
+        text,
+    )
+    if private_contact_only:
         return LeadIntent.PRIVATE_CONTACT_ONLY
     if _is_non_customer_solicitation(text):
         return LeadIntent.UNRELATED

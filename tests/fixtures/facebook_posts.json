@@ -218,5 +218,10 @@
     "name": "residential_tile_installer_request_guardrail",
     "text": "We're currently looking for a tile installer for our residential bathroom in Louisville. Please send recommendations and estimates.",
     "expected": {"service": "tile", "intent": "recommendation", "residential": true, "minimum_score": 80}
+  },
+  {
+    "name": "backlog_lawn_request_requiring_private_contact",
+    "text": "ISO lawn care companies to pick up clean yards in Louisville. DM me for details.",
+    "expected": {"service": "landscaping", "intent": "private_contact_only", "maximum_score": 10}
   }
 ]
