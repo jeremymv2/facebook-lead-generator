@@ -223,5 +223,15 @@
     "name": "backlog_lawn_request_requiring_private_contact",
     "text": "ISO lawn care companies to pick up clean yards in Louisville. DM me for details.",
     "expected": {"service": "landscaping", "intent": "private_contact_only", "maximum_score": 10}
+  },
+  {
+    "name": "backlog_cleaning_service_package_advertisement",
+    "text": "Example Cleaning LLC — Complete Home Reset Packages. Limited time only for bundled services. Our packages combine professional cleaning with carpet extraction and odor treatment at one flat rate. Fresh Start + Carpet Refresh includes maintenance cleaning and professional carpet extraction up to two rooms. Package pricing is based on property size. Available add-ons include carpeted stairs and interior windows. Call [phone]. Serving Louisville and surrounding areas.",
+    "expected": {"service": "flooring", "intent": "competitor_advertisement", "maximum_score": 10}
+  },
+  {
+    "name": "backlog_property_listing_seeking_investor_buyers",
+    "text": "Looking for any investors wanting to buy close to the Red River Gorge. The house has quartz countertops, engineered hardwood floors, marble tile, three bedrooms, three bathrooms, and sits on 3.05 acres. A must see. Send me a message for a private showing.",
+    "expected": {"intent": "selling", "maximum_score": 10}
   }
 ]

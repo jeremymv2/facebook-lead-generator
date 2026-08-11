@@ -945,6 +945,8 @@ def _infer_intent(text: str, service: str | None) -> LeadIntent:
             "cash-flow opportunity",
             "cash flow opportunity",
             "wholesale deal",
+            "investors wanting to buy",
+            "private showing",
         )
     ):
         return LeadIntent.SELLING
@@ -1009,6 +1011,8 @@ def _is_competitor_advertisement(text: str, service: str | None) -> bool:
         r"(?:inspections?|estimates?|services?)\b",
         r"\bwe offer\b",
         r"\bour services (?:include|are)\b",
+        r"\bour packages (?:combine|include)\b",
+        r"\bpackage pricing is based on\b",
         r"\b(?:call|text) (?:me|us) for (?:a )?(?:free )?(?:quote|estimate)\b",
         r"\b(?:give|contact|get with) us (?:a call|for (?:a )?(?:free )?(?:quote|estimate))\b",
         r"\bget with us today for (?:a )?(?:free )?(?:quote|estimate)\b",
