@@ -222,6 +222,11 @@ evidence paths, safe error codes, and a partial uniqueness constraint that permi
 attempt per lead. Schema version 8 adds bounded historical operations reporting. Schema version 9
 adds structured rejection reasons and safely backfills earlier rejected reviews as `other`.
 
+The local review backlog additionally collapses cross-group exact reposts and extraction variants
+whose trailing text repeats an earlier fragment. Suppression is limited to the configured duplicate
+window, keeps the earliest representative for review, and does not delete the underlying source or
+lead records.
+
 ## Development commands
 
 Run every local check:
@@ -488,11 +493,12 @@ Use the same copied database after it contains classified candidate leads:
 DATABASE_PATH=data/lead_agent.phase4-test.sqlite3 lead-agent approval-dashboard
 ```
 
-Open `http://127.0.0.1:8765` on the same Mac. The page displays every candidate from the
-current classifier version, including candidates whose earlier review window expired. New candidates
-appear on refresh and remain in the local backlog until approved or rejected. Each candidate can be
-approved exactly as drafted, edited and approved, or rejected. Edited responses must still satisfy
-the local company identity, free-estimate, full website URL, text-number, and length rules.
+Open `http://127.0.0.1:8765` on the same Mac. The page displays reviewable candidates from the
+current classifier version, including candidates whose earlier review window expired, with one
+representative per recent exact or repeated-fragment repost cluster. New candidates appear on
+refresh and remain in the local backlog until approved or rejected. Each candidate can be approved
+exactly as drafted, edited and approved, or rejected. Edited responses must still satisfy the local
+company identity, free-estimate, full website URL, text-number, and length rules.
 
 Every rejection requires one structured reason such as provider advertisement, employment
 recruiting, wrong geography, irrelevant service, resolved, or duplicate/repost. The dashboard shows

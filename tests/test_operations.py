@@ -384,6 +384,69 @@ def test_candidate_review_deduplicates_exact_text_across_groups_within_window(
     }
 
 
+def test_candidate_review_deduplicates_repeated_extraction_fragment(tmp_path: Path) -> None:
+    database = Database(tmp_path / "near-dedupe.sqlite3")
+    database.initialize()
+    now = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    introduction = (
+        "Hello builders and contractors. I own Example Flooring LLC and wanted to introduce "
+        "our installation company and dependable crews."
+    )
+    body = (
+        " We install laminate, hardwood, carpet, stairs, and trim throughout Louisville. "
+        "Our crews can handle several projects while meeting deadlines and communicating well."
+    )
+    first = save_candidate(
+        database,
+        "first-version",
+        "group-a",
+        now,
+        score=90,
+        post_text=introduction + body,
+    )
+    duplicate = save_candidate(
+        database,
+        "repeated-fragment-version",
+        "group-a",
+        now + timedelta(seconds=1),
+        score=90,
+        post_text=introduction + body + introduction,
+    )
+
+    reviewable = database.list_candidate_leads(limit=10, duplicate_window_hours=72)
+
+    assert [lead.id for lead in reviewable] == [first.id]
+    assert duplicate.id not in {lead.id for lead in reviewable}
+
+
+def test_candidate_review_does_not_deduplicate_reordered_long_posts(tmp_path: Path) -> None:
+    database = Database(tmp_path / "distinct-long-posts.sqlite3")
+    database.initialize()
+    now = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    first_sentence = "Need deck boards replaced after storm damage at our Louisville home."
+    second_sentence = "Looking for estimates from experienced residential carpenters this week."
+    first = save_candidate(
+        database,
+        "first-order",
+        "group-a",
+        now,
+        score=90,
+        post_text=f"{first_sentence} {second_sentence}",
+    )
+    second = save_candidate(
+        database,
+        "second-order",
+        "group-a",
+        now + timedelta(seconds=1),
+        score=90,
+        post_text=f"{second_sentence} {first_sentence}",
+    )
+
+    reviewable = database.list_candidate_leads(limit=10, duplicate_window_hours=72)
+
+    assert {lead.id for lead in reviewable} == {first.id, second.id}
+
+
 def test_candidate_review_can_require_the_current_classification_version(
     tmp_path: Path,
 ) -> None:

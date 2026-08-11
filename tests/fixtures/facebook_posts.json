@@ -158,5 +158,65 @@
     "name": "review_feedback_named_provider_question_guardrail",
     "text": "Has anyone used [business] for deck repair? Looking for recommendations and an estimate in Louisville.",
     "expected": {"service": "decks", "intent": "recommendation", "minimum_score": 80}
+  },
+  {
+    "name": "backlog_flooring_owner_introduction_advertisement",
+    "text": "Hello builders and contractors. I'm the owner of Example Flooring LLC. We have two installation crews and availability for new residential and commercial flooring projects around Louisville.",
+    "expected": {"service": "flooring", "intent": "competitor_advertisement", "maximum_score": 10}
+  },
+  {
+    "name": "backlog_wholesale_property_listing",
+    "text": "South Louisville cash-flow opportunity. We are bringing another wholesale deal to market. Two bedrooms, one bath, starting at $75,500 with a light cosmetic rehab.",
+    "expected": {"intent": "selling", "maximum_score": 10}
+  },
+  {
+    "name": "backlog_fence_project_showcase_advertisement",
+    "text": "Nearly 200 feet of privacy fencing added to this backyard. Get with us today for a free estimate.",
+    "expected": {"service": "fencing", "intent": "competitor_advertisement", "maximum_score": 10}
+  },
+  {
+    "name": "backlog_lawn_business_seeking_clients_advertisement",
+    "text": "Need lawn care or pressure washing? We run Example Sanitation and we're looking for clients this week. Call us to get scheduled.",
+    "expected": {"intent": "competitor_advertisement", "maximum_score": 10}
+  },
+  {
+    "name": "backlog_resolved_lawn_request",
+    "text": "Update: Got it taken care of. I needed a reliable lawn service for cleanup and mowing.",
+    "expected": {"service": "landscaping", "intent": "resolved", "maximum_score": 10}
+  },
+  {
+    "name": "backlog_printing_ad_with_yard_sign",
+    "text": "Small Business Monday. Shop small and support local. Whether you need a custom painted banner, printed vinyl banner, yard sign, business cards, or magnets, we'd love to create it for you.",
+    "expected": {"intent": "unrelated", "maximum_score": 10}
+  },
+  {
+    "name": "backlog_contractor_directory_solicitation",
+    "text": "If you own a roofing, landscaping, concrete, fencing, or deck-building business, drop your information below for our contractor directory.",
+    "expected": {"intent": "unrelated", "maximum_score": 10}
+  },
+  {
+    "name": "backlog_labor_self_promotion_advertisement",
+    "text": "Does anybody need any type of labor done? Moving, yard work, or anything else? I have equipment and references and am looking to make extra money.",
+    "expected": {"service": "landscaping", "intent": "competitor_advertisement", "maximum_score": 10}
+  },
+  {
+    "name": "backlog_roof_inspection_advertisement",
+    "text": "I'm currently offering free roof inspections and estimates. We also provide siding, gutters, storm-damage repairs, and full replacements.",
+    "expected": {"intent": "competitor_advertisement", "maximum_score": 10}
+  },
+  {
+    "name": "backlog_commercial_tile_installer_recruiting",
+    "text": "We are currently looking for commercial ceramic tile installers. Projects are new builds and commercial sites. Please list your information and we will reach out.",
+    "expected": {"service": "tile", "intent": "unrelated", "residential": false, "maximum_score": 10}
+  },
+  {
+    "name": "backlog_lost_package_on_porch",
+    "text": "I am looking for the person this package belongs to. It was on my porch with the address label removed and is not anything I ordered.",
+    "expected": {"service": "porches", "intent": "unrelated", "maximum_score": 10}
+  },
+  {
+    "name": "residential_tile_installer_request_guardrail",
+    "text": "We're currently looking for a tile installer for our residential bathroom in Louisville. Please send recommendations and estimates.",
+    "expected": {"service": "tile", "intent": "recommendation", "residential": true, "minimum_score": 80}
   }
 ]
