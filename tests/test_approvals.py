@@ -249,7 +249,7 @@ def test_local_backlog_does_not_start_expiration_for_new_candidates(database: Da
     assert persisted.status is LeadStatus.CANDIDATE
 
 
-def test_local_backlog_includes_exact_reposts_for_training(database: Database) -> None:
+def test_local_backlog_suppresses_exact_reposts(database: Database) -> None:
     first = create_candidate(database)
     second = create_candidate(
         database,
@@ -260,7 +260,8 @@ def test_local_backlog_includes_exact_reposts_for_training(database: Database) -
 
     backlog = service.list_local_backlog()
 
-    assert {item.lead.id for item in backlog} == {first.id, second.id}
+    assert [item.lead.id for item in backlog] == [first.id]
+    assert second.id not in {item.lead.id for item in backlog}
 
 
 def test_candidates_without_drafts_do_not_enter_approval(database: Database) -> None:

@@ -131,7 +131,6 @@ class LocalApprovalService:
                 limit=remaining,
                 duplicate_window_hours=self.duplicate_window_hours,
                 classification_version=self.classification_version,
-                suppress_duplicates=False,
             )
             if remaining is None or remaining > 0
             else []

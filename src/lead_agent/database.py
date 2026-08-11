@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
 from lead_agent.models import (
@@ -33,6 +35,26 @@ from lead_agent.models import (
 )
 
 SCHEMA_VERSION = 9
+_REVIEW_DEDUPE_REPEATED_FRAGMENT_MINIMUM_TOKENS = 7
+
+
+@lru_cache(maxsize=8_192)
+def _review_deduplication_key(text: str) -> str:
+    """Collapse formatting changes and repeated extraction fragments for review deduplication."""
+    tokens = re.findall(r"[^\W_]+", text.casefold())
+    minimum = _REVIEW_DEDUPE_REPEATED_FRAGMENT_MINIMUM_TOKENS
+    separator = "\x1f"
+    while len(tokens) >= minimum * 2:
+        for suffix_length in range(len(tokens) // 2, minimum - 1, -1):
+            prefix = separator + separator.join(tokens[:-suffix_length]) + separator
+            suffix = separator + separator.join(tokens[-suffix_length:]) + separator
+            if suffix in prefix:
+                tokens = tokens[:-suffix_length]
+                break
+        else:
+            break
+    material = " ".join(tokens)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +111,12 @@ class Database:
     def connection(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
+        connection.create_function(
+            "review_deduplication_key",
+            1,
+            _review_deduplication_key,
+            deterministic=True,
+        )
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
         try:
@@ -837,7 +865,7 @@ class Database:
         classification_version: str | None = None,
         suppress_duplicates: bool = True,
     ) -> list[Lead]:
-        """Return review-ready candidates, suppressing nearby exact-text duplicates."""
+        """Return review-ready candidates, suppressing nearby exact and extraction duplicates."""
         if limit is not None and limit < 1:
             raise ValueError("limit must be positive")
         if duplicate_window_hours < 1:
@@ -856,7 +884,8 @@ class Database:
                     JOIN facebook_posts AS prior_posts
                       ON prior_posts.id = prior_leads.facebook_post_id
                     WHERE prior_leads.drafted_response IS NOT NULL
-                      AND prior_posts.text_hash = posts.text_hash
+                      AND review_deduplication_key(prior_posts.post_text)
+                        = review_deduplication_key(posts.post_text)
                       AND (
                         prior_posts.discovered_at < posts.discovered_at
                         OR (

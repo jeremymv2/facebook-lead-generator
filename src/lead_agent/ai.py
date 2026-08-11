@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from lead_agent.config import Settings
 from lead_agent.models import FacebookPost, LeadIntent, normalize_post_text
 
-CLASSIFICATION_VERSION = "2026-08-09.v7"
+CLASSIFICATION_VERSION = "2026-08-10.v8"
 COMPANY_NAME = "JJ Miller & Co."
 COMPANY_WEBSITE = "https://jjmillerco.com"
 COMPANY_TEXT_PHONE = "502-528-0858"
@@ -734,6 +734,7 @@ class HeuristicAIProvider:
             for term in (
                 "commercial building",
                 "commercial property",
+                "commercial site",
                 "warehouse",
                 "industrial site",
                 "subcontractor",
@@ -865,10 +866,14 @@ def _infer_service(text: str, enabled_services: tuple[str, ...]) -> str | None:
         matches: list[tuple[int, int]] = []
         for term in terms:
             escaped_term = re.escape(term.strip()).replace(r"\ ", r"\s+")
-            matches.extend(
-                (match.start(), len(term.strip()))
-                for match in re.finditer(rf"(?<!\w){escaped_term}(?!\w)", text)
-            )
+            for match in re.finditer(rf"(?<!\w){escaped_term}(?!\w)", text):
+                if (
+                    service == "landscaping"
+                    and term in {"yard", "yards"}
+                    and re.match(r"\s+signs?\b", text[match.end() :])
+                ):
+                    continue
+                matches.append((match.start(), len(term.strip())))
         if not matches:
             continue
         earliest_position = min(position for position, _ in matches)
@@ -893,6 +898,7 @@ def _infer_intent(text: str, service: str | None) -> LeadIntent:
         r"\balready (?:found|hired) some(?:one|body)\b",
         r"\bno longer (?:need|looking)\b",
         r"\b(?:it|this) (?:is|has been) taken care of\b",
+        r"\bgot (?:it|this) taken care of\b",
         r"\b(?:i(?: am|['\u2019]m)|we(?: are|['\u2019]re)) all set\b",
     )
     if any(re.search(pattern, text) for pattern in resolved_patterns):
@@ -909,6 +915,8 @@ def _infer_intent(text: str, service: str | None) -> LeadIntent:
         )
     ):
         return LeadIntent.PRIVATE_CONTACT_ONLY
+    if _is_non_customer_solicitation(text):
+        return LeadIntent.UNRELATED
     if _is_employment_recruiting(text):
         return LeadIntent.UNRELATED
     if _is_competitor_advertisement(text, service):
@@ -930,6 +938,9 @@ def _infer_intent(text: str, service: str | None) -> LeadIntent:
             "property highlights",
             "off-market property",
             "off market property",
+            "cash-flow opportunity",
+            "cash flow opportunity",
+            "wholesale deal",
         )
     ):
         return LeadIntent.SELLING
@@ -986,10 +997,17 @@ def _is_competitor_advertisement(text: str, service: str | None) -> bool:
         return False
     strong_patterns = (
         r"\bi(?:['\u2019]m| am) (?:a |an )?(?:contractor|handyman|landscaper|painter)\b",
+        r"\bi(?:['\u2019]m| am) (?:the )?owner of .{0,100}\b(?:llc|company|services?|"
+        r"contracting|construction)\b",
+        r"\bwe(?:['\u2019]re| are) looking for (?:new )?clients\b",
+        r"\bdoes anybody need (?:any )?(?:type of )?(?:labor|yard work|help)\b",
+        r"\bi(?:['\u2019]m| am) (?:currently )?offering (?:free )?.{0,80}"
+        r"(?:inspections?|estimates?|services?)\b",
         r"\bwe offer\b",
         r"\bour services (?:include|are)\b",
         r"\b(?:call|text) (?:me|us) for (?:a )?(?:free )?(?:quote|estimate)\b",
         r"\b(?:give|contact|get with) us (?:a call|for (?:a )?(?:free )?(?:quote|estimate))\b",
+        r"\bget with us today for (?:a )?(?:free )?(?:quote|estimate)\b",
         r"\bcontact us to schedule\b",
         r"\bschedule your (?:free )?estimate\b",
         r"\bbook with me\b",
@@ -1037,11 +1055,23 @@ def _is_employment_recruiting(text: str) -> bool:
         r"\bpay (?:starts|starting) at \$?\d",
         r"\b\$?\d+(?:\.\d{2})?\s*(?:/|per)\s*(?:hr|hour)\b",
         r"\blooking (?:for|to add) .{0,80}\b(?:to join|employee|crew member)\b",
+        r"\bwe (?:are|['\u2019]re) currently looking for .{0,80}\bcommercial\b.{0,50}"
+        r"\binstallers?\b",
         r"\blooking for (?:a little )?help .{0,120}\bi have (?:a )?(?:pretty )?"
         r"(?:big|large) job to do\b",
         r"\blooking for (?:a little )?help .{0,120}\banyone interested\b",
     )
     return any(re.search(pattern, text) for pattern in recruiting_patterns)
+
+
+def _is_non_customer_solicitation(text: str) -> bool:
+    patterns = (
+        r"\bsmall business monday\b.{0,400}\b(?:banners?|yard signs?|business cards?|magnets)\b",
+        r"\bif you own .{0,180}\bbusiness\b.{0,120}\b(?:drop|share|leave) your "
+        r"(?:information|info|details)\b",
+        r"\bpackage\b.{0,180}\b(?:belongs to|address label|not (?:anything )?i ordered)\b",
+    )
+    return any(re.search(pattern, text) for pattern in patterns)
 
 
 def _infer_location(text: str, service_area: str) -> tuple[str | None, int]:
