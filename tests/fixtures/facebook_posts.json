@@ -233,5 +233,60 @@
     "name": "backlog_property_listing_seeking_investor_buyers",
     "text": "Looking for any investors wanting to buy close to the Red River Gorge. The house has quartz countertops, engineered hardwood floors, marble tile, three bedrooms, three bathrooms, and sits on 3.05 acres. A must see. Send me a message for a private showing.",
     "expected": {"intent": "selling", "maximum_score": 10}
+  },
+  {
+    "name": "precision_lawn_company_route_advertisement",
+    "text": "My company Example Lawn Service just added another route serving Shively and Valley Station. If you're in need of a service provider, we'd be honored to earn your business. Check us out at examplelawnservice.com or text [phone] to set up service.",
+    "expected": {"service": "landscaping", "intent": "competitor_advertisement", "maximum_score": 10, "maximum_relevance_score": 20}
+  },
+  {
+    "name": "precision_floor_transformation_showcase_advertisement",
+    "text": "Another floor transformation complete! Clean installation, quality work, and attention to every detail. Louisville and surrounding areas. [phone] Example Flooring LLC. Free estimates! #louisvilleky #flooring #flooringinstallation #HomeImprovement",
+    "expected": {"service": "flooring", "intent": "competitor_advertisement", "maximum_score": 10, "maximum_relevance_score": 20}
+  },
+  {
+    "name": "precision_turnkey_investor_property_listing",
+    "text": "EXAMPLE TRACE DR TURNKEY! Looking for a low-hassle Louisville opportunity? This property needs light updating and could be ready to hit the market. 1234 Example Trace Dr, Louisville, KY. Roof 1 yr, HVAC 1 yr, water heater 15+ yrs. Great fit for an end buyer and potential opportunity for an agent/investor to capture additional equity.",
+    "expected": {"intent": "selling", "maximum_score": 10, "maximum_relevance_score": 20}
+  },
+  {
+    "name": "precision_tree_installation_price_advertisement",
+    "text": "Get your fast-growing privacy trees for a wind and noise block. Special price with ten-tree minimum. Three-foot trees planted $50 and five-foot trees planted $75. Free stump and tree-removal estimates, fence-row clearing, and forestry mulching. Estimates are free. [phone] Fully insured and licensed.",
+    "expected": {"intent": "competitor_advertisement", "maximum_score": 10, "maximum_relevance_score": 20}
+  },
+  {
+    "name": "precision_donation_request_with_trade_materials",
+    "text": "We're looking for donations for this year's trail. Needed items include burlap, 2x4s, plywood, fencing, sealant, and floodlights. You can also send monetary donations by Venmo, Cash App, or PayPal.",
+    "expected": {"intent": "unrelated", "maximum_score": 10, "maximum_relevance_score": 20}
+  },
+  {
+    "name": "precision_third_party_construction_company_advertisement",
+    "text": "I'm making this post for my wife. She owns Example Construction, a fully licensed and insured carpentry and remodeling company. Please consider her small business. Estimates are always free and can be booked on our website. She specializes in decks, fences, porches, additions, windows, built-ins, remodeling, and painting. Website: www.exampleconstruction.com",
+    "expected": {"intent": "competitor_advertisement", "maximum_score": 10, "maximum_relevance_score": 20}
+  },
+  {
+    "name": "precision_reverse_yard_work_solicitation",
+    "text": "Anyone needing yard-cut work done? Bush trimming, fence-line clearing, gutter cleanout, moving, or haul-offs. Call Example Provider; he's giving free estimates. Great price and great work. [phone]",
+    "expected": {"service": "landscaping", "intent": "competitor_advertisement", "maximum_score": 10, "maximum_relevance_score": 20}
+  },
+  {
+    "name": "precision_lawn_showcase_with_service_menu",
+    "text": "That's how we do it over here the right way. In need of lawn care, landscaping, pressure washing, junk removal, or large-item pickup and drop-off? Call/text [phone]. #ExampleLawnCareService",
+    "expected": {"service": "landscaping", "intent": "competitor_advertisement", "maximum_score": 10, "maximum_relevance_score": 20}
+  },
+  {
+    "name": "precision_customer_phone_and_free_estimate_guardrail",
+    "text": "I need someone to repair my deck in Louisville. Text me at [phone] with a free estimate if you're available this week.",
+    "expected": {"service": "decks", "intent": "hiring", "minimum_score": 80}
+  },
+  {
+    "name": "precision_customer_mower_request_guardrail",
+    "text": "Need help because my riding mower is down and funds are tight. Can anyone mow my yard before the storm hits?",
+    "expected": {"service": "landscaping", "intent": "hiring", "minimum_score": 75}
+  },
+  {
+    "name": "precision_property_manager_handyman_request_guardrail",
+    "text": "I am a property manager looking for a handyman with general liability and workers comp. I have repair jobs ready now and would like to start working together.",
+    "expected": {"service": "handyman", "intent": "hiring", "minimum_score": 75}
   }
 ]

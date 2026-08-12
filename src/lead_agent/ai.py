@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from lead_agent.config import Settings
 from lead_agent.models import FacebookPost, LeadIntent, normalize_post_text
 
-CLASSIFICATION_VERSION = "2026-08-10.v9"
+CLASSIFICATION_VERSION = "2026-08-12.v10"
 COMPANY_NAME = "JJ Miller & Co."
 COMPANY_WEBSITE = "https://jjmillerco.com"
 COMPANY_TEXT_PHONE = "502-528-0858"
@@ -223,7 +223,11 @@ class GeminiAIProvider:
             "score at most 10. Posts that prohibit comments or require private messages must use "
             "private_contact_only intent and score at most 10. Advice-only posts must score at "
             "most 40. Employment recruiting and job advertisements are unrelated, even when "
-            "they name an enabled trade. Property listings, sales, competitor advertisements, "
+            "they name an enabled trade. A trade word alone is not customer demand. Require the "
+            "author to request a provider, recommendation, quote, or work for their property "
+            "before using hiring or recommendation intent. Business promotions, completed-project "
+            "showcases, service menus, prices, phone or website calls to action, free-estimate "
+            "offers, property listings, sales, donation requests, competitor advertisements, "
             "spam, and unrelated posts must score at most 10. Explicit locations "
             "outside the service area need a geographic score of 20 or less.\n\n"
             + json.dumps(payload, sort_keys=True)
@@ -744,7 +748,14 @@ class HeuristicAIProvider:
             )
         )
         is_spam = any(term in folded for term in ("click this link", "guaranteed income", "crypto"))
-        relevance_score = 95 if service is not None else 10
+        low_value_intents = {
+            LeadIntent.RESOLVED,
+            LeadIntent.PRIVATE_CONTACT_ONLY,
+            LeadIntent.SELLING,
+            LeadIntent.COMPETITOR_ADVERTISEMENT,
+            LeadIntent.UNRELATED,
+        }
+        relevance_score = 95 if service is not None and intent not in low_value_intents else 10
         urgency_score = _infer_urgency(folded, intent)
         confidence = 0.92 if service is not None or intent is not LeadIntent.UNRELATED else 0.82
         overall_score = round(
@@ -755,13 +766,7 @@ class HeuristicAIProvider:
         )
         if is_spam:
             overall_score = min(overall_score, 5)
-        elif intent in {
-            LeadIntent.RESOLVED,
-            LeadIntent.PRIVATE_CONTACT_ONLY,
-            LeadIntent.SELLING,
-            LeadIntent.COMPETITOR_ADVERTISEMENT,
-            LeadIntent.UNRELATED,
-        }:
+        elif intent in low_value_intents:
             overall_score = min(overall_score, 10)
         elif intent is LeadIntent.ADVICE or not is_residential:
             overall_score = min(overall_score, 40)
@@ -923,33 +928,10 @@ def _infer_intent(text: str, service: str | None) -> LeadIntent:
         return LeadIntent.UNRELATED
     if _is_employment_recruiting(text):
         return LeadIntent.UNRELATED
+    if _is_sale_listing(text):
+        return LeadIntent.SELLING
     if _is_competitor_advertisement(text, service):
         return LeadIntent.COMPETITOR_ADVERTISEMENT
-    if any(
-        term in text
-        for term in (
-            "for sale",
-            "selling",
-            "price is $",
-            "open house",
-            "price improvement",
-            "zillow.com/homedetails",
-            "tenant in place",
-            "investment property",
-            "rental income",
-            "lease through",
-            "income-producing property",
-            "property highlights",
-            "off-market property",
-            "off market property",
-            "cash-flow opportunity",
-            "cash flow opportunity",
-            "wholesale deal",
-            "investors wanting to buy",
-            "private showing",
-        )
-    ):
-        return LeadIntent.SELLING
     if any(
         term in text
         for term in (
@@ -982,20 +964,86 @@ def _infer_intent(text: str, service: str | None) -> LeadIntent:
         )
     ):
         return LeadIntent.RECOMMENDATION
-    if any(
-        term in text
-        for term in (
-            "looking for someone",
-            "need someone",
-            "need a ",
-            "need of a ",
-            "estimate",
-        )
-    ) or (
-        service is not None and re.search(r"\b(?:looking for|need|seeking|iso)\b", text) is not None
-    ):
+    if _has_customer_demand(text, service):
         return LeadIntent.HIRING
     return LeadIntent.UNRELATED if service is None else LeadIntent.ADVICE
+
+
+def _has_customer_demand(text: str, service: str | None) -> bool:
+    """Require evidence that the author is buying work, not merely naming a trade."""
+    if service is None:
+        return False
+    patterns = (
+        r"^\s*(?:looking for|need|seeking|iso)\b",
+        r"\b(?:i|we)(?:['\u2019](?:m|re)| am| are)?\s+"
+        r"(?:looking for|need|want|seeking|trying to find)\b",
+        r"\b(?:looking for|seeking|iso) (?:someone|somebody|a|an)\b",
+        r"\bneed (?:someone|somebody|a|an|my|our|the|help|estimates?|quotes?)\b",
+        r"\b(?:can|could) anyone (?:help|recommend)\b",
+        r"\banyone know\b",
+        r"\bwho (?:can|does|do you use|are you using)\b",
+        r"\b(?:recommendations?|referrals?)\b",
+        r"\bany good .{0,80}\b(?:professionals?|contractors?|handymen|handyman|roofers?|"
+        r"painters?|installers?|landscapers?)\b",
+        r"\bneed\b.{0,80}\b(?:cleaned|cut|mowed|repaired|fixed|installed|replaced|"
+        r"painted|remodeled|removed|built|quoted)\b",
+    )
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _has_strong_customer_perspective(text: str) -> bool:
+    """Identify buyer language strong enough to resist weak advertising signals."""
+    patterns = (
+        r"^\s*(?:looking for|need|seeking|iso)\b",
+        r"\b(?:i|we)(?:['\u2019](?:m|re)| am| are)?\s+"
+        r"(?:looking for|need|want|seeking|trying to find)\b",
+        r"\b(?:my|our) (?:home|house|property|yard|lawn|deck|roof|room|garage|"
+        r"bathroom|kitchen)\b",
+    )
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _is_sale_listing(text: str) -> bool:
+    direct_terms = (
+        "for sale",
+        "selling",
+        "price is $",
+        "open house",
+        "price improvement",
+        "zillow.com/homedetails",
+        "tenant in place",
+        "investment property",
+        "rental income",
+        "lease through",
+        "income-producing property",
+        "property highlights",
+        "off-market property",
+        "off market property",
+        "cash-flow opportunity",
+        "cash flow opportunity",
+        "wholesale deal",
+        "investors wanting to buy",
+        "private showing",
+    )
+    if any(term in text for term in direct_terms):
+        return True
+    market_signals = (
+        r"\bturnkey\b",
+        r"\b(?:end buyer|agent/investor|investor buyer)\b",
+        r"\b(?:capture|additional) equity\b",
+        r"\b(?:hit|bring|coming to) the market\b",
+        r"\b(?:low-hassle|real estate|louisville) opportunity\b",
+    )
+    property_signals = (
+        r"\bthis property\b",
+        r"\b\d{3,5}\s+[a-z0-9 .'-]+\s(?:dr|drive|st|street|ave|avenue|rd|road|"
+        r"ln|lane|blvd|boulevard)\b",
+        r"\b(?:roof|hvac|wh|water heater)\s+\d+\+?\s*(?:yr|yrs|year|years)\b",
+        r"\b(?:bedrooms?|bathrooms?|sq\.?\s*ft|square feet|acres?)\b",
+    )
+    return any(re.search(pattern, text) for pattern in market_signals) and any(
+        re.search(pattern, text) for pattern in property_signals
+    )
 
 
 def _is_competitor_advertisement(text: str, service: str | None) -> bool:
@@ -1005,8 +1053,16 @@ def _is_competitor_advertisement(text: str, service: str | None) -> bool:
         r"\bi(?:['\u2019]m| am) (?:a |an )?(?:contractor|handyman|landscaper|painter)\b",
         r"\bi(?:['\u2019]m| am) (?:the )?owner of .{0,100}\b(?:llc|company|services?|"
         r"contracting|construction)\b",
+        r"\b(?:my|our) company\b.{0,180}\b(?:service|route|clients?|customers?|business)\b",
+        r"\b(?:he|she) owns .{0,100}\b(?:llc|company|services?|contracting|construction)\b",
+        r"\bplease consider (?:his|her|our|my|their) (?:small )?business\b",
         r"\bwe(?:['\u2019]re| are) looking for (?:new )?clients\b",
+        r"\b(?:i|we)(?:['\u2019]m|['\u2019]re| am| are)? (?:looking for|need) "
+        r"(?:more |new )?(?:clients|customers|work|jobs)\b",
+        r"^\s*looking for (?:more |new )?(?:clients|customers|work|jobs)\b",
         r"\bdoes anybody need (?:any )?(?:type of )?(?:labor|yard work|help)\b",
+        r"\banyone needing .{0,100}\b(?:work|services?|done)\b",
+        r"^\s*(?:need|looking for) .{0,160}\?\s*(?:call|text|contact|message|book)\b",
         r"\bi(?:['\u2019]m| am) (?:currently )?offering (?:free )?.{0,80}"
         r"(?:inspections?|estimates?|services?)\b",
         r"\bwe offer\b",
@@ -1024,6 +1080,10 @@ def _is_competitor_advertisement(text: str, service: str | None) -> bool:
         r"\bwe (?:build|install|repair|replace|paint|remodel)\b",
         r"\bcontact us (?:today|for|to)\b",
         r"\bwe(?:['\u2019]d| would) love (?:the opportunity )?to earn your business\b",
+        r"\bwe(?:['\u2019]d| would) be .{0,40}\bearn (?:your|you) business\b",
+        r"\b(?:set up|schedule|book) service\b",
+        r"\b(?:another|latest|recent) .{0,80}\b(?:transformation|installation|project|job) "
+        r"(?:is )?complete\b",
         r"\bwe(?:['\u2019]ll| will) (?:build|install|repair|replace|paint|remodel)\b",
         r"\bwe only carry\b",
         r"\bcall or text today\b",
@@ -1035,8 +1095,14 @@ def _is_competitor_advertisement(text: str, service: str | None) -> bool:
         return True
     provider_signals = (
         r"\b(?:i|we) (?:offer|provide|specialize in)\b",
+        r"\b(?:my|our|his|her) (?:company|business)\b",
+        r"\b(?:owns?|owner of|own and operate)\b.{0,100}\b(?:llc|company|construction|"
+        r"contracting|services?)\b",
+        r"\b(?:llc|inc\.?|construction|contracting)\b",
         r"\bwe (?:cleaned|completed|corrected|reinforced|replaced|installed|built|painted|"
         r"stained|pressure washed|sanded|refinished|renovated|restored)\b",
+        r"\b(?:transformation|installation|project|job) complete\b",
+        r"\b(?:clean installation|quality work|attention to (?:every )?detail)\b",
         r"\b(?:he|she|they|the (?:customer|client|homeowner)) (?:just )?needed\b",
         r"\b(?:now )?booking\b",
         r"\bresults speak for themselves\b",
@@ -1044,13 +1110,21 @@ def _is_competitor_advertisement(text: str, service: str | None) -> bool:
         r"\b(?:call|text|contact|message)\b.{0,100}\b(?:today|estimate|quote|schedule|"
         r"let['\u2019]s|get started)\b",
         r"\b(?:call(?:\s+or\s+|/)text|call|text)\b.{0,40}(?:\d{3}|\[phone\])",
+        r"(?<!\d)(?:\+?1[-.\s]?)?\d{3}[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)",
+        r"\b(?:https?://|www\.)?[a-z0-9][a-z0-9-]*\.(?:com|net|org)\b",
         r"\b(?:licensed|fully insured|licensed and insured)\b",
         r"\b(?:free estimates?|references available|openings available)\b",
+        r"\b(?:estimates? (?:are )?(?:always )?free|free .{0,40} estimates?)\b",
+        r"\b(?:special|starting|package) price\b|\$\s*\d+",
+        r"#\w*(?:lawn|landscap|floor|contract|construction|homeimprovement)\w*",
         r"\byour (?:home|property|project) could be next\b",
         r"\bno job (?:is )?too (?:big|small)\b",
         r"\b(?:call|text|dm|message) (?:me|us)\b",
     )
-    return sum(bool(re.search(pattern, text)) for pattern in provider_signals) >= 2
+    signal_count = sum(bool(re.search(pattern, text)) for pattern in provider_signals)
+    if _has_strong_customer_perspective(text):
+        return False
+    return signal_count >= 2
 
 
 def _is_employment_recruiting(text: str) -> bool:
@@ -1078,6 +1152,9 @@ def _is_non_customer_solicitation(text: str) -> bool:
         r"\bif you own .{0,180}\bbusiness\b.{0,120}\b(?:drop|share|leave) your "
         r"(?:information|info|details)\b",
         r"\bpackage\b.{0,180}\b(?:belongs to|address label|not (?:anything )?i ordered)\b",
+        r"\b(?:looking for|accepting|seeking) (?:monetary )?donations?\b",
+        r"\bmonetary donations?\b",
+        r"\bvenmo\b.{0,180}\b(?:cash ?app|paypal)\b",
     )
     return any(re.search(pattern, text) for pattern in patterns)
 

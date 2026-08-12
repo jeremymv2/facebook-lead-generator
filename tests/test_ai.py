@@ -104,6 +104,10 @@ def test_heuristic_provider_matches_classification_fixtures() -> None:
             assert result.overall_score >= cast(int, expected["minimum_score"]), fixture["name"]
         if "maximum_score" in expected:
             assert result.overall_score <= cast(int, expected["maximum_score"]), fixture["name"]
+        if "maximum_relevance_score" in expected:
+            assert result.relevance_score <= cast(int, expected["maximum_relevance_score"]), (
+                fixture["name"]
+            )
         if "maximum_geographic_score" in expected:
             assert result.geographic_score <= cast(int, expected["maximum_geographic_score"]), (
                 fixture["name"]
