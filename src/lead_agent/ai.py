@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from lead_agent.config import Settings
 from lead_agent.models import FacebookPost, LeadIntent, normalize_post_text
 
-CLASSIFICATION_VERSION = "2026-08-12.v10"
+CLASSIFICATION_VERSION = "2026-08-12.v11"
 COMPANY_NAME = "JJ Miller & Co."
 COMPANY_WEBSITE = "https://jjmillerco.com"
 COMPANY_TEXT_PHONE = "502-528-0858"
@@ -227,8 +227,9 @@ class GeminiAIProvider:
             "author to request a provider, recommendation, quote, or work for their property "
             "before using hiring or recommendation intent. Business promotions, completed-project "
             "showcases, service menus, prices, phone or website calls to action, free-estimate "
-            "offers, property listings, sales, donation requests, competitor advertisements, "
-            "spam, and unrelated posts must score at most 10. Explicit locations "
+            "offers, job-seeker posts, material-shopping questions, unsupported trade requests, "
+            "property listings, sales, donation requests, competitor advertisements, spam, and "
+            "unrelated posts must score at most 10. Explicit locations "
             "outside the service area need a geographic score of 20 or less.\n\n"
             + json.dumps(payload, sort_keys=True)
         )
@@ -926,7 +927,11 @@ def _infer_intent(text: str, service: str | None) -> LeadIntent:
         return LeadIntent.PRIVATE_CONTACT_ONLY
     if _is_non_customer_solicitation(text):
         return LeadIntent.UNRELATED
+    if _is_job_seeker(text):
+        return LeadIntent.UNRELATED
     if _is_employment_recruiting(text):
+        return LeadIntent.UNRELATED
+    if _is_unsupported_trade_request(text, service):
         return LeadIntent.UNRELATED
     if _is_sale_listing(text):
         return LeadIntent.SELLING
@@ -949,7 +954,11 @@ def _infer_intent(text: str, service: str | None) -> LeadIntent:
             "does this timeframe sound realistic",
             "what would you expect",
             "not looking for legal advice",
+            "contractor pricing",
         )
+    ) or re.search(
+        r"\bwhere(?:['\u2019]s| is| are) (?:the )?(?:best )?(?:place|location) to buy\b",
+        text,
     ):
         return LeadIntent.ADVICE
     if any(
@@ -1046,6 +1055,25 @@ def _is_sale_listing(text: str) -> bool:
     )
 
 
+def _is_job_seeker(text: str) -> bool:
+    patterns = (
+        r"\blooking for (?:a )?(?:(?:part|full)[- ]?time )?job\b",
+        r"\banyone looking for (?:a )?helper\b",
+        r"\b(?:i am|i['\u2019]m) (?:more than )?willing to do\b.{0,160}"
+        r"\b(?:cleaning|yard work|moving|labor)\b",
+        r"\b(?:need|want) (?:a |some )?(?:part[- ]?time |full[- ]?time )?(?:job|work)\b",
+    )
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _is_unsupported_trade_request(text: str, service: str | None) -> bool:
+    """Reject explicit trade requests that only matched an incidental approved service."""
+    return (
+        re.search(r"\b(?:electrician|electrical contractor|electrical jobs?)\b", text) is not None
+        and service != "electrical_fixtures"
+    )
+
+
 def _is_competitor_advertisement(text: str, service: str | None) -> bool:
     if service is None:
         return False
@@ -1063,6 +1091,8 @@ def _is_competitor_advertisement(text: str, service: str | None) -> bool:
         r"\bdoes anybody need (?:any )?(?:type of )?(?:labor|yard work|help)\b",
         r"\banyone needing .{0,100}\b(?:work|services?|done)\b",
         r"^\s*(?:need|looking for) .{0,160}\?\s*(?:call|text|contact|message|book)\b",
+        r"^\s*need .{0,100}\?.{0,500}\b(?:offers?|call|text|free estimates?|locally owned)\b",
+        r"\b(?:[a-z0-9&.'-]+\s+){1,5}(?:llc|services?|removal|contracting) offers\b",
         r"\bi(?:['\u2019]m| am) (?:currently )?offering (?:free )?.{0,80}"
         r"(?:inspections?|estimates?|services?)\b",
         r"\bwe offer\b",
@@ -1084,6 +1114,9 @@ def _is_competitor_advertisement(text: str, service: str | None) -> bool:
         r"\b(?:set up|schedule|book) service\b",
         r"\b(?:another|latest|recent) .{0,80}\b(?:transformation|installation|project|job) "
         r"(?:is )?complete\b",
+        r"\bout (?:cutting|mowing) .{0,80}\bi have time for (?:a )?(?:couple|few) more\b",
+        r"\b(?:we|i) can build it\b",
+        r"\bquality .{0,80}\bthat lasts\b.{0,120}\bfree estimates?\b",
         r"\bwe(?:['\u2019]ll| will) (?:build|install|repair|replace|paint|remodel)\b",
         r"\bwe only carry\b",
         r"\bcall or text today\b",
@@ -1116,10 +1149,13 @@ def _is_competitor_advertisement(text: str, service: str | None) -> bool:
         r"\b(?:free estimates?|references available|openings available)\b",
         r"\b(?:estimates? (?:are )?(?:always )?free|free .{0,40} estimates?)\b",
         r"\b(?:special|starting|package) price\b|\$\s*\d+",
+        r"\b(?:fair|great) prices?\b",
+        r"\b(?:same[- ]day service|locally owned)\b",
         r"#\w*(?:lawn|landscap|floor|contract|construction|homeimprovement)\w*",
         r"\byour (?:home|property|project) could be next\b",
         r"\bno job (?:is )?too (?:big|small)\b",
         r"\b(?:call|text|dm|message) (?:me|us)\b",
+        r"\bmessage me\b",
     )
     signal_count = sum(bool(re.search(pattern, text)) for pattern in provider_signals)
     if _has_strong_customer_perspective(text):
