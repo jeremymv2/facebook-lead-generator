@@ -35,7 +35,7 @@ from lead_agent.posting import (
 )
 
 VALID_RESPONSE = (
-    "JJ Miller & Co. handles deck repairs. Free estimates. "
+    "JJ Miller & Co. handles deck repairs. Licensed & Insured. Free estimates. "
     "Text me at 502-528-0858. https://jjmillerco.com"
 )
 

@@ -22,7 +22,7 @@ from lead_agent.database import Database
 from lead_agent.models import AuditEvent, FacebookPost, Lead, LeadIntent, LeadStatus
 
 VALID_DRAFT = (
-    "JJ Miller & Co. can help with your deck project. Free estimates. "
+    "JJ Miller & Co. can help with your deck project. Licensed & Insured. Free estimates. "
     "Text me at 502-528-0858 or visit https://jjmillerco.com."
 )
 

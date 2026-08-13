@@ -8,7 +8,8 @@ from lead_agent.feedback import export_regression_fixtures, sanitize_fixture_tex
 from lead_agent.models import FacebookPost, Lead, LeadIntent, LeadStatus, RejectionReason
 
 VALID_DRAFT = (
-    "JJ Miller & Co. provides free estimates for carpentry. We'd be happy to help. "
+    "JJ Miller & Co. provides free estimates for carpentry. Licensed & Insured. "
+    "We'd be happy to help. "
     "Text me at 502-528-0858. https://jjmillerco.com"
 )
 

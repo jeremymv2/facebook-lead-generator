@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from lead_agent.config import Settings
 from lead_agent.models import FacebookPost, LeadIntent, normalize_post_text
 
-CLASSIFICATION_VERSION = "2026-08-12.v11"
+CLASSIFICATION_VERSION = "2026-08-12.v12"
 COMPANY_NAME = "JJ Miller & Co."
 COMPANY_WEBSITE = "https://jjmillerco.com"
 COMPANY_TEXT_PHONE = "502-528-0858"
@@ -110,6 +110,8 @@ class DraftResponse(BaseModel):
             )
         if "we do everything" in folded or "call us now" in folded:
             raise ValueError("draft contains prohibited generic promotional language")
+        if "licensed & insured" not in folded:
+            raise ValueError("draft must state Licensed & Insured")
         return normalized
 
 
@@ -228,6 +230,7 @@ class GeminiAIProvider:
             "before using hiring or recommendation intent. Business promotions, completed-project "
             "showcases, service menus, prices, phone or website calls to action, free-estimate "
             "offers, job-seeker posts, material-shopping questions, unsupported trade requests, "
+            "mowing-only requests, recurring lawn-care requests, "
             "property listings, sales, donation requests, competitor advertisements, spam, and "
             "unrelated posts must score at most 10. Explicit locations "
             "outside the service area need a geographic score of 20 or less.\n\n"
@@ -270,10 +273,11 @@ class GeminiAIProvider:
             "Use variation_seed to vary the wording, opening, and sentence structure instead of "
             "defaulting to one stock response. "
             "Do not ask whether the customer needs help or restate an obvious request as a "
-            "rhetorical question. Use natural customer-facing trade language: describe mowing, "
-            "grass, or yard work as lawn services rather than the broad category landscaping. "
-            "Acknowledge the specific project without inventing prices, availability, licenses, or "
-            "facts. Identify JJ Miller & Co., state that estimates are free, include the exact "
+            "rhetorical question. Landscaping drafts must describe the work as landscaping, "
+            "not lawn care or lawn services. Acknowledge the specific project without inventing "
+            "prices, availability, or other facts. Identify JJ Miller & Co., include the exact "
+            "phrase "
+            '"Licensed & Insured," state that estimates are free, include the exact '
             "URL "
             f"{COMPANY_WEBSITE}, and use this exact primary call to action: Text me at "
             f"{COMPANY_TEXT_PHONE}. Do not ask the customer to message on Facebook. Avoid "
@@ -705,19 +709,6 @@ _DRAFT_SERVICE_NAMES: dict[str, str] = {
     "project_coordination": "project planning and coordination",
 }
 
-_LAWN_SERVICE_TERMS = (
-    "yard",
-    "yards",
-    "lawn",
-    "grass",
-    "mow",
-    "mowing",
-    "bush",
-    "bushes",
-    "weed",
-    "weeds",
-)
-
 
 class HeuristicAIProvider:
     """Deterministic offline provider for safe development and regression testing."""
@@ -797,7 +788,7 @@ class HeuristicAIProvider:
         del context
         if classification.service_category is None:
             raise AIResponseError("Cannot draft a response without an enabled service")
-        service = _draft_service_name(classification.service_category, post.post_text)
+        service = _draft_service_name(classification.service_category)
         variants = (
             f"JJ Miller & Co. provides free estimates for {service}. We'd be happy to help. Text "
             f"me at {COMPANY_TEXT_PHONE} or visit {COMPANY_WEBSITE}.",
@@ -825,13 +816,10 @@ class HeuristicAIProvider:
             f"text me at {COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
         )
         index = int(post.text_hash[:8], 16) % len(variants)
-        return DraftResponse(response=variants[index])
+        return DraftResponse(response=f"{variants[index]} Licensed & Insured.")
 
 
-def _draft_service_name(service_category: str, post_text: str) -> str:
-    folded = post_text.casefold()
-    if service_category == "landscaping" and any(term in folded for term in _LAWN_SERVICE_TERMS):
-        return "lawn services"
+def _draft_service_name(service_category: str) -> str:
     return _DRAFT_SERVICE_NAMES.get(service_category, service_category.replace("_", " "))
 
 
@@ -937,6 +925,8 @@ def _infer_intent(text: str, service: str | None) -> LeadIntent:
         return LeadIntent.SELLING
     if _is_competitor_advertisement(text, service):
         return LeadIntent.COMPETITOR_ADVERTISEMENT
+    if _is_lawn_care_only_request(text, service):
+        return LeadIntent.UNRELATED
     if any(
         term in text
         for term in (
@@ -998,6 +988,41 @@ def _has_customer_demand(text: str, service: str | None) -> bool:
         r"painted|remodeled|removed|built|quoted)\b",
     )
     return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _is_lawn_care_only_request(text: str, service: str | None) -> bool:
+    """Keep landscaping projects while excluding mowing and recurring lawn maintenance."""
+    if service != "landscaping":
+        return False
+    lawn_care_patterns = (
+        r"\blawn care\b",
+        r"\blawn service(?:s)?\b",
+        r"\blawn (?:company|guy|person|provider)\b",
+        r"\bmow(?:ed|er|ers|ing)?\b",
+        r"\b(?:cut|cutting) (?:the |my |our )?grass\b",
+        r"\bgrass (?:cut|cutting|mowed|mowing)\b",
+        r"\b(?:yard|lawn) (?:cut|mowed|mowing)\b",
+        r"\bweed\s?eat(?:er|ing)?\b",
+    )
+    if not any(re.search(pattern, text) for pattern in lawn_care_patterns):
+        return False
+    landscaping_project_patterns = (
+        r"\blandscap(?:e|er|ing)\b",
+        r"\b(?:landscape|garden|flower) (?:design|installation|bed|beds)\b",
+        r"\b(?:install|installation of|put in|replace) (?:new )?sod\b",
+        r"\b(?:plant|tree|shrub) (?:installation|planting|removal)\b",
+        r"\b(?:mulch|decorative rock|hardscap(?:e|ing)|pavers?|retaining wall|grading|"
+        r"drainage|yard cleanup|property cleanup)\b",
+    )
+    if any(re.search(pattern, text) for pattern in landscaping_project_patterns):
+        return False
+    other_project_patterns = (
+        r"\bpressure wash(?:ing)?\b",
+        r"\bjunk removal\b",
+        r"\b(?:repair|install|replace|build) (?:a |the |my |our )?"
+        r"(?:fence|deck|patio|porch)\b",
+    )
+    return not any(re.search(pattern, text) for pattern in other_project_patterns)
 
 
 def _has_strong_customer_perspective(text: str) -> bool:
@@ -1115,6 +1140,8 @@ def _is_competitor_advertisement(text: str, service: str | None) -> bool:
         r"\b(?:another|latest|recent) .{0,80}\b(?:transformation|installation|project|job) "
         r"(?:is )?complete\b",
         r"\bout (?:cutting|mowing) .{0,80}\bi have time for (?:a )?(?:couple|few) more\b",
+        r"\bwe can get (?:anything|everything|it|that) .{0,80}\btaken care of\b",
+        r"\blet us take care of\b",
         r"\b(?:we|i) can build it\b",
         r"\bquality .{0,80}\bthat lasts\b.{0,120}\bfree estimates?\b",
         r"\bwe(?:['\u2019]ll| will) (?:build|install|repair|replace|paint|remodel)\b",

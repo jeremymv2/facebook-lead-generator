@@ -22,11 +22,11 @@ from lead_agent.models import (
 )
 
 VALID_DRAFT = (
-    "JJ Miller & Co. can help with your deck project. Free estimates. "
+    "JJ Miller & Co. can help with your deck project. Licensed & Insured. Free estimates. "
     "Text me at 502-528-0858 or visit https://jjmillerco.com."
 )
 VALID_EDIT = (
-    "JJ Miller & Co. handles deck repairs. Free estimates. "
+    "JJ Miller & Co. handles deck repairs. Licensed & Insured. Free estimates. "
     "Text me at 502-528-0858. https://jjmillerco.com"
 )
 
