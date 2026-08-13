@@ -128,21 +128,25 @@ def test_heuristic_draft_is_direct_and_locally_validated() -> None:
     assert "https://jjmillerco.com" in draft.response
     assert "Text me at 502-528-0858" in draft.response
     assert "free estimate" in draft.response.casefold()
+    assert "Licensed & Insured" in draft.response
     assert "message" not in draft.response.casefold()
     assert len(draft.response) <= 300
 
 
-def test_heuristic_lawn_draft_uses_natural_service_language() -> None:
+def test_heuristic_landscaping_draft_uses_requested_service_language() -> None:
     provider = HeuristicAIProvider()
-    source = post("Need someone to come quote our yard for mowing in Louisville.")
+    source = post(
+        "Looking for landscaping design with new pavers, plants, and mulch in Louisville."
+    )
     classification = provider.classify_post(source, context())
 
     draft = provider.draft_response(source, classification, context())
 
     assert classification.service_category == "landscaping"
     assert "free estimate" in draft.response.casefold()
-    assert "lawn services" in draft.response.casefold()
-    assert "landscaping" not in draft.response.casefold()
+    assert "landscaping" in draft.response.casefold()
+    assert "lawn services" not in draft.response.casefold()
+    assert "Licensed & Insured" in draft.response
     assert "need help" not in draft.response.casefold()
 
 
@@ -229,7 +233,7 @@ def test_heuristic_suppresses_realistic_contractor_advertisements(text: str) -> 
     assert classification.overall_score <= 10
 
 
-def test_heuristic_recognizes_desperate_mowing_company_request() -> None:
+def test_heuristic_excludes_mowing_only_request() -> None:
     classification = HeuristicAIProvider().classify_post(
         post(
             "NEED: I am in desperate need of a mowing company for three downtown properties. "
@@ -239,8 +243,8 @@ def test_heuristic_recognizes_desperate_mowing_company_request() -> None:
     )
 
     assert classification.service_category == "landscaping"
-    assert classification.intent is LeadIntent.RECOMMENDATION
-    assert classification.overall_score >= context().lead_threshold
+    assert classification.intent is LeadIntent.UNRELATED
+    assert classification.overall_score <= 10
 
 
 def test_heuristic_uses_repeated_project_terms_for_primary_service() -> None:
@@ -389,6 +393,7 @@ def test_heuristic_drafts_vary_by_stable_post_content() -> None:
         response = provider.draft_response(source, classification, context()).response
         drafts.add(response)
         openings.add(response.split(".", maxsplit=1)[0])
+        assert "Licensed & Insured" in response
 
     assert len(drafts) == 12
     assert len(openings) >= 6
@@ -472,6 +477,11 @@ def test_draft_rejects_missing_identity_and_promotional_spam() -> None:
             "502-528-0858. https://jjmillerco.com",
             "rhetorical",
         ),
+        (
+            "JJ Miller & Co. offers free estimates. Text me at 502-528-0858. "
+            "https://jjmillerco.com",
+            "Licensed & Insured",
+        ),
     ],
 )
 def test_draft_enforces_business_contact_and_voice_rules(response: str, error: str) -> None:
@@ -486,8 +496,9 @@ def test_gemini_provider_uses_structured_schemas_and_minimal_post_metadata() -> 
             json.dumps(
                 {
                     "response": (
-                        "JJ Miller & Co. can help with your deck project. Free estimates. Text me "
-                        "at 502-528-0858 or visit https://jjmillerco.com."
+                        "JJ Miller & Co. can help with your deck project. Licensed & Insured. "
+                        "Free estimates. Text me at 502-528-0858 or visit "
+                        "https://jjmillerco.com."
                     )
                 }
             ),
@@ -503,7 +514,8 @@ def test_gemini_provider_uses_structured_schemas_and_minimal_post_metadata() -> 
     assert "JJ Miller & Co." in draft.response
     assert len(transport.calls) == 2
     assert "post_text" in cast(str, transport.calls[0]["prompt"])
-    assert "lawn services" in cast(str, transport.calls[1]["prompt"])
+    assert "not lawn care or lawn services" in cast(str, transport.calls[1]["prompt"])
+    assert "Licensed & Insured" in cast(str, transport.calls[1]["prompt"])
     assert "rhetorical question" in cast(str, transport.calls[1]["prompt"])
     assert "fixture-group" not in cast(str, transport.calls[0]["prompt"])
     assert "properties" in cast(dict[str, object], transport.calls[0]["schema"])

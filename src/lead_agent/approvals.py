@@ -289,8 +289,8 @@ class LocalApprovalService:
             return DraftResponse(response=response).response
         except (ValidationError, ValueError) as error:
             raise ApprovalValidationError(
-                "Response must satisfy the company identity, free-estimate, website, text, and "
-                "length rules"
+                "Response must satisfy the company identity, Licensed & Insured, free-estimate, "
+                "website, text, and length rules"
             ) from error
 
     def _record_event(

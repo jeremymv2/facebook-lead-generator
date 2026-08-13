@@ -650,7 +650,8 @@ def test_initialize_backfills_legacy_rejections_with_other_reason(tmp_path: Path
             intent=LeadIntent.HIRING,
             overall_score=90,
             drafted_response=(
-                "JJ Miller & Co. provides free estimates for deck work. We'd be happy to help. "
+                "JJ Miller & Co. provides free estimates for deck work. Licensed & Insured. "
+                "We'd be happy to help. "
                 "Text me at 502-528-0858. https://jjmillerco.com"
             ),
         )

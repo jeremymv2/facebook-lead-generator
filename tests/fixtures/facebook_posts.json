@@ -40,9 +40,9 @@
     "expected": {"service": "decks", "spam": true, "maximum_score": 5}
   },
   {
-    "name": "active_yard_work_with_incidental_fence",
+    "name": "mowing_only_request_is_out_of_scope",
     "text": "Need someone to mow two yards today, trim bushes, and remove weeds along the fence.",
-    "expected": {"service": "landscaping", "intent": "hiring", "minimum_score": 80}
+    "expected": {"service": "landscaping", "intent": "unrelated", "maximum_score": 10}
   },
   {
     "name": "resolved_yard_work_request",
@@ -280,9 +280,14 @@
     "expected": {"service": "decks", "intent": "hiring", "minimum_score": 80}
   },
   {
-    "name": "precision_customer_mower_request_guardrail",
+    "name": "precision_customer_mower_request_is_out_of_scope",
     "text": "Need help because my riding mower is down and funds are tight. Can anyone mow my yard before the storm hits?",
-    "expected": {"service": "landscaping", "intent": "hiring", "minimum_score": 75}
+    "expected": {"service": "landscaping", "intent": "unrelated", "maximum_score": 10}
+  },
+  {
+    "name": "precision_recurring_lawn_provider_request_is_out_of_scope",
+    "text": "My lawn guy is focusing on other work. Looking for someone for the rest of the year who can also cut back some overgrowth.",
+    "expected": {"service": "landscaping", "intent": "unrelated", "maximum_score": 10}
   },
   {
     "name": "precision_property_manager_handyman_request_guardrail",
@@ -323,6 +328,21 @@
     "name": "precision_short_welding_service_advertisement",
     "text": "Quality welding that lasts. Free estimates! Need a handrail, fence, or gate? We can build it. Professional welding, fair prices, free estimates.",
     "expected": {"service": "fencing", "intent": "competitor_advertisement", "maximum_score": 10, "maximum_relevance_score": 20}
+  },
+  {
+    "name": "precision_rhetorical_property_lawn_service_advertisement",
+    "text": "Any realtors or business owners out there that need help with their property? Grass too tall and weeds taking over everything? We can get anything you have taken care of. Let us take care of the outside so you can stay inside.",
+    "expected": {"service": "landscaping", "intent": "competitor_advertisement", "maximum_score": 10, "maximum_relevance_score": 20}
+  },
+  {
+    "name": "precision_customer_property_lawn_request_is_out_of_scope",
+    "text": "I own a rental property with grass that is too tall and weeds taking over. I need a lawn service to take care of the outside this week. Please send recommendations.",
+    "expected": {"service": "landscaping", "intent": "unrelated", "maximum_score": 10}
+  },
+  {
+    "name": "precision_mixed_landscaping_and_mowing_project_guardrail",
+    "text": "Looking for a landscaping company to redesign our beds, install plants and mulch, and mow once when the project is complete.",
+    "expected": {"service": "landscaping", "intent": "hiring", "minimum_score": 75}
   },
   {
     "name": "precision_masonry_request_guardrail",
