@@ -288,5 +288,60 @@
     "name": "precision_property_manager_handyman_request_guardrail",
     "text": "I am a property manager looking for a handyman with general liability and workers comp. I have repair jobs ready now and would like to start working together.",
     "expected": {"service": "handyman", "intent": "hiring", "minimum_score": 75}
+  },
+  {
+    "name": "precision_job_seeker_offering_yard_labor",
+    "text": "Hello, I'm looking for a part-time job. Is anyone looking for a helper? I can do anything from yard work to moving things. Feel free to message me.",
+    "expected": {"intent": "unrelated", "maximum_score": 10, "maximum_relevance_score": 20}
+  },
+  {
+    "name": "precision_rhetorical_junk_removal_advertisement",
+    "text": "Need junk gone fast? Example Junk Removal offers junk hauling, garage cleanouts, furniture removal, and yard debris removal. Call or text [phone]. Same-day service available. Free estimates. Locally owned.",
+    "expected": {"intent": "competitor_advertisement", "maximum_score": 10, "maximum_relevance_score": 20}
+  },
+  {
+    "name": "precision_unsupported_electrician_subcontract_request",
+    "text": "Looking for a reliable electrician for multiple upcoming renovation projects and consistent repeat work. We want someone we can continue sending projects to. Example Contracting LLC.",
+    "expected": {"intent": "unrelated", "maximum_score": 10, "maximum_relevance_score": 20}
+  },
+  {
+    "name": "precision_job_seeker_offering_multiple_services",
+    "text": "I am looking for a job suitable for my schedule. I am more than willing to do cleaning, yard work, babysitting, or commissioned artwork. Please lead me in the right direction.",
+    "expected": {"intent": "unrelated", "maximum_score": 10, "maximum_relevance_score": 20}
+  },
+  {
+    "name": "precision_lawn_provider_with_openings",
+    "text": "Out cutting grass today. I have time for a couple more if you need yours cut before the rain. Message me.",
+    "expected": {"service": "landscaping", "intent": "competitor_advertisement", "maximum_score": 10, "maximum_relevance_score": 20}
+  },
+  {
+    "name": "precision_material_shopping_question",
+    "text": "Does anyone know where the best location is to buy flooring and kitchen cabinets? Looking to get contractor pricing.",
+    "expected": {"intent": "advice", "maximum_score": 40}
+  },
+  {
+    "name": "precision_short_welding_service_advertisement",
+    "text": "Quality welding that lasts. Free estimates! Need a handrail, fence, or gate? We can build it. Professional welding, fair prices, free estimates.",
+    "expected": {"service": "fencing", "intent": "competitor_advertisement", "maximum_score": 10, "maximum_relevance_score": 20}
+  },
+  {
+    "name": "precision_masonry_request_guardrail",
+    "text": "Looking for a brick mason to replace a chimney crown and repair cracks in brick.",
+    "expected": {"service": "masonry", "intent": "hiring", "minimum_score": 75}
+  },
+  {
+    "name": "precision_rental_punch_list_guardrail",
+    "text": "Looking for a licensed and insured crew to complete a small punch list at a rental home.",
+    "expected": {"service": "handyman", "intent": "hiring", "minimum_score": 75}
+  },
+  {
+    "name": "precision_pressure_washing_recommendation_guardrail",
+    "text": "Recommendations for insured pressure washing on a home in the East End this week.",
+    "expected": {"service": "pressure_washing", "intent": "recommendation", "minimum_score": 75}
+  },
+  {
+    "name": "precision_flooring_insurance_estimate_guardrail",
+    "text": "Contractor recommendation needed for an LVP installation and insurance estimate at my personal home. I need a line-item quote for a residential flooring job. Please share responsive installers.",
+    "expected": {"service": "flooring", "intent": "recommendation", "minimum_score": 75}
   }
 ]

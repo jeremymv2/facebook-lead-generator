@@ -447,6 +447,99 @@ def test_candidate_review_does_not_deduplicate_reordered_long_posts(tmp_path: Pa
     assert {lead.id for lead in reviewable} == {first.id, second.id}
 
 
+def test_candidate_review_deduplicates_minor_wording_edits(tmp_path: Path) -> None:
+    database = Database(tmp_path / "wording-edit-dedupe.sqlite3")
+    database.initialize()
+    now = datetime(2026, 8, 12, 12, tzinfo=UTC)
+    first = save_candidate(
+        database,
+        "first-wording",
+        "group-a",
+        now,
+        score=80,
+        post_text="Looking for a brick mason to replace chimney crown and cracks in brick.",
+    )
+    duplicate = save_candidate(
+        database,
+        "second-wording",
+        "group-b",
+        now + timedelta(hours=1),
+        score=80,
+        post_text=(
+            "Looking for a brick mason to replace chimney crown and repair cracks in brick."
+        ),
+    )
+
+    reviewable = database.list_candidate_leads(limit=10, duplicate_window_hours=72)
+
+    assert [lead.id for lead in reviewable] == [first.id]
+    assert duplicate.id not in {lead.id for lead in reviewable}
+
+
+def test_candidate_review_deduplicates_extended_repost_with_shared_job_size(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "extended-repost-dedupe.sqlite3")
+    database.initialize()
+    now = datetime(2026, 8, 12, 12, tzinfo=UTC)
+    shared = (
+        "Contractor recommendation needed for an LVP install and insurance estimate. "
+        "I need a responsive flooring installer for a 1,140 sq ft residential job with "
+        "tear-out, LVP installation, trim, furniture moving, and storage. "
+    )
+    first = save_candidate(
+        database,
+        "short-repost",
+        "group-a",
+        now,
+        score=80,
+        post_text=shared + "Please drop recommendations below.",
+    )
+    duplicate = save_candidate(
+        database,
+        "long-repost",
+        "group-b",
+        now + timedelta(hours=1),
+        score=80,
+        post_text=(
+            shared
+            + "This is for my personal home and an active insurance claim. The installer must "
+            "communicate, show up, and do clean work. Please send recommendations."
+        ),
+    )
+
+    reviewable = database.list_candidate_leads(limit=10, duplicate_window_hours=72)
+
+    assert [lead.id for lead in reviewable] == [first.id]
+    assert duplicate.id not in {lead.id for lead in reviewable}
+
+
+def test_candidate_review_keeps_similar_posts_with_conflicting_numbers(tmp_path: Path) -> None:
+    database = Database(tmp_path / "conflicting-number-dedupe.sqlite3")
+    database.initialize()
+    now = datetime(2026, 8, 12, 12, tzinfo=UTC)
+    first = save_candidate(
+        database,
+        "project-222",
+        "group-a",
+        now,
+        score=80,
+        post_text="Looking for someone in Louisville to repair deck project 222.",
+    )
+    second = save_candidate(
+        database,
+        "project-333",
+        "group-a",
+        now + timedelta(hours=1),
+        score=80,
+        post_text="Looking for someone in Louisville to repair deck project 333.",
+    )
+
+    reviewable = database.list_candidate_leads(limit=10, duplicate_window_hours=72)
+
+    assert {lead.id for lead in reviewable} == {first.id, second.id}
+
+
 def test_candidate_review_can_require_the_current_classification_version(
     tmp_path: Path,
 ) -> None:

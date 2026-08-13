@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from difflib import SequenceMatcher
 from functools import lru_cache
 from pathlib import Path
 
@@ -55,6 +56,35 @@ def _review_deduplication_key(text: str) -> str:
             break
     material = " ".join(tokens)
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+@lru_cache(maxsize=16_384)
+def _review_posts_are_duplicates(first: str, second: str) -> int:
+    """Conservatively match minor edits without collapsing distinct reordered requests."""
+    if _review_deduplication_key(first) == _review_deduplication_key(second):
+        return 1
+    first_tokens = re.findall(r"[^\W_]+", first.casefold())
+    second_tokens = re.findall(r"[^\W_]+", second.casefold())
+    if min(len(first_tokens), len(second_tokens)) < 8:
+        return 0
+    sequence_ratio = SequenceMatcher(
+        None,
+        first_tokens,
+        second_tokens,
+        autojunk=False,
+    ).ratio()
+    first_numbers = set(re.findall(r"\d+", first))
+    second_numbers = set(re.findall(r"\d+", second))
+    conflicting_numbers = bool(first_numbers or second_numbers) and first_numbers != second_numbers
+    if sequence_ratio >= 0.9 and not conflicting_numbers:
+        return 1
+    if min(len(first_tokens), len(second_tokens)) < 20:
+        return 0
+    first_set = set(first_tokens)
+    second_set = set(second_tokens)
+    containment = len(first_set & second_set) / min(len(first_set), len(second_set))
+    shared_numbers = first_numbers & second_numbers
+    return int(containment >= 0.85 and bool(shared_numbers))
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +145,12 @@ class Database:
             "review_deduplication_key",
             1,
             _review_deduplication_key,
+            deterministic=True,
+        )
+        connection.create_function(
+            "review_posts_are_duplicates",
+            2,
+            _review_posts_are_duplicates,
             deterministic=True,
         )
         connection.execute("PRAGMA foreign_keys = ON")
@@ -884,8 +920,9 @@ class Database:
                     JOIN facebook_posts AS prior_posts
                       ON prior_posts.id = prior_leads.facebook_post_id
                     WHERE prior_leads.drafted_response IS NOT NULL
-                      AND review_deduplication_key(prior_posts.post_text)
-                        = review_deduplication_key(posts.post_text)
+                      AND review_posts_are_duplicates(
+                        prior_posts.post_text, posts.post_text
+                      ) = 1
                       AND (
                         prior_posts.discovered_at < posts.discovered_at
                         OR (
