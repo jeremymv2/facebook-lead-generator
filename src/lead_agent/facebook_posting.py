@@ -48,6 +48,8 @@ RESOLUTION_MARKERS = (
     "problem solved",
 )
 
+PENDING_COMMENT_STATUSES = frozenset({"posting...", "sending..."})
+
 
 def post_text_is_safe_match(expected: str, rendered: str) -> bool:
     """Allow insignificant rendering drift while rejecting meaningful or resolved edits."""
@@ -134,6 +136,28 @@ def select_comment_permalink(hrefs: Sequence[str], post_url: str) -> str | None:
             )
         )
     return None
+
+
+def confirmed_comment_permalink(
+    *,
+    expected_response: str,
+    rendered_comment_texts: Sequence[str],
+    article_text: str,
+    hrefs: Sequence[str],
+    post_url: str,
+) -> str | None:
+    """Return durable comment identity, never Facebook's transient optimistic UI."""
+    expected = normalize_post_text(expected_response)
+    if not any(normalize_post_text(text) == expected for text in rendered_comment_texts):
+        return None
+    article_lines = {
+        normalize_post_text(line).casefold().replace("…", "...")
+        for line in article_text.splitlines()
+        if normalize_post_text(line)
+    }
+    if article_lines & PENDING_COMMENT_STATUSES:
+        return None
+    return select_comment_permalink(hrefs, post_url)
 
 
 @dataclass(slots=True)
@@ -290,6 +314,7 @@ class FacebookCommentBrowser:  # pragma: no cover - requires an interactive Face
             boundary_crossed = True
             await composer.press("Enter")
             reply_url = await self._wait_for_exact_comment(page, work)
+            reply_url = await self._confirm_comment_survived_reload(page, work, reply_url)
             after = await self._capture(page, work.lead.id or 0, "posted")
             self._validated = None
             return PostingSubmissionResult(
@@ -307,15 +332,20 @@ class FacebookCommentBrowser:  # pragma: no cover - requires an interactive Face
             raise
         except (Error, PlaywrightTimeoutError, PostingValidationError) as error:
             if boundary_crossed:
+                recovered_reply_url: str | None = None
                 try:
-                    reply_url = await self._find_exact_comment(page, work)
+                    candidate_reply_url = await self._find_exact_comment(page, work)
+                    if candidate_reply_url is not None:
+                        recovered_reply_url = await self._confirm_comment_survived_reload(
+                            page, work, candidate_reply_url
+                        )
                 except Exception:
-                    reply_url = None
-                if reply_url is not None:
+                    pass
+                if recovered_reply_url is not None:
                     after = await self._capture(page, work.lead.id or 0, "posted")
                     self._validated = None
                     return PostingSubmissionResult(
-                        facebook_reply_url=reply_url,
+                        facebook_reply_url=recovered_reply_url,
                         after_screenshot_path=after,
                     )
                 screenshot = await self._capture(page, work.lead.id or 0, "submission-uncertain")
@@ -387,7 +417,7 @@ class FacebookCommentBrowser:  # pragma: no cover - requires an interactive Face
                 labeled.append(locator)
         return labeled if labeled else visible
 
-    async def _wait_for_exact_comment(self, page: Page, work: PostingWorkItem) -> str | None:
+    async def _wait_for_exact_comment(self, page: Page, work: PostingWorkItem) -> str:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.settings.facebook_post_load_timeout_seconds
         while loop.time() < deadline:
@@ -402,6 +432,22 @@ class FacebookCommentBrowser:  # pragma: no cover - requires an interactive Face
             screenshot_path=screenshot,
         )
 
+    async def _confirm_comment_survived_reload(
+        self,
+        page: Page,
+        work: PostingWorkItem,
+        reply_url: str,
+    ) -> str:
+        """Reload through the stable identity and prove the exact comment still exists."""
+        await page.goto(reply_url, wait_until="domcontentloaded")
+        await self._require_normal_page(page, lead_id=work.lead.id or 0)
+        confirmed_url = await self._wait_for_exact_comment(page, work)
+        if confirmed_url != reply_url:
+            raise PostingValidationError(
+                "Facebook changed the comment identity after reloading its permalink"
+            )
+        return confirmed_url
+
     async def _find_exact_comment(self, page: Page, work: PostingWorkItem) -> str | None:
         expected = normalize_post_text(work.attempt.approved_response)
         articles = page.get_by_role("article")
@@ -411,15 +457,13 @@ class FacebookCommentBrowser:  # pragma: no cover - requires an interactive Face
             if not is_facebook_comment_label(label):
                 continue
             texts = article.locator('[dir="auto"]')
-            matched = False
+            rendered_texts: list[str] = []
             for text_index in range(min(await texts.count(), 30)):
                 text = texts.nth(text_index)
                 if not await text.is_visible(timeout=1000):
                     continue
-                if normalize_post_text(await text.inner_text(timeout=1000)) == expected:
-                    matched = True
-                    break
-            if not matched:
+                rendered_texts.append(await text.inner_text(timeout=1000))
+            if not any(normalize_post_text(text) == expected for text in rendered_texts):
                 continue
             links = article.get_by_role("link")
             hrefs: list[str] = []
@@ -427,7 +471,15 @@ class FacebookCommentBrowser:  # pragma: no cover - requires an interactive Face
                 href = await links.nth(link_index).get_attribute("href", timeout=1000)
                 if href:
                     hrefs.append(href)
-            return select_comment_permalink(hrefs, work.attempt.post_url) or work.attempt.post_url
+            reply_url = confirmed_comment_permalink(
+                expected_response=work.attempt.approved_response,
+                rendered_comment_texts=rendered_texts,
+                article_text=await article.inner_text(timeout=1000),
+                hrefs=hrefs,
+                post_url=work.attempt.post_url,
+            )
+            if reply_url is not None:
+                return reply_url
         return None
 
     async def _page(self) -> Page:
@@ -481,6 +533,7 @@ def _attempt_id(work: PostingWorkItem) -> int:
 
 __all__ = [
     "FacebookCommentBrowser",
+    "confirmed_comment_permalink",
     "post_text_is_safe_match",
     "select_comment_permalink",
     "validate_post_snapshot",
