@@ -12,7 +12,15 @@ from pathlib import Path
 from typing import NoReturn, cast
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
-from playwright.async_api import BrowserContext, Error, Locator, Page, Playwright, async_playwright
+from playwright.async_api import (
+    BrowserContext,
+    ElementHandle,
+    Error,
+    Locator,
+    Page,
+    Playwright,
+    async_playwright,
+)
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from lead_agent.config import Settings
@@ -362,12 +370,15 @@ class FacebookCommentBrowser:  # pragma: no cover - requires an interactive Face
             ) from error
 
     async def _top_level_post_messages(self, page: Page) -> list[tuple[str, Locator]]:
-        messages = page.locator(STORY_MESSAGE_SELECTOR)
-        rendered: list[tuple[str, Locator]] = []
+        scope = await self._story_message_scope(page)
+        messages = scope.locator(STORY_MESSAGE_SELECTOR)
+        visible_messages: list[Locator] = []
         for index in range(min(await messages.count(), 30)):
             message = messages.nth(index)
-            if not await message.is_visible(timeout=1000):
-                continue
+            if await message.is_visible(timeout=1000):
+                visible_messages.append(message)
+        rendered: list[tuple[str, Locator]] = []
+        for message in await self._innermost_locators(visible_messages):
             label = cast(
                 str | None,
                 await message.evaluate(
@@ -380,6 +391,52 @@ class FacebookCommentBrowser:  # pragma: no cover - requires an interactive Face
             if text:
                 rendered.append((text, message))
         return rendered
+
+    async def _story_message_scope(self, page: Page) -> Page | Locator:
+        """Prefer one foreground post dialog over its dimmed feed duplicate."""
+        dialogs = page.get_by_role("dialog")
+        candidates: list[Locator] = []
+        for index in range(min(await dialogs.count(), 5)):
+            dialog = dialogs.nth(index)
+            if not await dialog.is_visible(timeout=1000):
+                continue
+            messages = dialog.locator(STORY_MESSAGE_SELECTOR)
+            has_visible_message = False
+            for message_index in range(min(await messages.count(), 30)):
+                if await messages.nth(message_index).is_visible(timeout=1000):
+                    has_visible_message = True
+                    break
+            if has_visible_message:
+                candidates.append(dialog)
+        innermost_candidates = await self._innermost_locators(candidates)
+        if len(innermost_candidates) > 1:
+            raise PostingValidationError("Facebook exposed more than one foreground post dialog")
+        return innermost_candidates[0] if innermost_candidates else page
+
+    @staticmethod
+    async def _innermost_locators(candidates: Sequence[Locator]) -> list[Locator]:
+        """Discard wrapper nodes while preserving ambiguity between separate candidates."""
+        resolved: list[tuple[Locator, ElementHandle]] = []
+        try:
+            for candidate in candidates:
+                handle = await candidate.element_handle()
+                if handle is not None:
+                    resolved.append((candidate, handle))
+            innermost: list[Locator] = []
+            for index, (candidate, handle) in enumerate(resolved):
+                contains_another = False
+                for other_index, (_other_candidate, other_handle) in enumerate(resolved):
+                    if index == other_index:
+                        continue
+                    if await handle.evaluate("(node, other) => node.contains(other)", other_handle):
+                        contains_another = True
+                        break
+                if not contains_another:
+                    innermost.append(candidate)
+            return innermost
+        finally:
+            for _candidate, handle in resolved:
+                await handle.dispose()
 
     async def _comment_composer(self, page: Page, message: Locator) -> Locator:
         owner = message.locator("xpath=ancestor::*[self::article or @role='article'][1]")

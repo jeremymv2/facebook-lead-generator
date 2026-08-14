@@ -5,13 +5,14 @@ import inspect
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from lead_agent.approvals import ApprovalAction, LocalApprovalService
 from lead_agent.config import Settings
 from lead_agent.database import Database
+from lead_agent.facebook import STORY_MESSAGE_SELECTOR
 from lead_agent.facebook_posting import (
     FacebookCommentBrowser,
     confirmed_comment_permalink,
@@ -587,6 +588,89 @@ def test_comment_confirmation_reloads_the_stable_permalink(
     page.goto.assert_awaited_once_with(expected_url, wait_until="domcontentloaded")
     require_normal_page.assert_awaited_once_with(page, lead_id=lead.id or 0)
     wait_for_exact_comment.assert_awaited_once_with(page, claimed.work)
+
+
+def test_story_validation_prefers_one_visible_foreground_dialog(tmp_path: Path) -> None:
+    browser = FacebookCommentBrowser(settings(tmp_path))
+    page = MagicMock()
+    dialogs = MagicMock()
+    dialog = MagicMock()
+    messages = MagicMock()
+    message = MagicMock()
+    page.get_by_role.return_value = dialogs
+    dialogs.count = AsyncMock(return_value=1)
+    dialogs.nth.return_value = dialog
+    dialog.is_visible = AsyncMock(return_value=True)
+    dialog.locator.return_value = messages
+    messages.count = AsyncMock(return_value=1)
+    messages.nth.return_value = message
+    message.is_visible = AsyncMock(return_value=True)
+    dialog_handle = MagicMock()
+    dialog.element_handle = AsyncMock(return_value=dialog_handle)
+    dialog_handle.dispose = AsyncMock()
+
+    scope = asyncio.run(browser._story_message_scope(page))
+
+    assert scope is dialog
+    dialog.locator.assert_called_once_with(STORY_MESSAGE_SELECTOR)
+
+
+def test_story_validation_rejects_multiple_foreground_dialogs(tmp_path: Path) -> None:
+    browser = FacebookCommentBrowser(settings(tmp_path))
+    page = MagicMock()
+    dialogs = MagicMock()
+    page.get_by_role.return_value = dialogs
+    dialogs.count = AsyncMock(return_value=2)
+    configured_dialogs = []
+    configured_handles = []
+    for _index in range(2):
+        dialog = MagicMock()
+        messages = MagicMock()
+        message = MagicMock()
+        dialog.is_visible = AsyncMock(return_value=True)
+        dialog.locator.return_value = messages
+        messages.count = AsyncMock(return_value=1)
+        messages.nth.return_value = message
+        message.is_visible = AsyncMock(return_value=True)
+        dialog_handle = MagicMock()
+        dialog.element_handle = AsyncMock(return_value=dialog_handle)
+        dialog_handle.evaluate = AsyncMock(return_value=False)
+        dialog_handle.dispose = AsyncMock()
+        configured_dialogs.append(dialog)
+        configured_handles.append(dialog_handle)
+    dialogs.nth.side_effect = configured_dialogs
+
+    with pytest.raises(PostingValidationError, match="more than one foreground"):
+        asyncio.run(browser._story_message_scope(page))
+
+
+def test_story_validation_discards_nested_wrapper_dialog(tmp_path: Path) -> None:
+    browser = FacebookCommentBrowser(settings(tmp_path))
+    page = MagicMock()
+    dialogs = MagicMock()
+    page.get_by_role.return_value = dialogs
+    dialogs.count = AsyncMock(return_value=2)
+    outer = MagicMock()
+    inner = MagicMock()
+    outer_handle = MagicMock()
+    inner_handle = MagicMock()
+    for dialog, handle in ((outer, outer_handle), (inner, inner_handle)):
+        messages = MagicMock()
+        message = MagicMock()
+        dialog.is_visible = AsyncMock(return_value=True)
+        dialog.locator.return_value = messages
+        messages.count = AsyncMock(return_value=1)
+        messages.nth.return_value = message
+        message.is_visible = AsyncMock(return_value=True)
+        dialog.element_handle = AsyncMock(return_value=handle)
+        handle.dispose = AsyncMock()
+    outer_handle.evaluate = AsyncMock(side_effect=lambda _expression, other: other is inner_handle)
+    inner_handle.evaluate = AsyncMock(return_value=False)
+    dialogs.nth.side_effect = [outer, inner]
+
+    scope = asyncio.run(browser._story_message_scope(page))
+
+    assert scope is inner
 
 
 def test_dry_run_browser_validation_contains_no_write_actions() -> None:
