@@ -345,6 +345,26 @@
     "expected": {"service": "landscaping", "intent": "hiring", "minimum_score": 75}
   },
   {
+    "name": "precision_multi_trade_provider_free_estimate_advertisement",
+    "text": "If you need a metal roof put on your mobile home, just holler for free estimates. I also do LVP and laminate flooring and deck building.",
+    "expected": {"intent": "competitor_advertisement", "maximum_score": 10, "maximum_relevance_score": 20}
+  },
+  {
+    "name": "precision_recurring_vacant_lot_mowing_is_out_of_scope",
+    "text": "Any lawn guys in here? I have a vacant lot that I need cut. I need someone consistent who can keep up with a biweekly cutting schedule.",
+    "expected": {"service": "landscaping", "intent": "unrelated", "maximum_score": 10}
+  },
+  {
+    "name": "precision_generic_remodeling_advice_post",
+    "text": "The best remodeling projects solve problems. The best remodels do not start with a request for a new kitchen. A successful remodel is about solving everyday frustrations.",
+    "expected": {"service": "general_contracting", "intent": "unrelated", "maximum_score": 10}
+  },
+  {
+    "name": "precision_backsplash_capacity_request_guardrail",
+    "text": "Need a tile backsplash in a residential kitchen. Who has capacity sooner than later?",
+    "expected": {"service": "tile", "intent": "hiring", "minimum_score": 75}
+  },
+  {
     "name": "precision_masonry_request_guardrail",
     "text": "Looking for a brick mason to replace a chimney crown and repair cracks in brick.",
     "expected": {"service": "masonry", "intent": "hiring", "minimum_score": 75}

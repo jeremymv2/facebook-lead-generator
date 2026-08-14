@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from lead_agent.config import Settings
 from lead_agent.models import FacebookPost, LeadIntent, normalize_post_text
 
-CLASSIFICATION_VERSION = "2026-08-12.v12"
+CLASSIFICATION_VERSION = "2026-08-13.v13"
 COMPANY_NAME = "JJ Miller & Co."
 COMPANY_WEBSITE = "https://jjmillerco.com"
 COMPANY_TEXT_PHONE = "502-528-0858"
@@ -997,12 +997,15 @@ def _is_lawn_care_only_request(text: str, service: str | None) -> bool:
     lawn_care_patterns = (
         r"\blawn care\b",
         r"\blawn service(?:s)?\b",
-        r"\blawn (?:company|guy|person|provider)\b",
+        r"\blawn (?:compan(?:y|ies)|guys?|people|person|providers?)\b",
         r"\bmow(?:ed|er|ers|ing)?\b",
         r"\b(?:cut|cutting) (?:the |my |our )?grass\b",
         r"\bgrass (?:cut|cutting|mowed|mowing)\b",
         r"\b(?:yard|lawn) (?:cut|mowed|mowing)\b",
         r"\bweed\s?eat(?:er|ing)?\b",
+        r"\b(?:yard|lawn|grass|(?:vacant )?lot)\b.{0,60}\bneed (?:it )?cut\b",
+        r"\b(?:weekly|bi[- ]?weekly|recurring)\b.{0,60}\b(?:cut|cutting|mow|mowing)\b",
+        r"\b(?:cutting|mowing) schedule\b",
     )
     if not any(re.search(pattern, text) for pattern in lawn_care_patterns):
         return False
@@ -1118,6 +1121,9 @@ def _is_competitor_advertisement(text: str, service: str | None) -> bool:
         r"^\s*(?:need|looking for) .{0,160}\?\s*(?:call|text|contact|message|book)\b",
         r"^\s*need .{0,100}\?.{0,500}\b(?:offers?|call|text|free estimates?|locally owned)\b",
         r"\b(?:[a-z0-9&.'-]+\s+){1,5}(?:llc|services?|removal|contracting) offers\b",
+        r"\bif you need .{0,180}\b(?:call|text|holler|message)\b.{0,120}\bfree estimates?\b",
+        r"\bi (?:also )?do\b.{0,180}\b(?:flooring|deck building|roofing|landscaping|"
+        r"painting|remodeling)\b",
         r"\bi(?:['\u2019]m| am) (?:currently )?offering (?:free )?.{0,80}"
         r"(?:inspections?|estimates?|services?)\b",
         r"\bwe offer\b",
@@ -1218,6 +1224,7 @@ def _is_non_customer_solicitation(text: str) -> bool:
         r"\b(?:looking for|accepting|seeking) (?:monetary )?donations?\b",
         r"\bmonetary donations?\b",
         r"\bvenmo\b.{0,180}\b(?:cash ?app|paypal)\b",
+        r"\bthe best remodel(?:ing)? projects?\b.{0,500}\b(?:solve problems?|successful remodel)\b",
     )
     return any(re.search(pattern, text) for pattern in patterns)
 
