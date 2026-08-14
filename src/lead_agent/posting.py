@@ -206,6 +206,10 @@ class ApprovedPostingService:
                 validation,
                 on_before_submit=mark_submission_boundary,
             )
+            if outcome.facebook_reply_url is None:
+                raise PostingSubmissionUncertainError(
+                    "Facebook did not return a stable comment permalink"
+                )
             completed = self.database.complete_posting_attempt(
                 self._attempt_id(work),
                 completed_at=self._event_time(now),

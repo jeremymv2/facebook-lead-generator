@@ -5,6 +5,7 @@ import inspect
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -13,6 +14,7 @@ from lead_agent.config import Settings
 from lead_agent.database import Database
 from lead_agent.facebook_posting import (
     FacebookCommentBrowser,
+    confirmed_comment_permalink,
     post_text_is_safe_match,
     select_comment_permalink,
     validate_post_snapshot,
@@ -99,10 +101,12 @@ class FakePostingAdapter:
         validation_error: Exception | None = None,
         submission_error: Exception | None = None,
         cross_boundary: bool = True,
+        return_permalink: bool = True,
     ) -> None:
         self.validation_error = validation_error
         self.submission_error = submission_error
         self.cross_boundary = cross_boundary
+        self.return_permalink = return_permalink
         self.validate_calls = 0
         self.submit_calls = 0
         self.responses: list[str] = []
@@ -129,7 +133,9 @@ class FakePostingAdapter:
         if self.submission_error is not None:
             raise self.submission_error
         return PostingSubmissionResult(
-            facebook_reply_url=f"{work.attempt.post_url}?comment_id=999",
+            facebook_reply_url=(
+                f"{work.attempt.post_url}?comment_id=999" if self.return_permalink else None
+            ),
             after_screenshot_path=Path("after.png"),
         )
 
@@ -350,6 +356,34 @@ def test_uncertain_submission_is_never_retried(
     assert retry_adapter.validate_calls == 0
 
 
+def test_permalinkless_submission_requires_attention(
+    database: Database,
+    tmp_path: Path,
+) -> None:
+    approved_at = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    lead = create_approved_lead(database, now=approved_at)
+    service = ApprovedPostingService(
+        database,
+        settings(tmp_path, live=True),
+        enabled_group_ids={"fixture-group"},
+    )
+
+    with pytest.raises(PostingSubmissionUncertainError, match="stable comment permalink"):
+        asyncio.run(
+            service.execute(
+                lead.id or 0,
+                FakePostingAdapter(return_permalink=False),
+                dry_run=False,
+                now=approved_at + timedelta(minutes=2),
+            )
+        )
+
+    attempt = database.list_posting_attempts(lead_id=lead.id)[0]
+    assert attempt.status is PostingAttemptStatus.NEEDS_ATTENTION
+    assert attempt.submission_started_at is not None
+    assert database.get_lead(lead.id or 0).status is LeadStatus.NEEDS_ATTENTION  # type: ignore[union-attr]
+
+
 def test_daily_limit_reserves_live_attempts_transactionally(
     database: Database,
     tmp_path: Path,
@@ -482,6 +516,77 @@ def test_comment_permalink_keeps_only_same_post_comment_identity() -> None:
         )
         is None
     )
+
+
+def test_comment_confirmation_rejects_transient_or_permalinkless_ui() -> None:
+    post_url = "https://www.facebook.com/groups/111/posts/222"
+    comment_url = f"{post_url}?comment_id=777"
+
+    assert (
+        confirmed_comment_permalink(
+            expected_response=VALID_RESPONSE,
+            rendered_comment_texts=[VALID_RESPONSE],
+            article_text=f"Jeremy Miller\n{VALID_RESPONSE}\nPosting…",
+            hrefs=[comment_url],
+            post_url=post_url,
+        )
+        is None
+    )
+    assert (
+        confirmed_comment_permalink(
+            expected_response=VALID_RESPONSE,
+            rendered_comment_texts=[VALID_RESPONSE],
+            article_text=f"Jeremy Miller\n{VALID_RESPONSE}",
+            hrefs=[post_url],
+            post_url=post_url,
+        )
+        is None
+    )
+    assert (
+        confirmed_comment_permalink(
+            expected_response=VALID_RESPONSE,
+            rendered_comment_texts=[VALID_RESPONSE],
+            article_text=f"Jeremy Miller\n{VALID_RESPONSE}\nJust now",
+            hrefs=[comment_url],
+            post_url=post_url,
+        )
+        == comment_url
+    )
+
+
+def test_comment_confirmation_reloads_the_stable_permalink(
+    database: Database,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    approved_at = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    lead = create_approved_lead(database, now=approved_at)
+    claimed = database.begin_posting_attempt(
+        lead.id or 0,
+        dry_run=True,
+        started_at=approved_at + timedelta(minutes=2),
+        oldest_approval_at=approved_at,
+        day_started_at=datetime(2026, 8, 8, 4, 0, tzinfo=UTC),
+        next_day_started_at=datetime(2026, 8, 9, 4, 0, tzinfo=UTC),
+        daily_limit=5,
+        per_group_daily_limit=2,
+    )
+    browser = FacebookCommentBrowser(settings(tmp_path))
+    page = AsyncMock()
+    expected_url = f"{claimed.work.attempt.post_url}?comment_id=999"
+    require_normal_page = AsyncMock()
+    wait_for_exact_comment = AsyncMock(return_value=expected_url)
+    monkeypatch.setattr(browser, "_require_normal_page", require_normal_page)
+    monkeypatch.setattr(browser, "_wait_for_exact_comment", wait_for_exact_comment)
+
+    confirmed_url = asyncio.run(
+        browser._confirm_comment_survived_reload(page, claimed.work, expected_url)
+    )
+
+    assert confirmed_url == expected_url
+    page.goto.assert_awaited_once_with(expected_url, wait_until="domcontentloaded")
+    require_normal_page.assert_awaited_once_with(page, lead_id=lead.id or 0)
+    wait_for_exact_comment.assert_awaited_once_with(page, claimed.work)
 
 
 def test_dry_run_browser_validation_contains_no_write_actions() -> None:
