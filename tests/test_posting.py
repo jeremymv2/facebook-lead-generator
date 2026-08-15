@@ -817,6 +817,34 @@ def test_story_validation_discards_nested_wrapper_dialog(tmp_path: Path) -> None
     assert scope is inner
 
 
+def test_comment_composer_waits_for_facebook_to_finish_rendering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    browser = FacebookCommentBrowser(settings(tmp_path))
+    page = MagicMock()
+    message = MagicMock()
+    owner = MagicMock()
+    scoped = MagicMock()
+    global_composers = MagicMock()
+    composer = MagicMock()
+    message.locator.return_value = owner
+    owner.locator.return_value = scoped
+    page.locator.return_value = global_composers
+    page.wait_for_timeout = AsyncMock()
+    visible_composers = AsyncMock(side_effect=[[], [], [composer]])
+    require_normal_page = AsyncMock()
+    monkeypatch.setattr(browser, "_visible_comment_composers", visible_composers)
+    monkeypatch.setattr(browser, "_require_normal_page", require_normal_page)
+
+    selected = asyncio.run(browser._comment_composer(page, message, lead_id=1989))
+
+    assert selected is composer
+    assert visible_composers.await_count == 3
+    page.wait_for_timeout.assert_awaited_once_with(250)
+    require_normal_page.assert_awaited_once_with(page, lead_id=1989)
+
+
 def test_dry_run_browser_validation_contains_no_write_actions() -> None:
     source = inspect.getsource(FacebookCommentBrowser.validate)
 
