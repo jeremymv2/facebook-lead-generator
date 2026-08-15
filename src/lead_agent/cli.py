@@ -45,6 +45,7 @@ from lead_agent.notifications import (
 )
 from lead_agent.operations import (
     CycleAlreadyRunningError,
+    CycleLock,
     CycleSummary,
     OperationPaths,
     OperationsCycleRunner,
@@ -57,6 +58,10 @@ from lead_agent.operations import (
     is_within_quiet_hours,
 )
 from lead_agent.posting import ApprovedPostingService, PostingError, PostingExecutionResult
+from lead_agent.posting_queue import (
+    PostingOutcomeNotificationService,
+    PostingQueueProcessor,
+)
 from lead_agent.remote_approval_web import (
     RemoteApprovalController,
     relay_is_healthy,
@@ -249,6 +254,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Submit once; requires POSTING_ENABLED=true and DRY_RUN=false",
     )
+    subparsers.add_parser(
+        "process-posting-queue",
+        help="Process at most one SMS-authorized queued post and send outcome SMS",
+    )
     return parser
 
 
@@ -272,6 +281,8 @@ def _doctor_payload(settings: Settings) -> dict[str, object]:
         "dry_run": settings.dry_run,
         "posting_enabled": settings.posting_enabled,
         "posting_allowed": settings.posting_allowed,
+        "posting_queue_enabled": settings.posting_queue_enabled,
+        "posting_queue_poll_interval_seconds": settings.posting_queue_poll_interval_seconds,
         "read_only_mode_ready": not settings.posting_enabled and settings.dry_run,
         "service_area": settings.service_area,
         "lead_threshold": settings.lead_threshold,
@@ -971,6 +982,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             controller = RemoteApprovalController(
                 approvals,
                 signing_key=settings.approval_signing_key.get_secret_value(),
+                posting_queue_enabled=settings.posting_queue_enabled,
+                posting_enabled_group_ids=(
+                    {
+                        group.id
+                        for group in load_group_catalog(
+                            settings.groups_config_path
+                        ).posting_enabled_groups()
+                    }
+                    if settings.posting_queue_enabled
+                    else set()
+                ),
             )
 
             retry_failed = args.retry_failed
@@ -1004,6 +1026,70 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Stopped safely: {error}", file=sys.stderr)
             return 2
         return 0
+
+    if args.command == "process-posting-queue":
+        try:
+            settings.require_posting_queue_enabled()
+            settings.require_posting_allowed()
+            settings.require_remote_approval_ready()
+            if _quiet_hours_active(settings):
+                print("No action taken: posting queue respects overnight quiet hours")
+                return 0
+            catalog = load_group_catalog(settings.groups_config_path)
+            posting_enabled_group_ids = {group.id for group in catalog.posting_enabled_groups()}
+            if not posting_enabled_group_ids:
+                raise GroupsConfigError("No Facebook groups are explicitly enabled for posting")
+            database = Database(settings.database_path)
+            database.initialize()
+            if settings.sms_recipient_number is None:
+                raise RuntimeError("Validated SMS recipient is unexpectedly missing")
+            outcome_notifier = PostingOutcomeNotificationService(
+                database,
+                build_sms_provider(settings),
+                recipient_number=settings.sms_recipient_number,
+            )
+            outcome_notifier.notify_pending()
+            posting_service = ApprovedPostingService(
+                database,
+                settings,
+                posting_enabled_group_ids=posting_enabled_group_ids,
+            )
+            processor = PostingQueueProcessor(
+                database,
+                posting_service,
+                approval_max_age_minutes=settings.posting_approval_max_age_minutes,
+            )
+            processor.reconcile_stale_claims()
+            with CycleLock(_operation_paths(settings).lock_path):
+                if not database.has_queued_posting_job():
+                    print("No queued Facebook submissions")
+                    return 0
+
+                async def process_job() -> tuple[int, str]:
+                    async with FacebookCommentBrowser(settings) as browser:
+                        job = processor.claim()
+                        if job is None:
+                            return 0, "already_claimed"
+                        result = await processor.process(job, browser)
+                        return job.lead_id, result.result
+
+                queue_lead_id, queue_result = asyncio.run(process_job())
+            outcome_notifier.notify_pending()
+            print(f"Posting queue lead={queue_lead_id} result={queue_result}")
+            return 0
+        except CycleAlreadyRunningError as error:
+            print(f"No action taken: {error}")
+            return 0
+        except (
+            FacebookBrowserError,
+            FacebookSafetyStop,
+            GroupsConfigError,
+            NotificationConfigurationError,
+            PostingDisabledError,
+            PostingError,
+        ) as error:
+            print(f"Stopped safely: {error}", file=sys.stderr)
+            return 2
 
     if args.command == "facebook-login":
         try:

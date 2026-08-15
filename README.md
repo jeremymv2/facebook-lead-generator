@@ -148,6 +148,8 @@ Important settings include:
 | --- | --- | --- |
 | `POSTING_ENABLED` | `false` | Global posting kill switch |
 | `DRY_RUN` | `true` | Prevents submission while exercising future workflows |
+| `POSTING_QUEUE_ENABLED` | `false` | Show guarded Approve & Post controls and permit the queue worker |
+| `POSTING_QUEUE_POLL_INTERVAL_SECONDS` | `60` | Delay between one-shot queued-posting workers |
 | `SCAN_INTERVAL_SECONDS` | `900` | Conservative interval between unattended cycles |
 | `LEAD_THRESHOLD` | `75` | Minimum score for an approval candidate |
 | `SERVICE_AREA` | `Louisville, Kentucky` | Primary geographic target |
@@ -566,6 +568,7 @@ to the ignored `.env` file:
 ```dotenv
 POSTING_ENABLED=false
 DRY_RUN=true
+POSTING_QUEUE_ENABLED=false
 
 NOTIFICATIONS_ENABLED=true
 SMS_PROVIDER=telnyx
@@ -630,8 +633,46 @@ lead-agent remote-approval --retry-failed
 ```
 
 The tokenized service deliberately has no `/` dashboard or lead-list endpoint. A token expires with
-the 20-minute approval window and can produce only one approve, edit, or reject transition. Approval
-never directly posts anything to Facebook.
+the 20-minute approval window and can produce only one approve, edit, or reject transition. With
+`POSTING_QUEUE_ENABLED=false`, approval cannot request a Facebook action.
+
+### Queue a guarded post from the SMS review
+
+After one group has a manually verified public comment, set only that group's ignored
+`config/groups.yaml` entry to `posting_enabled: true`. Keep the repository-wide scanner defaults
+unchanged and enable the mobile queue separately:
+
+```dotenv
+POSTING_ENABLED=false
+DRY_RUN=true
+POSTING_QUEUE_ENABLED=true
+DAILY_POSTING_LIMIT=1
+PER_GROUP_DAILY_POSTING_LIMIT=1
+```
+
+For posting-enabled groups, the tokenized page then displays separate **Approve** and
+**Approve & Post** choices, plus an **Approve edited response & post** choice. The posting choice
+atomically stores the approval and a durable queue job. It returns immediately and never opens
+Facebook inside the tunneled HTTP request.
+
+The one-shot local worker owns browser submission. Its launchd definition supplies
+`POSTING_ENABLED=true` and `DRY_RUN=false` only to that worker process; those flags are not copied
+to the scanner or stored with credentials. The worker shares the cycle lock, revalidates the exact
+post and response, enforces limits, and uses the same no-retry submission ledger as manual posting.
+It sends one outcome SMS for public posting, group moderation, expiration, a safe pre-confirmation
+stop, or manual-attention state. Queue work also observes the 10 PM-5 AM quiet-hours window.
+
+Install the cycle, remote approval, and queue workers together:
+
+```bash
+.venv/bin/python scripts/manage_launchd.py install \
+  --include-remote-approval \
+  --include-posting-worker
+```
+
+An approval that cannot start within `POSTING_APPROVAL_MAX_AGE_MINUTES` expires without opening
+Facebook and returns the lead for a fresh review. A result that may have crossed Facebook's submit
+boundary is never retried automatically.
 
 ## Test approved posting safely
 
@@ -738,13 +779,16 @@ the plist. Logs live under `data/logs/`, and content-free health lives at
 `data/operations/health.json`.
 
 After the Telnyx campaign is active and `lead-agent doctor` reports
-`remote_approval_ready: true`, install both agents:
+`remote_approval_ready: true`, install the scan and remote-approval agents:
 
 ```bash
 .venv/bin/python scripts/manage_launchd.py install --include-remote-approval
 ```
 
-Remove both JJ Miller & Co. launch agents with:
+When the guarded mobile queue is enabled, add `--include-posting-worker` as described above. The
+posting worker is a third launch agent and keeps its live flags process-local.
+
+Remove all JJ Miller & Co. launch agents with:
 
 ```bash
 .venv/bin/python scripts/manage_launchd.py uninstall

@@ -609,6 +609,58 @@ def test_remote_approval_command_uses_provider_abstraction_and_loopback_server(
     }
 
 
+def test_posting_queue_worker_exits_without_opening_browser_when_queue_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    groups_path = tmp_path / "config" / "groups.yaml"
+    groups_path.parent.mkdir()
+    groups_path.write_text(
+        """
+groups:
+  - id: fixture-group
+    name: Fixture Group
+    url: https://www.facebook.com/groups/111
+    enabled: true
+    posting_enabled: true
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "queue.sqlite3"))
+    monkeypatch.setenv("FACEBOOK_PROFILE_PATH", str(tmp_path.parent / "browser-profile"))
+    monkeypatch.setenv("POSTING_ENABLED", "true")
+    monkeypatch.setenv("DRY_RUN", "false")
+    monkeypatch.setenv("POSTING_QUEUE_ENABLED", "true")
+    monkeypatch.setenv("NOTIFICATIONS_ENABLED", "true")
+    monkeypatch.setenv("SMS_PROVIDER", "telnyx")
+    monkeypatch.setenv("REMOTE_APPROVAL_BASE_URL", "https://approve.example")
+    monkeypatch.setenv("APPROVAL_SIGNING_KEY", "s" * 48)
+    monkeypatch.setenv("SMS_RECIPIENT_NUMBER", "+15025550101")
+    monkeypatch.setenv("TELNYX_API_KEY", "fixture-secret")
+    monkeypatch.setenv("TELNYX_FROM_NUMBER", "+15025550100")
+
+    class FakeProvider:
+        name = "fake"
+
+        def send(self, message: SmsMessage) -> SmsDeliveryReceipt:
+            raise AssertionError(f"No outcome should be sent: {message.idempotency_key}")
+
+    monkeypatch.setattr(cli_module, "_quiet_hours_active", lambda settings: False)
+    monkeypatch.setattr(cli_module, "build_sms_provider", lambda settings: FakeProvider())
+    monkeypatch.setattr(
+        cli_module,
+        "FacebookCommentBrowser",
+        lambda settings: pytest.fail("An empty queue must not open Facebook"),
+    )
+
+    result = main(["process-posting-queue"])
+
+    assert result == 0
+    assert "No queued Facebook submissions" in capsys.readouterr().out
+
+
 def test_unattended_cycle_retries_only_transient_group_failures(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -20,7 +20,7 @@ from lead_agent.approvals import (
     LocalApprovalService,
 )
 from lead_agent.database import Database
-from lead_agent.models import FacebookPost, Lead, LeadIntent, LeadStatus
+from lead_agent.models import FacebookPost, Lead, LeadIntent, LeadStatus, PostingJobStatus
 from lead_agent.notifications import remote_token_hash
 from lead_agent.remote_approval_web import (
     LOOPBACK_HOST,
@@ -125,6 +125,57 @@ def test_remote_decision_requires_token_bound_csrf_and_is_one_time(tmp_path: Pat
             {"csrf_token": [csrf]},
             now=now + timedelta(minutes=2),
         )
+
+
+def test_remote_approve_and_post_atomically_queues_only_an_enabled_group(
+    tmp_path: Path,
+) -> None:
+    controller, database, request_id, now = prepared_controller(tmp_path)
+    enabled = RemoteApprovalController(
+        controller.approvals,
+        signing_key="s" * 48,
+        posting_queue_enabled=True,
+        posting_enabled_group_ids={"fixture-group"},
+    )
+    page = enabled.render(TOKEN, now=now)
+    csrf = csrf_from_page(page)
+
+    assert f'action="/review/{TOKEN}/approve-post"' in page
+    approved = enabled.submit(
+        TOKEN,
+        "approve-post",
+        {"csrf_token": [csrf]},
+        now=now + timedelta(minutes=1),
+    )
+
+    job = database.get_posting_job_for_approval(request_id)
+    assert approved.request.status.value == "approved"
+    assert job is not None
+    assert job.status is PostingJobStatus.QUEUED
+    terminal = enabled.render(TOKEN, now=now + timedelta(minutes=2))
+    assert "Facebook submission is queued on your Mac" in terminal
+
+
+def test_remote_post_action_fails_closed_for_scan_only_group(tmp_path: Path) -> None:
+    controller, database, request_id, now = prepared_controller(tmp_path)
+    queue_enabled = RemoteApprovalController(
+        controller.approvals,
+        signing_key="s" * 48,
+        posting_queue_enabled=True,
+        posting_enabled_group_ids=set(),
+    )
+    page = queue_enabled.render(TOKEN, now=now)
+
+    assert "approve-post" not in page
+    with pytest.raises(ApprovalStateError, match="not enabled"):
+        queue_enabled.submit(
+            TOKEN,
+            "approve-post",
+            {"csrf_token": [csrf_from_page(page)]},
+            now=now + timedelta(minutes=1),
+        )
+    assert database.get_approval_request(request_id).status.value == "pending"  # type: ignore[union-attr]
+    assert database.get_posting_job_for_approval(request_id) is None
 
 
 def test_remote_controller_rejects_weak_or_unknown_tokens(tmp_path: Path) -> None:
