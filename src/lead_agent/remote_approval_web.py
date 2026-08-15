@@ -29,6 +29,7 @@ from lead_agent.models import (
     PostingJob,
     PostingJobStatus,
     RejectionReason,
+    is_exact_facebook_post_url,
     utc_now,
 )
 from lead_agent.notifications import remote_token_hash
@@ -103,15 +104,17 @@ class RemoteApprovalController:
                 review.request.status,
                 posting_job=self.database.get_posting_job_for_approval(request_id),
             )
+        posting_group_enabled = (
+            self.posting_queue_enabled and review.post.group_id in self.posting_enabled_group_ids
+        )
+        exact_post_url_available = is_exact_facebook_post_url(review.post.post_url)
         return _render_pending(
             review,
             token=token,
             csrf_token=self._csrf_token(token),
             now=timestamp,
-            posting_available=(
-                self.posting_queue_enabled
-                and review.post.group_id in self.posting_enabled_group_ids
-            ),
+            posting_available=posting_group_enabled and exact_post_url_available,
+            posting_group_enabled=posting_group_enabled,
         )
 
     def submit(
@@ -137,6 +140,10 @@ class RemoteApprovalController:
             or review.post.group_id not in self.posting_enabled_group_ids
         ):
             raise ApprovalStateError("This Facebook group is not enabled for queued posting")
+        if queue_posting and not is_exact_facebook_post_url(review.post.post_url):
+            raise ApprovalStateError(
+                "This lead is review-only because its exact Facebook post link is unavailable"
+            )
         try:
             action = ApprovalAction(base_action)
         except ValueError as error:  # pragma: no cover - route contract
@@ -179,6 +186,7 @@ def _render_pending(
     csrf_token: str,
     now: datetime,
     posting_available: bool,
+    posting_group_enabled: bool,
 ) -> str:
     remaining_seconds = max(0, int((review.request.expires_at - now).total_seconds()))
     remaining_minutes = (remaining_seconds + 59) // 60
@@ -212,7 +220,10 @@ def _render_pending(
         "inside this web request."
         if posting_available
         else (
-            "This group is scan-only. Approval cannot post to Facebook; "
+            "Review only: an exact Facebook post link was not captured. Approval stores your "
+            "decision, but posting remains unavailable until a later scan recovers the permalink."
+            if posting_group_enabled
+            else "This group is scan-only. Approval cannot post to Facebook; "
             "it only stores the decision."
         )
     )

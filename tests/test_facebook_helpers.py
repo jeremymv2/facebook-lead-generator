@@ -14,10 +14,12 @@ from lead_agent.facebook import (
     extract_post_id,
     facebook_group_key,
     is_facebook_comment_label,
+    merge_facebook_post,
     select_facebook_permalink,
     select_message_text,
 )
 from lead_agent.groups import FacebookGroup
+from lead_agent.models import FacebookPost, is_exact_facebook_post_url
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "facebook_post_candidates.json"
 
@@ -97,6 +99,54 @@ def test_permalink_selection_rejects_photo_only_identifier() -> None:
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, False),
+        ("https://www.facebook.com/groups/111", False),
+        ("https://www.facebook.com/photo/?fbid=222", False),
+        ("https://example.com/groups/111/posts/222", False),
+        ("http://www.facebook.com/groups/111/posts/222", False),
+        ("https://www.facebook.com/groups/111/posts/222", True),
+        ("https://www.facebook.com/groups/111/permalink/222", True),
+        ("https://www.facebook.com/permalink.php?story_fbid=222&id=111", False),
+        ("https://www.facebook.com/groups/111?multi_permalinks=222", True),
+    ],
+)
+def test_exact_facebook_post_url_requires_one_https_post(
+    value: str | None,
+    expected: bool,
+) -> None:
+    assert is_exact_facebook_post_url(value) is expected
+
+
+def test_later_hydrated_story_merges_permalink_into_content_only_render() -> None:
+    group_id = "fixture-group"
+    text = "Hello, I need a concrete contractor to replace an existing driveway slab."
+    content_only = FacebookPost(
+        group_id=group_id,
+        group_name="Fixture Group",
+        post_text=text,
+    )
+    hydrated = FacebookPost(
+        external_post_id="222",
+        post_url="https://www.facebook.com/groups/111/posts/222",
+        group_id=group_id,
+        group_name="Fixture Group",
+        author_name="Fixture Customer",
+        post_text=text,
+    )
+    collected = {content_only.identity_key: content_only}
+
+    merge_facebook_post(collected, hydrated)
+
+    assert list(collected.values()) == [content_only]
+    assert content_only.identity_key.startswith("content:")
+    assert content_only.external_post_id == "222"
+    assert content_only.post_url == "https://www.facebook.com/groups/111/posts/222"
+    assert content_only.author_name == "Fixture Customer"
 
 
 def test_message_selection_prefers_semantic_post_text() -> None:

@@ -67,6 +67,7 @@ def test_dashboard_escapes_facebook_content_and_states_safety_boundary(tmp_path:
     assert 'name="csrf_token" value="fixture-csrf"' in page
     assert controller.service.database.list_pending_approval_reviews() == []
     assert "javascript:alert" not in page
+    assert "Review only — an exact Facebook post link was not captured" in page
 
 
 def test_dashboard_renders_cycle_trends_and_current_group_health(tmp_path: Path) -> None:
@@ -364,6 +365,7 @@ def test_controller_supports_explicit_edit_and_reject_decisions(tmp_path: Path) 
         (None, None),
         ("http://www.facebook.com/groups/111/posts/222", None),
         ("https://example.com/groups/111/posts/222", None),
+        ("https://www.facebook.com/groups/111", None),
         (
             "https://www.facebook.com/groups/111/posts/222",
             "https://www.facebook.com/groups/111/posts/222",

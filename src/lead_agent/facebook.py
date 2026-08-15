@@ -176,6 +176,32 @@ def build_facebook_post(
     )
 
 
+def merge_facebook_post(
+    collected: dict[str, FacebookPost],
+    incoming: FacebookPost,
+) -> None:
+    """Merge a later permalink-bearing rendering into one earlier content-only story."""
+    existing = collected.get(incoming.identity_key)
+    if existing is None:
+        compatible = {
+            id(post): post
+            for post in collected.values()
+            if post.group_id == incoming.group_id
+            and post.text_hash == incoming.text_hash
+            and (post.post_url is None or incoming.post_url is None)
+        }
+        if len(compatible) == 1:
+            existing = next(iter(compatible.values()))
+    if existing is None:
+        collected[incoming.identity_key] = incoming
+        return
+    if existing.post_url is None and incoming.post_url is not None:
+        existing.post_url = incoming.post_url
+        existing.external_post_id = incoming.external_post_id
+    if existing.author_name is None and incoming.author_name is not None:
+        existing.author_name = incoming.author_name
+
+
 def cleanup_old_screenshots(
     directory: Path,
     *,
@@ -360,6 +386,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.settings.facebook_post_load_timeout_seconds
         initial_grace_deadline = loop.time() + 2
+        permalink_grace_deadline = loop.time() + 2
         visible_article_seen = False
         collected: dict[str, FacebookPost] = {}
         scrolls = 0
@@ -371,11 +398,9 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
             except Error:
                 story_posts = []
             for story_post in story_posts:
-                collected.setdefault(story_post.identity_key, story_post)
-            if len(collected) >= max_posts:
-                return list(collected.values())[:max_posts]
+                merge_facebook_post(collected, story_post)
 
-            if not story_posts:
+            if not story_posts or any(post.post_url is None for post in collected.values()):
                 try:
                     articles = await self._post_articles(page)
                     count = min(await articles.count(), max(max_posts * 5, 50))
@@ -399,9 +424,16 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                         # Facebook commonly replaces placeholder nodes while the feed hydrates.
                         continue
                     if legacy_post is not None:
-                        collected.setdefault(legacy_post.identity_key, legacy_post)
-                        if len(collected) >= max_posts:
-                            return list(collected.values())[:max_posts]
+                        merge_facebook_post(collected, legacy_post)
+
+            if len(collected) >= max_posts:
+                selected = list(collected.values())[:max_posts]
+                if all(post.post_url is not None for post in selected):
+                    return selected
+                if loop.time() >= permalink_grace_deadline:
+                    return selected
+                await page.wait_for_timeout(250)
+                continue
 
             if not collected and loop.time() < initial_grace_deadline:
                 await page.wait_for_timeout(250)
@@ -459,8 +491,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         """Extract current Facebook story-message nodes and their nearest post permalinks."""
         messages = page.locator(STORY_MESSAGE_SELECTOR)
         count = min(await messages.count(), max(max_posts * 3, 20))
-        posts: list[FacebookPost] = []
-        identities: set[str] = set()
+        collected: dict[str, FacebookPost] = {}
 
         try:
             snapshots = cast(
@@ -474,9 +505,8 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                         if (!visible) return [];
                         const article = node.closest('article, [role=article]');
                         let owner = node;
-                        let depth = 0;
                         let hrefs = [];
-                        while (owner && depth < 60 && owner.getAttribute('role') !== 'feed') {
+                        while (owner && owner.getAttribute('role') !== 'feed') {
                             hrefs = Array.from(owner.querySelectorAll('a[href]'))
                                 .map(link => link.href)
                                 .filter(href => (
@@ -485,7 +515,14 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                                 ));
                             if (hrefs.length) break;
                             owner = owner.parentElement;
-                            depth += 1;
+                        }
+                        if (!hrefs.length && article) {
+                            hrefs = Array.from(article.querySelectorAll('a[href]'))
+                                .map(link => link.href)
+                                .filter(href => (
+                                    /\/groups\/[^/]+\/(posts|permalink)\//i.test(href)
+                                    || /[?&](story_fbid|multi_permalinks)=/i.test(href)
+                                ));
                         }
                         return [{
                             text: node.innerText || '',
@@ -525,15 +562,12 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 group,
                 min_length=self.settings.min_post_text_length,
             )
-            if post is None or post.identity_key in identities:
+            if post is None:
                 continue
-            identities.add(post.identity_key)
-            posts.append(post)
-            if len(posts) >= max_posts:
-                return posts
+            merge_facebook_post(collected, post)
 
         if snapshots:
-            return posts
+            return list(collected.values())[:max_posts]
 
         for index in range(count):
             try:
@@ -566,13 +600,8 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 continue
             if post is None:
                 continue
-            if post.identity_key in identities:
-                continue
-            identities.add(post.identity_key)
-            posts.append(post)
-            if len(posts) >= max_posts:
-                break
-        return posts
+            merge_facebook_post(collected, post)
+        return list(collected.values())[:max_posts]
 
     async def _nearest_post_hrefs(self, message: Locator) -> list[str]:
         """Find permalink candidates on the smallest ancestor that owns the story message."""
@@ -580,8 +609,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
             r"""
             node => {
                 let owner = node;
-                let depth = 0;
-                while (owner && depth < 60 && owner.getAttribute('role') !== 'feed') {
+                while (owner && owner.getAttribute('role') !== 'feed') {
                     const hrefs = Array.from(owner.querySelectorAll('a[href]'))
                         .map(link => link.href)
                         .filter(href => (
@@ -590,7 +618,15 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                         ));
                     if (hrefs.length) return hrefs;
                     owner = owner.parentElement;
-                    depth += 1;
+                }
+                const article = node.closest('article, [role=article]');
+                if (article) {
+                    return Array.from(article.querySelectorAll('a[href]'))
+                        .map(link => link.href)
+                        .filter(href => (
+                            /\/groups\/[^/]+\/(posts|permalink)\//i.test(href)
+                            || /[?&](story_fbid|multi_permalinks)=/i.test(href)
+                        ));
                 }
                 return [];
             }

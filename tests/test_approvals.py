@@ -44,11 +44,16 @@ def create_candidate(
     draft: str | None = VALID_DRAFT,
     external_post_id: str = "222",
     group_id: str = "fixture-group",
+    include_post_url: bool = True,
 ) -> Lead:
     post = database.save_post(
         FacebookPost(
             external_post_id=external_post_id,
-            post_url=f"https://www.facebook.com/groups/111/posts/{external_post_id}",
+            post_url=(
+                f"https://www.facebook.com/groups/111/posts/{external_post_id}"
+                if include_post_url
+                else None
+            ),
             group_id=group_id,
             group_name="Synthetic Fixture Group",
             author_name="Fixture Customer",
@@ -116,6 +121,26 @@ def test_approve_is_one_time_and_preserves_exact_draft(database: Database) -> No
             now=now + timedelta(minutes=2),
         )
     assert database.get_approval_request(request_id) == approved.request
+
+
+def test_queue_posting_requires_exact_source_permalink_atomically(database: Database) -> None:
+    create_candidate(database, include_post_url=False)
+    now = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    service = LocalApprovalService(database, expiration_minutes=20)
+    request_id = service.prepare_candidates(limit=10, now=now)[0].request.id or 0
+
+    with pytest.raises(ValueError, match="exact Facebook post URL"):
+        service.decide(
+            request_id,
+            ApprovalAction.APPROVE,
+            queue_posting=True,
+            now=now + timedelta(minutes=1),
+        )
+
+    request = database.get_approval_request(request_id)
+    assert request is not None
+    assert request.status is ApprovalStatus.PENDING
+    assert database.get_posting_job_for_approval(request_id) is None
 
 
 def test_edit_requires_a_locally_valid_response(database: Database) -> None:

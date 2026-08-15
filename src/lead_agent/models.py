@@ -9,6 +9,11 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+FACEBOOK_GROUP_POST_PATH_PATTERN = re.compile(
+    r"^/groups/[^/]+/(?:posts|permalink)/[^/?#]+/?$",
+    re.IGNORECASE,
+)
+
 
 def utc_now() -> datetime:
     """Return an aware UTC timestamp."""
@@ -42,6 +47,25 @@ def canonicalize_facebook_url(url: str) -> str:
             "",
         )
     )
+
+
+def is_exact_facebook_post_url(value: str | None) -> bool:
+    """Return whether a URL safely identifies one Facebook group post."""
+    if not value:
+        return False
+    parts = urlsplit(value.strip())
+    hostname = (parts.hostname or "").casefold()
+    if parts.scheme.casefold() != "https" or (
+        hostname != "facebook.com" and not hostname.endswith(".facebook.com")
+    ):
+        return False
+    if FACEBOOK_GROUP_POST_PATH_PATTERN.fullmatch(parts.path):
+        return True
+    path_segments = [segment for segment in parts.path.split("/") if segment]
+    if len(path_segments) < 2 or path_segments[0].casefold() != "groups":
+        return False
+    query = dict(parse_qsl(parts.query))
+    return bool(query.get("story_fbid", "").strip() or query.get("multi_permalinks", "").strip())
 
 
 class PostStatus(StrEnum):
