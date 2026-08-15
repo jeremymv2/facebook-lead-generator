@@ -309,7 +309,7 @@ def test_tunneled_http_surface_has_no_listing_and_enforces_origin(tmp_path: Path
     status, headers, page = handle_request(controller, "GET", f"/review/{TOKEN}")
     assert status == HTTPStatus.OK
     assert headers["Cache-Control"] == "no-store"
-    assert headers["Referrer-Policy"] == "no-referrer"
+    assert headers["Referrer-Policy"] == "same-origin"
     assert "frame-ancestors 'none'" in headers["Content-Security-Policy"]
     csrf = csrf_from_page(page)
     form = urlencode({"csrf_token": csrf})
@@ -340,6 +340,68 @@ def test_tunneled_http_surface_has_no_listing_and_enforces_origin(tmp_path: Path
 
     terminal = controller.render(TOKEN, now=now + timedelta(minutes=1))
     assert "Draft approved" in terminal
+
+
+@pytest.mark.parametrize("origin", [None, "null"])
+def test_tunneled_http_surface_accepts_same_token_referer_fallback(
+    tmp_path: Path,
+    origin: str | None,
+) -> None:
+    controller, _, _, now = prepared_controller(tmp_path)
+    status, _, page = handle_request(controller, "GET", f"/review/{TOKEN}")
+    assert status == HTTPStatus.OK
+    form = urlencode({"csrf_token": csrf_from_page(page)})
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Referer": f"{PUBLIC_BASE_URL}/review/{TOKEN}",
+    }
+    if origin is not None:
+        headers["Origin"] = origin
+
+    status, response_headers, _ = handle_request(
+        controller,
+        "POST",
+        f"/review/{TOKEN}/approve",
+        body=form,
+        headers=headers,
+    )
+
+    assert status == HTTPStatus.SEE_OTHER
+    assert response_headers["Location"] == f"/review/{TOKEN}?result=approved"
+    assert "Draft approved" in controller.render(TOKEN, now=now + timedelta(minutes=1))
+
+
+def test_tunneled_http_surface_rejects_unsafe_referer_fallbacks(tmp_path: Path) -> None:
+    controller, _, _, _ = prepared_controller(tmp_path)
+    status, _, page = handle_request(controller, "GET", f"/review/{TOKEN}")
+    assert status == HTTPStatus.OK
+    form = urlencode({"csrf_token": csrf_from_page(page)})
+    unsafe_headers = [
+        {
+            "Origin": "null",
+            "Referer": f"{PUBLIC_BASE_URL}/review/{'B' * 43}",
+        },
+        {
+            "Origin": "https://attacker.invalid",
+            "Referer": f"{PUBLIC_BASE_URL}/review/{TOKEN}",
+        },
+        {},
+    ]
+
+    for headers in unsafe_headers:
+        status, _, body = handle_request(
+            controller,
+            "POST",
+            f"/review/{TOKEN}/approve",
+            body=form,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                **headers,
+            },
+        )
+
+        assert status == HTTPStatus.FORBIDDEN
+        assert body == "Invalid Origin header"
 
 
 def test_relay_healthcheck_requires_exact_success_response(

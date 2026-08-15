@@ -70,6 +70,28 @@ def relay_is_healthy(public_base_url: str, *, timeout_seconds: int = 5) -> bool:
         return False
 
 
+def _same_origin_submission(
+    *,
+    origin: str | None,
+    referer: str | None,
+    public_origin: str,
+    token: str,
+) -> bool:
+    """Accept a strict Origin or a token-matched same-origin browser fallback."""
+    if origin == public_origin:
+        return True
+    if origin not in {None, "null"} or referer is None:
+        return False
+    referer_parts = urlsplit(referer)
+    referer_origin = f"{referer_parts.scheme}://{referer_parts.netloc}"
+    return (
+        referer_origin == public_origin
+        and referer_parts.path == f"/review/{token}"
+        and not referer_parts.query
+        and not referer_parts.fragment
+    )
+
+
 class RemoteApprovalController:
     """Resolve one opaque review URL and apply one human decision."""
 
@@ -440,12 +462,20 @@ def _handler_class(
             if self.headers.get("Host", "") != public_host:
                 self._send_text(HTTPStatus.MISDIRECTED_REQUEST, "Invalid Host header")
                 return
-            if self.headers.get("Origin") != public_origin:
-                self._send_text(HTTPStatus.FORBIDDEN, "Invalid Origin header")
-                return
             match = DECISION_PATH.fullmatch(urlsplit(self.path).path)
             if match is None:
+                if self.headers.get("Origin") != public_origin:
+                    self._send_text(HTTPStatus.FORBIDDEN, "Invalid Origin header")
+                    return
                 self._send_text(HTTPStatus.NOT_FOUND, "Not found")
+                return
+            if not _same_origin_submission(
+                origin=self.headers.get("Origin"),
+                referer=self.headers.get("Referer"),
+                public_origin=public_origin,
+                token=match.group(1),
+            ):
+                self._send_text(HTTPStatus.FORBIDDEN, "Invalid Origin header")
                 return
             if self.headers.get_content_type() != "application/x-www-form-urlencoded":
                 self._send_text(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "Unsupported form encoding")
@@ -498,7 +528,7 @@ def _handler_class(
                 "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; "
                 "base-uri 'none'; frame-ancestors 'none'",
             )
-            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Referrer-Policy", "same-origin")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
