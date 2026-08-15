@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from lead_agent.ai import (
+    DRAFT_BRAND_HEADER,
     AIConfigurationError,
     AIProviderDisabledError,
     AIProviderError,
@@ -121,6 +122,7 @@ def test_heuristic_draft_is_direct_and_locally_validated() -> None:
 
     draft = provider.draft_response(source, classification, context())
 
+    assert draft.response.startswith(f"{DRAFT_BRAND_HEADER}\n")
     assert not draft.response.startswith(("Hi ", "Hello ", "Hey "))
     assert "JJ Miller & Co." in draft.response
     assert "deck work" in draft.response
@@ -142,6 +144,7 @@ def test_heuristic_landscaping_draft_uses_requested_service_language() -> None:
 
     draft = provider.draft_response(source, classification, context())
 
+    assert draft.response.startswith(f"{DRAFT_BRAND_HEADER}\n")
     assert classification.service_category == "landscaping"
     assert "free estimate" in draft.response.casefold()
     assert "landscaping" in draft.response.casefold()
@@ -392,7 +395,7 @@ def test_heuristic_drafts_vary_by_stable_post_content() -> None:
         classification = provider.classify_post(source, context())
         response = provider.draft_response(source, classification, context()).response
         drafts.add(response)
-        openings.add(response.split(".", maxsplit=1)[0])
+        openings.add(response.splitlines()[1].split(".", maxsplit=1)[0])
         assert "Licensed & Insured" in response
 
     assert len(drafts) == 12
@@ -496,8 +499,9 @@ def test_gemini_provider_uses_structured_schemas_and_minimal_post_metadata() -> 
             json.dumps(
                 {
                     "response": (
-                        "JJ Miller & Co. can help with your deck project. Licensed & Insured. "
-                        "Free estimates. Text me at 502-528-0858 or visit "
+                        f"{DRAFT_BRAND_HEADER}\n"
+                        "We can help with your deck project and provide free estimates. "
+                        "Text me at 502-528-0858 or visit "
                         "https://jjmillerco.com."
                     )
                 }
@@ -511,11 +515,11 @@ def test_gemini_provider_uses_structured_schemas_and_minimal_post_metadata() -> 
     draft = provider.draft_response(source, classification, context())
 
     assert classification.intent is LeadIntent.HIRING
-    assert "JJ Miller & Co." in draft.response
+    assert draft.response.startswith(f"{DRAFT_BRAND_HEADER}\n")
     assert len(transport.calls) == 2
     assert "post_text" in cast(str, transport.calls[0]["prompt"])
     assert "not lawn care or lawn services" in cast(str, transport.calls[1]["prompt"])
-    assert "Licensed & Insured" in cast(str, transport.calls[1]["prompt"])
+    assert DRAFT_BRAND_HEADER in cast(str, transport.calls[1]["prompt"])
     assert "rhetorical question" in cast(str, transport.calls[1]["prompt"])
     assert "fixture-group" not in cast(str, transport.calls[0]["prompt"])
     assert "properties" in cast(dict[str, object], transport.calls[0]["schema"])
