@@ -54,7 +54,6 @@ from lead_agent.operations import (
     RetentionService,
     RetentionSummary,
     ScanCycleSummary,
-    is_severe_post_shortfall,
     is_within_quiet_hours,
 )
 from lead_agent.posting import ApprovedPostingService, PostingError, PostingExecutionResult
@@ -70,7 +69,6 @@ from lead_agent.remote_approval_web import (
 from lead_agent.scanner import (
     ReadOnlyScanService,
     ScanSummary,
-    TransientFacebookReadError,
     safe_scan_error_code,
 )
 
@@ -311,6 +309,8 @@ def _doctor_payload(settings: Settings) -> dict[str, object]:
         "facebook_group_max_retries": settings.facebook_group_max_retries,
         "facebook_group_retry_backoff_seconds": settings.facebook_group_retry_backoff_seconds,
         "facebook_group_delay_seconds": settings.facebook_group_delay_seconds,
+        "facebook_scan_max_wait_seconds": settings.facebook_scan_max_wait_seconds,
+        "facebook_scan_idle_seconds": settings.facebook_scan_idle_seconds,
         "max_posts_per_group": settings.max_posts_per_group,
         "operations_degraded_cycle_limit": settings.operations_degraded_cycle_limit,
         "operations_incomplete_group_rate_threshold": (
@@ -318,6 +318,9 @@ def _doctor_payload(settings: Settings) -> dict[str, object]:
         ),
         "operations_minimum_group_post_yield_rate": (
             settings.operations_minimum_group_post_yield_rate
+        ),
+        "operations_healthy_group_post_yield_rate": (
+            settings.operations_healthy_group_post_yield_rate
         ),
         "cycle_classification_limit": settings.cycle_classification_limit,
         "candidate_duplicate_window_hours": settings.candidate_duplicate_window_hours,
@@ -448,53 +451,48 @@ async def _scan_groups_for_cycle(
     database.initialize()
     summaries: list[ScanSummary] = []
     failures = 0
-    retried = 0
-    recovered = 0
+    failed_retries = 0
     logger = logging.getLogger("lead_agent.operations")
     async with FacebookReadOnlyBrowser(settings) as browser:
         scanner = ReadOnlyScanService(database, browser)
         for group_index, group in enumerate(groups):
             if group_index:
                 await asyncio.sleep(settings.facebook_group_delay_seconds)
-            retry_count = 0
             try:
-                while True:
-                    try:
-                        summary = await scanner.scan_group(group, max_posts=max_posts)
-                        summaries.append(summary)
-                        if retry_count:
-                            recovered += 1
-                        break
-                    except FacebookSafetyStop:
-                        raise
-                    except TransientFacebookReadError as error:
-                        if retry_count >= settings.facebook_group_max_retries:
-                            raise
-                        retry_count += 1
-                        retried += 1
-                        logger.warning(
-                            "Transient group scan failure; one bounded retry is scheduled",
-                            extra={
-                                "action": "cycle.group_scan.retry",
-                                "result": "retrying",
-                                "group_id": group.id,
-                                "attempt": retry_count + 1,
-                                "error_code": error.safe_code,
-                                "retry_in_seconds": (settings.facebook_group_retry_backoff_seconds),
-                            },
-                        )
-                        await asyncio.sleep(settings.facebook_group_retry_backoff_seconds)
+                summary = await scanner.scan_group(
+                    group,
+                    max_posts=max_posts,
+                    max_retries=settings.facebook_group_max_retries,
+                    retry_backoff_seconds=settings.facebook_group_retry_backoff_seconds,
+                    healthy_yield_rate=settings.operations_healthy_group_post_yield_rate,
+                    severe_yield_rate=settings.operations_minimum_group_post_yield_rate,
+                )
+                summaries.append(summary)
+                if summary.retry_count:
+                    logger.info(
+                        "Bounded group scan retry completed",
+                        extra={
+                            "action": "cycle.group_scan.retry",
+                            "result": "recovered" if summary.recovered else "partial",
+                            "group_id": group.id,
+                            "retry_count": summary.retry_count,
+                        },
+                    )
             except FacebookSafetyStop:
                 raise
             except Exception as error:
                 failures += 1
+                error_retry_count = getattr(error, "retry_count", 0)
+                failed_retries += error_retry_count if isinstance(error_retry_count, int) else 0
                 logger.warning(
                     "Group scan failed; cycle will continue",
                     extra={
                         "action": "cycle.group_scan",
                         "result": "failed",
                         "group_id": group.id,
-                        "attempt": retry_count + 1,
+                        "attempt": (
+                            error_retry_count + 1 if isinstance(error_retry_count, int) else 1
+                        ),
                         "error_code": safe_scan_error_code(error),
                     },
                 )
@@ -504,17 +502,11 @@ async def _scan_groups_for_cycle(
         posts_seen=sum(summary.posts_seen for summary in summaries),
         posts_new=sum(len(summary.new_posts) for summary in summaries),
         duplicates=sum(summary.duplicates for summary in summaries),
-        groups_retried=retried,
-        groups_recovered=recovered,
+        groups_retried=sum(summary.retry_count for summary in summaries) + failed_retries,
+        groups_recovered=sum(summary.recovered for summary in summaries),
+        groups_shortfall=sum(summary.shortfall for summary in summaries),
         groups_partial=sum(summary.partial for summary in summaries),
-        groups_severely_partial=sum(
-            is_severe_post_shortfall(
-                posts_seen=summary.posts_seen,
-                posts_requested=summary.posts_requested,
-                minimum_yield_rate=settings.operations_minimum_group_post_yield_rate,
-            )
-            for summary in summaries
-        ),
+        groups_severely_partial=sum(summary.severe_partial for summary in summaries),
         posts_requested=sum(summary.posts_requested for summary in summaries)
         + failures * max_posts,
     )
@@ -658,6 +650,7 @@ def _run_operations_cycle(
                 details={
                     "groups_scanned": result.scan.groups_scanned,
                     "groups_failed": result.scan.groups_failed,
+                    "groups_shortfall": result.scan.groups_shortfall,
                     "groups_partial": result.scan.groups_partial,
                     "groups_severely_partial": result.scan.groups_severely_partial,
                     "groups_retried": result.scan.groups_retried,

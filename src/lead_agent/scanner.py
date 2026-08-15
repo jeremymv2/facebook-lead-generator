@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -18,7 +19,7 @@ class FacebookReader(Protocol):
         group: FacebookGroup,
         *,
         max_posts: int,
-    ) -> list[FacebookPost]: ...
+    ) -> FacebookReadResult | list[FacebookPost]: ...
 
 
 class TransientFacebookReadError(RuntimeError):
@@ -34,6 +35,7 @@ class TransientFacebookReadError(RuntimeError):
         self.stage = stage
         self.kind = kind
         self.screenshot_path = screenshot_path
+        self.retry_count = 0
         super().__init__(self.safe_code)
 
     @property
@@ -42,11 +44,77 @@ class TransientFacebookReadError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class FacebookReadDiagnostics:
+    """Content-free measurements explaining how one Facebook feed rendered."""
+
+    elapsed_ms: int = 0
+    iterations: int = 0
+    scrolls: int = 0
+    story_nodes_seen: int = 0
+    visible_articles_seen: int = 0
+    readable_posts: int = 0
+    permalinked_posts: int = 0
+    missing_permalinks: int = 0
+    detached_nodes: int = 0
+    duplicate_identities: int = 0
+    progress_events: int = 0
+    stop_reason: str = "unknown"
+
+    def combine(self, other: FacebookReadDiagnostics) -> FacebookReadDiagnostics:
+        """Combine bounded retry diagnostics without exposing Facebook content."""
+        return FacebookReadDiagnostics(
+            elapsed_ms=self.elapsed_ms + other.elapsed_ms,
+            iterations=self.iterations + other.iterations,
+            scrolls=self.scrolls + other.scrolls,
+            story_nodes_seen=max(self.story_nodes_seen, other.story_nodes_seen),
+            visible_articles_seen=max(
+                self.visible_articles_seen,
+                other.visible_articles_seen,
+            ),
+            readable_posts=max(self.readable_posts, other.readable_posts),
+            permalinked_posts=max(self.permalinked_posts, other.permalinked_posts),
+            missing_permalinks=max(self.missing_permalinks, other.missing_permalinks),
+            detached_nodes=self.detached_nodes + other.detached_nodes,
+            duplicate_identities=self.duplicate_identities + other.duplicate_identities,
+            progress_events=self.progress_events + other.progress_events,
+            stop_reason=other.stop_reason,
+        )
+
+    def audit_details(self) -> dict[str, object]:
+        return {
+            "elapsed_ms": self.elapsed_ms,
+            "iterations": self.iterations,
+            "scrolls": self.scrolls,
+            "story_nodes_seen": self.story_nodes_seen,
+            "visible_articles_seen": self.visible_articles_seen,
+            "readable_posts": self.readable_posts,
+            "permalinked_posts": self.permalinked_posts,
+            "missing_permalinks": self.missing_permalinks,
+            "detached_nodes": self.detached_nodes,
+            "duplicate_identities": self.duplicate_identities,
+            "progress_events": self.progress_events,
+            "stop_reason": self.stop_reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class FacebookReadResult:
+    posts: tuple[FacebookPost, ...]
+    diagnostics: FacebookReadDiagnostics = FacebookReadDiagnostics()
+    severe_screenshot_path: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ScanSummary:
     group: FacebookGroup
     posts_seen: int
     new_posts: tuple[FacebookPost, ...]
     posts_requested: int = 0
+    retry_count: int = 0
+    recovered: bool = False
+    healthy_yield_rate: float = 0.8
+    severe_yield_rate: float = 0.5
+    diagnostics: FacebookReadDiagnostics = FacebookReadDiagnostics()
 
     @property
     def duplicates(self) -> int:
@@ -54,7 +122,21 @@ class ScanSummary:
 
     @property
     def partial(self) -> bool:
+        return (
+            self.posts_requested > 0
+            and self.posts_seen / self.posts_requested < self.healthy_yield_rate
+        )
+
+    @property
+    def shortfall(self) -> bool:
         return self.posts_requested > 0 and self.posts_seen < self.posts_requested
+
+    @property
+    def severe_partial(self) -> bool:
+        return (
+            self.posts_requested > 0
+            and self.posts_seen / self.posts_requested < self.severe_yield_rate
+        )
 
 
 class ReadOnlyScanService:
@@ -64,11 +146,61 @@ class ReadOnlyScanService:
         self.database = database
         self.reader = reader
 
-    async def scan_group(self, group: FacebookGroup, *, max_posts: int) -> ScanSummary:
+    async def scan_group(
+        self,
+        group: FacebookGroup,
+        *,
+        max_posts: int,
+        max_retries: int = 0,
+        retry_backoff_seconds: float = 0,
+        healthy_yield_rate: float = 0.8,
+        severe_yield_rate: float = 0.5,
+    ) -> ScanSummary:
+        if max_retries < 0 or retry_backoff_seconds < 0:
+            raise ValueError("scan retry settings cannot be negative")
+        if not 0 < severe_yield_rate < healthy_yield_rate <= 1:
+            raise ValueError("scan yield thresholds are invalid")
+        collected: dict[str, FacebookPost] = {}
+        diagnostics = FacebookReadDiagnostics()
+        retry_count = 0
+        retry_error: str | None = None
+        severe_screenshot_captured = False
         try:
-            discovered = await self.reader.read_group(group, max_posts=max_posts)
-            if any(post.group_id != group.id for post in discovered):
-                raise ValueError("Facebook reader returned a post for an unexpected group")
+            while True:
+                try:
+                    raw_result = await self.reader.read_group(group, max_posts=max_posts)
+                except FacebookSafetyStop:
+                    raise
+                except TransientFacebookReadError as error:
+                    if retry_count >= max_retries:
+                        if collected:
+                            retry_error = safe_scan_error_code(error)
+                            break
+                        error.retry_count = retry_count
+                        raise
+                    retry_count += 1
+                    if retry_backoff_seconds:
+                        await asyncio.sleep(retry_backoff_seconds)
+                    continue
+
+                result = (
+                    raw_result
+                    if isinstance(raw_result, FacebookReadResult)
+                    else FacebookReadResult(posts=tuple(raw_result))
+                )
+                if any(post.group_id != group.id for post in result.posts):
+                    raise ValueError("Facebook reader returned a post for an unexpected group")
+                diagnostics = diagnostics.combine(result.diagnostics)
+                severe_screenshot_captured = (
+                    severe_screenshot_captured or result.severe_screenshot_path is not None
+                )
+                _merge_read_posts(collected, result.posts)
+                severe = max_posts > 0 and len(collected) / max_posts < severe_yield_rate
+                if not severe or retry_count >= max_retries:
+                    break
+                retry_count += 1
+                if retry_backoff_seconds:
+                    await asyncio.sleep(retry_backoff_seconds)
         except Exception as error:
             safe_error = safe_scan_error_code(error)
             self.database.record_group_scan_failure(
@@ -84,30 +216,56 @@ class ReadOnlyScanService:
                     action="group.scan",
                     result="stopped" if isinstance(error, FacebookSafetyStop) else "failed",
                     group_id=group.id,
-                    details={"error": safe_error, "posts_requested": max_posts},
+                    details={
+                        "error": safe_error,
+                        "posts_requested": max_posts,
+                        "retry_count": retry_count,
+                    },
                 )
             )
             raise
 
+        discovered = list(collected.values())[:max_posts]
+        permalinked_posts = sum(post.post_url is not None for post in discovered)
+        diagnostics = replace(
+            diagnostics,
+            readable_posts=len(discovered),
+            permalinked_posts=permalinked_posts,
+            missing_permalinks=max(0, len(discovered) - permalinked_posts),
+        )
         new_posts: list[FacebookPost] = []
         persisted_posts: list[FacebookPost] = []
         for post in discovered:
-            result = self.database.save_post(post)
-            persisted_posts.append(result.post)
-            if result.created:
-                new_posts.append(result.post)
+            save_result = self.database.save_post(post)
+            persisted_posts.append(save_result.post)
+            if save_result.created:
+                new_posts.append(save_result.post)
                 self.database.record_audit_event(
                     AuditEvent(
                         component="facebook_scanner",
                         action="post.discovered",
                         result="new",
-                        post_id=result.post.id,
+                        post_id=save_result.post.id,
                         group_id=group.id,
-                        details={"identity_key": result.post.identity_key},
+                        details={"identity_key": save_result.post.identity_key},
                     )
                 )
 
         last_identity = persisted_posts[0].identity_key if persisted_posts else None
+        summary = ScanSummary(
+            group=group,
+            posts_seen=len(discovered),
+            new_posts=tuple(new_posts),
+            posts_requested=max_posts,
+            retry_count=retry_count,
+            recovered=(
+                retry_count > 0
+                and (max_posts == 0 or len(discovered) / max_posts >= severe_yield_rate)
+            ),
+            healthy_yield_rate=healthy_yield_rate,
+            severe_yield_rate=severe_yield_rate,
+            diagnostics=diagnostics,
+        )
         self.database.record_group_scan_success(
             group_id=group.id,
             group_name=group.name,
@@ -115,28 +273,63 @@ class ReadOnlyScanService:
             posts_seen=len(discovered),
             posts_new=len(new_posts),
             posts_requested=max_posts,
-            is_partial=len(discovered) < max_posts,
+            is_partial=summary.partial,
             last_known_post_identity=last_identity,
         )
         self.database.record_audit_event(
             AuditEvent(
                 component="facebook_scanner",
                 action="group.scan",
-                result="partial" if len(discovered) < max_posts else "success",
+                result="partial" if summary.partial else "success",
                 group_id=group.id,
                 details={
                     "posts_seen": len(discovered),
                     "posts_new": len(new_posts),
                     "posts_requested": max_posts,
+                    "shortfall": summary.shortfall,
+                    "severe_partial": summary.severe_partial,
+                    "retry_count": retry_count,
+                    "recovered": summary.recovered,
+                    "retry_error": retry_error,
+                    "severe_screenshot_captured": severe_screenshot_captured,
+                    **diagnostics.audit_details(),
                 },
             )
         )
-        return ScanSummary(
-            group=group,
-            posts_seen=len(discovered),
-            new_posts=tuple(new_posts),
-            posts_requested=max_posts,
+        return summary
+
+
+def _merge_read_posts(
+    collected: dict[str, FacebookPost],
+    discovered: tuple[FacebookPost, ...],
+) -> None:
+    """Merge retry results by stable identity or content while preserving hydration."""
+    for post in discovered:
+        existing = next(
+            (
+                value
+                for value in collected.values()
+                if value.identity_key == post.identity_key
+                or (
+                    value.external_post_id is not None
+                    and value.external_post_id == post.external_post_id
+                )
+                or (
+                    value.text_hash == post.text_hash
+                    and (value.post_url is None or post.post_url is None)
+                )
+            ),
+            None,
         )
+        if existing is None:
+            collected[post.identity_key] = post
+            continue
+        if existing.external_post_id is None and post.external_post_id is not None:
+            existing.external_post_id = post.external_post_id
+        if existing.post_url is None and post.post_url is not None:
+            existing.post_url = post.post_url
+        if existing.author_name is None and post.author_name is not None:
+            existing.author_name = post.author_name
 
 
 def safe_scan_error_code(error: Exception) -> str:

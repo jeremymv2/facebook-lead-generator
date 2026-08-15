@@ -179,12 +179,15 @@ Important settings include:
 | `OPERATIONS_DEGRADED_CYCLE_LIMIT` | `2` | Consecutive materially incomplete cycles before automatic pause |
 | `OPERATIONS_INCOMPLETE_GROUP_RATE_THRESHOLD` | `0.25` | Failed-plus-severely-partial group rate that advances the circuit breaker |
 | `OPERATIONS_MINIMUM_GROUP_POST_YIELD_RATE` | `0.50` | A group below this requested-post yield is severely partial |
+| `OPERATIONS_HEALTHY_GROUP_POST_YIELD_RATE` | `0.80` | Yield at or above this rate is healthy; lower non-severe results remain partial |
 | `CYCLE_CLASSIFICATION_LIMIT` | `100` | Maximum saved posts classified per cycle |
 | `FACEBOOK_PROFILE_PATH` | `~/.jjmiller-lead-agent/facebook-profile` | Dedicated persistent profile |
 | `BROWSER_HEADLESS` | `false` | Keeps manual login and scan behavior visible |
-| `FACEBOOK_GROUP_MAX_RETRIES` | `1` | Bounded transient retries per group and cycle |
-| `FACEBOOK_GROUP_RETRY_BACKOFF_SECONDS` | `5` | Delay before the one transient retry |
+| `FACEBOOK_GROUP_MAX_RETRIES` | `1` | Bounded transient or severe-partial retries per group and cycle |
+| `FACEBOOK_GROUP_RETRY_BACKOFF_SECONDS` | `5` | Delay before the one bounded group retry |
 | `FACEBOOK_GROUP_DELAY_SECONDS` | `2` | Delay between unattended group navigations |
+| `FACEBOOK_SCAN_MAX_WAIT_SECONDS` | `25` | Hard cap for progress-aware feed collection |
+| `FACEBOOK_SCAN_IDLE_SECONDS` | `5` | Stop after this long without finding another unique readable post |
 | `FACEBOOK_MAX_SCROLLS` | `12` | Maximum bounded lazy-load scrolls per group |
 | `FACEBOOK_SCROLL_SETTLE_SECONDS` | `0.75` | Wait after each bounded scroll |
 | `MAX_POSTS_PER_GROUP` | `10` | Conservative visible-post target per run |
@@ -352,9 +355,11 @@ clicking, typing, commenting, or any other automated Facebook write action.
 The scanner waits through Facebook's initial placeholder rendering and requires at least one
 text-bearing post. If containers appear but readable post text never loads, the run stops safely and
 captures a local screenshot instead of recording a misleading successful zero-post scan.
-If Facebook yields fewer readable posts than the configured target, the group is recorded as
-`partial`, not fully successful. The dashboard reports full, partial, and failed group coverage
-separately. Two consecutive cycles with at least 25% failed-or-severely-partial groups automatically
+If Facebook yields 80% or more of the configured target, the group remains healthy and any
+shortfall is reported separately. Lower yields are `partial`; yields below 50% are severe and get
+one bounded fresh-navigation retry plus a local diagnostic screenshot. The dashboard reports
+healthy, minor-shortfall, partial, severe, and failed coverage separately. Two consecutive cycles
+with at least 25% failed-or-severely-partial groups automatically
 pause future unattended cycles; two consecutive fatal cycle errors do the same. An operator must review
 the content-free health details and explicitly resume the worker.
 Top-level post text is isolated from nested comment articles so a long reply is never paired with
@@ -384,8 +389,9 @@ AI_PROVIDER=heuristic lead-agent run-cycle --max-posts 10 --skip-notifications
 ```
 
 Unlike `scan-facebook`, `run-cycle` prints only aggregate counts and never prints discovered post
-text. Unattended cycles wait between groups and retry a typed transient navigation/feed failure at
-most once after a bounded backoff. Aggregate health reports retry and recovery counts. An exhausted
+text. Unattended cycles wait between groups and retry a typed transient navigation/feed failure or
+severe partial result at most once after a bounded backoff. Results from both readable attempts are
+merged before persistence. Aggregate health reports retry and recovery counts. An exhausted
 transient failure is recorded and the remaining groups continue; a Facebook login requirement,
 checkpoint, CAPTCHA, unexpected domain, or other safety stop is never retried and still aborts the
 whole cycle. Content-free logs identify only the group alias, attempt, stage, and safe error code.
@@ -818,9 +824,10 @@ Expired PNG/JPEG/WebP screenshots and rotated `.log`/`.jsonl` files are removed 
 configured directories; databases, group configuration, browser profiles, and credentials are
 never retention targets.
 
-A group remains visibly `partial` whenever Facebook returns fewer posts than requested, but an
-ordinary short yield no longer advances the auto-pause streak. For circuit-breaker purposes, a
-group is materially incomplete only when it fails or returns less than 50% of its requested posts.
+A group remains healthy at 80% or better yield, with 8–9 of 10 shown as a minor shortfall. Lower
+non-severe yields remain visibly `partial`. A cycle is degraded only when a group fails, a group
+returns less than 50% of requested posts after its bounded retry, or a notification fails. For
+circuit-breaker purposes, a group is materially incomplete only when it fails or remains severe.
 Two consecutive cycles where at least 25% of attempted groups are materially incomplete still
 pause the worker. These thresholds are configurable, while the detailed per-group health remains
 available for diagnosing normal Facebook feed variability.

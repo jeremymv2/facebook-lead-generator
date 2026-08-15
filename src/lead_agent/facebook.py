@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NoReturn, cast
@@ -22,7 +22,11 @@ from lead_agent.facebook_state import (
 )
 from lead_agent.groups import FacebookGroup
 from lead_agent.models import FacebookPost, canonicalize_facebook_url, normalize_post_text
-from lead_agent.scanner import TransientFacebookReadError
+from lead_agent.scanner import (
+    FacebookReadDiagnostics,
+    FacebookReadResult,
+    TransientFacebookReadError,
+)
 
 FACEBOOK_HOME = "https://www.facebook.com/"
 POST_PATH_PATTERN = re.compile(r"/(?:posts|permalink)/([^/?#]+)", re.IGNORECASE)
@@ -38,6 +42,18 @@ REPEATED_MESSAGE_PREFIX_LENGTH = 80
 
 class FacebookBrowserError(RuntimeError):
     """Raised when the dedicated Playwright browser cannot be started safely."""
+
+
+@dataclass(slots=True)
+class _FeedTelemetry:
+    started_at: float
+    iterations: int = 0
+    scrolls: int = 0
+    story_nodes_seen: int = 0
+    visible_articles_seen: int = 0
+    detached_nodes: int = 0
+    progress_events: int = 0
+    duplicate_identities: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,7 +332,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         group: FacebookGroup,
         *,
         max_posts: int,
-    ) -> list[FacebookPost]:
+    ) -> FacebookReadResult:
         """Wait for and read visible posts from one allowlisted group."""
         page = await self._page()
         try:
@@ -357,7 +373,15 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
             ) from error
 
         try:
-            return await self._wait_for_readable_posts(page, group, max_posts=max_posts)
+            result = await self._wait_for_readable_posts(page, group, max_posts=max_posts)
+            if (
+                max_posts > 0
+                and len(result.posts) / max_posts
+                < self.settings.operations_minimum_group_post_yield_rate
+            ):
+                screenshot = await self._capture_failure(page, group.id, "severe-partial")
+                return replace(result, severe_screenshot_path=screenshot)
+            return result
         except FacebookSafetyStop:
             raise
         except PlaywrightTimeoutError as error:
@@ -381,24 +405,36 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         group: FacebookGroup,
         *,
         max_posts: int,
-    ) -> list[FacebookPost]:
+    ) -> FacebookReadResult:
         """Retry through Facebook placeholders and transient feed re-renders."""
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + self.settings.facebook_post_load_timeout_seconds
-        initial_grace_deadline = loop.time() + 2
-        permalink_grace_deadline = loop.time() + 2
+        started_at = loop.time()
+        deadline = started_at + self.settings.facebook_scan_max_wait_seconds
+        initial_grace_deadline = started_at + 2
+        permalink_grace_deadline: float | None = None
+        last_progress_at = started_at
         visible_article_seen = False
         collected: dict[str, FacebookPost] = {}
         scrolls = 0
+        telemetry = _FeedTelemetry(started_at=started_at)
+        stop_reason = "timeout"
 
         while loop.time() < deadline:
+            telemetry.iterations += 1
             await self._require_normal_page(page, group_id=group.id)
+            before_count = len(collected)
             try:
+                story_node_count = await page.locator(STORY_MESSAGE_SELECTOR).count()
+                telemetry.story_nodes_seen = max(
+                    telemetry.story_nodes_seen,
+                    story_node_count,
+                )
                 story_posts = await self._extract_story_posts(page, group, max_posts=max_posts)
             except Error:
+                telemetry.detached_nodes += 1
                 story_posts = []
             for story_post in story_posts:
-                merge_facebook_post(collected, story_post)
+                self._merge_feed_post(collected, story_post, telemetry)
 
             if not story_posts or any(post.post_url is None for post in collected.values()):
                 try:
@@ -407,11 +443,13 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 except Error:
                     count = 0
 
+                visible_articles = 0
                 for index in range(count):
                     try:
                         article = articles.nth(index)
                         if not await article.is_visible(timeout=1000):
                             continue
+                        visible_articles += 1
                         visible_article_seen = True
                         if is_facebook_comment_label(
                             await article.get_attribute("aria-label", timeout=1000)
@@ -422,16 +460,32 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                         legacy_post = await self._extract_article(article, group)
                     except Error:
                         # Facebook commonly replaces placeholder nodes while the feed hydrates.
+                        telemetry.detached_nodes += 1
                         continue
                     if legacy_post is not None:
-                        merge_facebook_post(collected, legacy_post)
+                        self._merge_feed_post(collected, legacy_post, telemetry)
+                telemetry.visible_articles_seen = max(
+                    telemetry.visible_articles_seen,
+                    visible_articles,
+                )
+
+            if len(collected) > before_count:
+                telemetry.progress_events += 1
+                last_progress_at = loop.time()
 
             if len(collected) >= max_posts:
                 selected = list(collected.values())[:max_posts]
                 if all(post.post_url is not None for post in selected):
-                    return selected
+                    return self._read_result(loop.time(), selected, telemetry, "target_met")
+                if permalink_grace_deadline is None:
+                    permalink_grace_deadline = min(deadline, loop.time() + 2)
                 if loop.time() >= permalink_grace_deadline:
-                    return selected
+                    return self._read_result(
+                        loop.time(),
+                        selected,
+                        telemetry,
+                        "target_missing_permalinks",
+                    )
                 await page.wait_for_timeout(250)
                 continue
 
@@ -439,6 +493,14 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 await page.wait_for_timeout(250)
                 continue
             if scrolls >= self.settings.facebook_max_scrolls:
+                stop_reason = "scroll_limit"
+                break
+            if (
+                collected
+                and scrolls >= 3
+                and loop.time() - last_progress_at >= self.settings.facebook_scan_idle_seconds
+            ):
+                stop_reason = "idle"
                 break
 
             try:
@@ -448,6 +510,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 # Keep already collected posts and let the next loop inspect the new DOM.
                 await page.wait_for_timeout(100)
             scrolls += 1
+            telemetry.scrolls = scrolls
             remaining_seconds = max(deadline - loop.time(), 0)
             if remaining_seconds > 0:
                 settle_milliseconds = min(
@@ -457,7 +520,12 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 await page.wait_for_timeout(settle_milliseconds)
 
         if collected:
-            return list(collected.values())[:max_posts]
+            return self._read_result(
+                loop.time(),
+                list(collected.values())[:max_posts],
+                telemetry,
+                stop_reason,
+            )
 
         await self._require_normal_page(page, group_id=group.id)
         reason = (
@@ -466,6 +534,43 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
             else "No visible Facebook posts appeared before the safety timeout"
         )
         await self._stop(page, group.id, FacebookPageState.UNEXPECTED, reason)
+
+    @staticmethod
+    def _merge_feed_post(
+        collected: dict[str, FacebookPost],
+        post: FacebookPost,
+        telemetry: _FeedTelemetry,
+    ) -> None:
+        before_count = len(collected)
+        merge_facebook_post(collected, post)
+        if len(collected) == before_count:
+            telemetry.duplicate_identities.add(post.identity_key)
+
+    @staticmethod
+    def _read_result(
+        completed_at: float,
+        posts: list[FacebookPost],
+        telemetry: _FeedTelemetry,
+        stop_reason: str,
+    ) -> FacebookReadResult:
+        permalinked = sum(post.post_url is not None for post in posts)
+        return FacebookReadResult(
+            posts=tuple(posts),
+            diagnostics=FacebookReadDiagnostics(
+                elapsed_ms=max(0, round((completed_at - telemetry.started_at) * 1000)),
+                iterations=telemetry.iterations,
+                scrolls=telemetry.scrolls,
+                story_nodes_seen=telemetry.story_nodes_seen,
+                visible_articles_seen=telemetry.visible_articles_seen,
+                readable_posts=len(posts),
+                permalinked_posts=permalinked,
+                missing_permalinks=max(0, len(posts) - permalinked),
+                detached_nodes=telemetry.detached_nodes,
+                duplicate_identities=len(telemetry.duplicate_identities),
+                progress_events=telemetry.progress_events,
+                stop_reason=stop_reason,
+            ),
+        )
 
     async def _scroll_for_more(self, page: Page) -> None:
         """Reach the last loaded story, then move less than one viewport without clicking."""

@@ -247,7 +247,7 @@ def _render_trends(trends: DashboardTrendSnapshot, *, display_timezone: tzinfo) 
     kpis = f"""
     <div class="kpis">
       <div class="kpi"><strong>{trends.group_success_percent:g}%</strong>
-        <span>Full group coverage</span></div>
+        <span>Healthy group coverage</span></div>
       <div class="kpi"><strong>{trends.posts_seen}</strong><span>Posts seen</span></div>
       <div class="kpi"><strong>{trends.posts_new}</strong><span>New posts</span></div>
       <div class="kpi"><strong>{trends.candidates_created}</strong><span>Candidates</span></div>
@@ -366,7 +366,7 @@ def _render_reliability_row(cycle: CycleTrend, *, display_timezone: tzinfo) -> s
     failure_width = cycle.groups_failed * 100 / attempted if attempted else 0
     time_label = _short_time(cycle.occurred_at, display_timezone)
     aria = (
-        f"{cycle.groups_complete} groups complete, {cycle.groups_partial} partial, and "
+        f"{cycle.groups_complete} groups healthy, {cycle.groups_partial} partial, and "
         f"{cycle.groups_failed} failed at {time_label}"
     )
     return f"""
@@ -377,7 +377,7 @@ def _render_reliability_row(cycle: CycleTrend, *, display_timezone: tzinfo) -> s
         <span class="partial" style="width:{partial_width:.1f}%"></span>
         <span class="failure" style="width:{failure_width:.1f}%"></span>
       </div>
-      <span class="trend-value">{cycle.groups_complete}/{attempted} full</span>
+      <span class="trend-value">{cycle.groups_complete}/{attempted} healthy</span>
     </div>"""
 
 
@@ -408,6 +408,7 @@ def _render_cycle_table(cycles: tuple[CycleTrend, ...], *, display_timezone: tzi
                 {timestamp}</time></td>
               <td><span class="status {status}">{status.title()}</span></td>
               <td>{value.groups_complete}/{value.groups_attempted}</td>
+              <td>{value.groups_near_complete}</td>
               <td>{value.groups_partial}</td>
               <td>{value.groups_severely_partial}</td>
               <td>{value.groups_retried}/{value.groups_recovered}</td>
@@ -419,7 +420,8 @@ def _render_cycle_table(cycles: tuple[CycleTrend, ...], *, display_timezone: tzi
     <section class="panel">
       <h3>Recent cycle details</h3>
       <div class="table-wrap"><table>
-        <thead><tr><th>Completed</th><th>Status</th><th>Full groups</th><th>Partial</th>
+        <thead><tr><th>Completed</th><th>Status</th><th>Healthy groups</th>
+          <th>Minor shortfall</th><th>Partial</th>
           <th>Severe partial</th>
           <th>Retries/recovered</th>
           <th>Seen</th><th>New</th><th>Classified</th><th>Candidates</th></tr></thead>
