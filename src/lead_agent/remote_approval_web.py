@@ -37,6 +37,7 @@ from lead_agent.notifications import remote_token_hash
 LOOPBACK_HOST = "127.0.0.1"
 MAX_FORM_BYTES = 4096
 RELAY_HEALTH_USER_AGENT = "JJMillerLeadAgent/1.0"
+SMS_RETURN_NUMBER_PATTERN = re.compile(r"\+[1-9]\d{7,14}")
 REMOTE_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}")
 REVIEW_PATH = re.compile(r"^/review/([A-Za-z0-9_-]{43})$")
 DECISION_PATH = re.compile(
@@ -102,14 +103,21 @@ class RemoteApprovalController:
         signing_key: str,
         posting_queue_enabled: bool = False,
         posting_enabled_group_ids: set[str] | None = None,
+        sms_return_number: str | None = None,
     ) -> None:
         if len(signing_key) < 32:
             raise ValueError("Remote approval signing key must contain at least 32 characters")
+        if (
+            sms_return_number is not None
+            and SMS_RETURN_NUMBER_PATTERN.fullmatch(sms_return_number) is None
+        ):
+            raise ValueError("SMS return number must use E.164 format")
         self.approvals = approvals
         self.database = approvals.database
         self._signing_key = signing_key.encode("utf-8")
         self.posting_queue_enabled = posting_queue_enabled
         self.posting_enabled_group_ids = posting_enabled_group_ids or set()
+        self.sms_return_number = sms_return_number
 
     def resolve(self, token: str, *, now: datetime | None = None) -> ApprovalReview:
         if REMOTE_TOKEN_PATTERN.fullmatch(token) is None:
@@ -129,6 +137,7 @@ class RemoteApprovalController:
             return _render_terminal(
                 review.request.status,
                 posting_job=self.database.get_posting_job_for_approval(request_id),
+                sms_return_number=self.sms_return_number,
             )
         posting_group_enabled = (
             self.posting_queue_enabled and review.post.group_id in self.posting_enabled_group_ids
@@ -294,7 +303,12 @@ def _render_pending(
     )
 
 
-def _render_terminal(status: ApprovalStatus, *, posting_job: PostingJob | None = None) -> str:
+def _render_terminal(
+    status: ApprovalStatus,
+    *,
+    posting_job: PostingJob | None = None,
+    sms_return_number: str | None = None,
+) -> str:
     messages = {
         ApprovalStatus.APPROVED: "Draft approved",
         ApprovalStatus.EDITED: "Edited response approved",
@@ -319,11 +333,18 @@ def _render_terminal(status: ApprovalStatus, *, posting_job: PostingJob | None =
             ),
         }
         detail = job_messages[posting_job.status]
+    return_link = (
+        f'<a class="return-link" href="sms:{html.escape(sms_return_number, quote=True)}">'
+        "Back to SMS reviews</a>"
+        if sms_return_number is not None
+        else ""
+    )
     return _page(
         f"""
 <section class="card terminal">
   <h1>{html.escape(message)}</h1>
   <p>{html.escape(detail)}</p>
+  {return_link}
 </section>
 """
     )
@@ -356,6 +377,8 @@ def _page(content: str) -> str:
     .approve {{ background: #1f883d; }} .edit {{ background: #0969da; }}
     .post {{ background: #8250df; }}
     .reject {{ background: #cf222e; }}
+    .return-link {{ background: #0969da; border-radius: 9px; color: white; display: block;
+      font-weight: 750; margin-top: 18px; padding: 13px; text-decoration: none; }}
     .safety {{ color: #57606a; font-size: .9rem; text-align: center; }}
     .terminal {{ margin-top: 25vh; text-align: center; }}
   </style>

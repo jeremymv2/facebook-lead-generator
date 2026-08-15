@@ -983,6 +983,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 approvals,
                 signing_key=settings.approval_signing_key.get_secret_value(),
                 posting_queue_enabled=settings.posting_queue_enabled,
+                sms_return_number=settings.telnyx_from_number,
                 posting_enabled_group_ids=(
                     {
                         group.id
