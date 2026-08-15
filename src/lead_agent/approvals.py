@@ -227,6 +227,7 @@ class LocalApprovalService:
         *,
         edited_response: str | None = None,
         rejection_reason: RejectionReason | str | None = None,
+        queue_posting: bool = False,
         now: datetime | None = None,
     ) -> ApprovalReview:
         timestamp = now or utc_now()
@@ -262,6 +263,7 @@ class LocalApprovalService:
             rejection_reason=(
                 selected_rejection_reason if action is ApprovalAction.REJECT else None
             ),
+            enqueue_posting=queue_posting,
         )
         if not changed:
             if review.request.status is ApprovalStatus.EXPIRED:
@@ -274,6 +276,7 @@ class LocalApprovalService:
             result=review.request.status.value,
             details={
                 "edited": action is ApprovalAction.EDIT,
+                "posting_queued": queue_posting,
                 "rejection_reason": (
                     review.request.rejection_reason.value
                     if review.request.rejection_reason is not None

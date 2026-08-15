@@ -10,6 +10,7 @@ from lead_agent.config import Settings
 
 CYCLE_AGENT_LABEL = "com.jjmillerco.lead-agent-cycle"
 REMOTE_AGENT_LABEL = "com.jjmillerco.lead-agent-remote-approval"
+POSTING_AGENT_LABEL = "com.jjmillerco.lead-agent-posting-queue"
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +32,7 @@ def build_launch_agents(
     executable: Path,
     working_directory: Path,
     include_remote_approval: bool,
+    include_posting_worker: bool = False,
 ) -> tuple[LaunchAgentDefinition, ...]:
     """Build launch agents without embedding the contents of ``.env``."""
     executable = executable.resolve()
@@ -69,6 +71,27 @@ def build_launch_agents(
                     "ThrottleInterval": 30,
                     "StandardOutPath": str(log_directory / "remote.stdout.log"),
                     "StandardErrorPath": str(log_directory / "remote.stderr.log"),
+                },
+            )
+        )
+    if include_posting_worker:
+        settings.require_posting_queue_enabled()
+        settings.require_remote_approval_ready()
+        agents.append(
+            LaunchAgentDefinition(
+                label=POSTING_AGENT_LABEL,
+                payload={
+                    **common,
+                    "Label": POSTING_AGENT_LABEL,
+                    "ProgramArguments": [str(executable), "process-posting-queue"],
+                    "EnvironmentVariables": {
+                        "POSTING_ENABLED": "true",
+                        "DRY_RUN": "false",
+                    },
+                    "RunAtLoad": True,
+                    "StartInterval": settings.posting_queue_poll_interval_seconds,
+                    "StandardOutPath": str(log_directory / "posting-queue.stdout.log"),
+                    "StandardErrorPath": str(log_directory / "posting-queue.stderr.log"),
                 },
             )
         )

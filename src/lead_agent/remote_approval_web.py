@@ -23,14 +23,23 @@ from lead_agent.approvals import (
     ApprovalStateError,
     LocalApprovalService,
 )
-from lead_agent.models import ApprovalReview, ApprovalStatus, RejectionReason, utc_now
+from lead_agent.models import (
+    ApprovalReview,
+    ApprovalStatus,
+    PostingJob,
+    PostingJobStatus,
+    RejectionReason,
+    utc_now,
+)
 from lead_agent.notifications import remote_token_hash
 
 LOOPBACK_HOST = "127.0.0.1"
 MAX_FORM_BYTES = 4096
 REMOTE_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}")
 REVIEW_PATH = re.compile(r"^/review/([A-Za-z0-9_-]{43})$")
-DECISION_PATH = re.compile(r"^/review/([A-Za-z0-9_-]{43})/(approve|edit|reject)$")
+DECISION_PATH = re.compile(
+    r"^/review/([A-Za-z0-9_-]{43})/(approve|approve-post|edit|edit-post|reject)$"
+)
 
 
 class RemoteApprovalTokenError(ApprovalError):
@@ -59,12 +68,21 @@ def relay_is_healthy(public_base_url: str, *, timeout_seconds: int = 5) -> bool:
 class RemoteApprovalController:
     """Resolve one opaque review URL and apply one human decision."""
 
-    def __init__(self, approvals: LocalApprovalService, *, signing_key: str) -> None:
+    def __init__(
+        self,
+        approvals: LocalApprovalService,
+        *,
+        signing_key: str,
+        posting_queue_enabled: bool = False,
+        posting_enabled_group_ids: set[str] | None = None,
+    ) -> None:
         if len(signing_key) < 32:
             raise ValueError("Remote approval signing key must contain at least 32 characters")
         self.approvals = approvals
         self.database = approvals.database
         self._signing_key = signing_key.encode("utf-8")
+        self.posting_queue_enabled = posting_queue_enabled
+        self.posting_enabled_group_ids = posting_enabled_group_ids or set()
 
     def resolve(self, token: str, *, now: datetime | None = None) -> ApprovalReview:
         if REMOTE_TOKEN_PATTERN.fullmatch(token) is None:
@@ -80,12 +98,20 @@ class RemoteApprovalController:
         timestamp = now or utc_now()
         review = self.resolve(token, now=timestamp)
         if review.request.status is not ApprovalStatus.PENDING:
-            return _render_terminal(review.request.status)
+            request_id = review.request.id or 0
+            return _render_terminal(
+                review.request.status,
+                posting_job=self.database.get_posting_job_for_approval(request_id),
+            )
         return _render_pending(
             review,
             token=token,
             csrf_token=self._csrf_token(token),
             now=timestamp,
+            posting_available=(
+                self.posting_queue_enabled
+                and review.post.group_id in self.posting_enabled_group_ids
+            ),
         )
 
     def submit(
@@ -104,8 +130,15 @@ class RemoteApprovalController:
         submitted_csrf = _one_form_value(form, "csrf_token")
         if not hmac.compare_digest(submitted_csrf, self._csrf_token(token)):
             raise RemoteCSRFFailure("Approval form failed CSRF validation")
+        queue_posting = action_value in {"approve-post", "edit-post"}
+        base_action = action_value.removesuffix("-post")
+        if queue_posting and (
+            not self.posting_queue_enabled
+            or review.post.group_id not in self.posting_enabled_group_ids
+        ):
+            raise ApprovalStateError("This Facebook group is not enabled for queued posting")
         try:
-            action = ApprovalAction(action_value)
+            action = ApprovalAction(base_action)
         except ValueError as error:  # pragma: no cover - route contract
             raise ApprovalStateError("Unknown approval action") from error
         return self.approvals.decide(
@@ -113,6 +146,7 @@ class RemoteApprovalController:
             action,
             edited_response=_one_form_value(form, "response", required=False),
             rejection_reason=_one_form_value(form, "rejection_reason", required=False),
+            queue_posting=queue_posting,
             now=now,
         )
 
@@ -144,6 +178,7 @@ def _render_pending(
     token: str,
     csrf_token: str,
     now: datetime,
+    posting_available: bool,
 ) -> str:
     remaining_seconds = max(0, int((review.request.expires_at - now).total_seconds()))
     remaining_minutes = (remaining_seconds + 59) // 60
@@ -156,6 +191,30 @@ def _render_pending(
         f'<option value="{reason.value}">{html.escape(reason.value.replace("_", " ").title())}'
         "</option>"
         for reason in RejectionReason
+    )
+    edited_post_button = (
+        f'<button class="post" type="submit" formaction="/review/{token_path}/edit-post">'
+        "Approve edited response &amp; post</button>"
+        if posting_available
+        else ""
+    )
+    draft_post_form = (
+        f"""
+    <form method="post" action="/review/{token_path}/approve-post">
+      <input type="hidden" name="csrf_token" value="{csrf}">
+      <button class="post" type="submit">Approve &amp; post</button>
+    </form>"""
+        if posting_available
+        else ""
+    )
+    safety = (
+        "Approve &amp; post queues one guarded submission on your Mac. Facebook is never called "
+        "inside this web request."
+        if posting_available
+        else (
+            "This group is scan-only. Approval cannot post to Facebook; "
+            "it only stores the decision."
+        )
     )
     return _page(
         f"""
@@ -173,12 +232,14 @@ def _render_pending(
     <input type="hidden" name="csrf_token" value="{csrf}">
     <textarea name="response" maxlength="300" required>{draft}</textarea>
     <button class="edit" type="submit">Approve edited response</button>
+    {edited_post_button}
   </form>
   <div class="actions">
     <form method="post" action="/review/{token_path}/approve">
       <input type="hidden" name="csrf_token" value="{csrf}">
       <button class="approve" type="submit">Approve draft</button>
     </form>
+    {draft_post_form}
     <form method="post" action="/review/{token_path}/reject">
       <input type="hidden" name="csrf_token" value="{csrf}">
       <label>Reason for rejection
@@ -191,12 +252,12 @@ def _render_pending(
     </form>
   </div>
 </section>
-<p class="safety">Approval only updates local state on your Mac. It cannot post to Facebook.</p>
+<p class="safety">{safety}</p>
 """
     )
 
 
-def _render_terminal(status: ApprovalStatus) -> str:
+def _render_terminal(status: ApprovalStatus, *, posting_job: PostingJob | None = None) -> str:
     messages = {
         ApprovalStatus.APPROVED: "Draft approved",
         ApprovalStatus.EDITED: "Edited response approved",
@@ -204,11 +265,28 @@ def _render_terminal(status: ApprovalStatus) -> str:
         ApprovalStatus.EXPIRED: "Review link expired",
     }
     message = messages.get(status, "Review unavailable")
+    if posting_job is None:
+        detail = "The decision is stored on your Mac. No Facebook action was requested."
+    else:
+        job_messages = {
+            PostingJobStatus.QUEUED: "Facebook submission is queued on your Mac.",
+            PostingJobStatus.PROCESSING: "Your Mac is validating the Facebook submission.",
+            PostingJobStatus.POSTED: "The response was posted publicly to Facebook.",
+            PostingJobStatus.PENDING_MODERATION: (
+                "Facebook accepted the response for group admin review."
+            ),
+            PostingJobStatus.EXPIRED: "The posting approval expired before submission.",
+            PostingJobStatus.FAILED: "Posting stopped safely before submission was confirmed.",
+            PostingJobStatus.NEEDS_ATTENTION: (
+                "Submission may have crossed Facebook's boundary and needs manual review."
+            ),
+        }
+        detail = job_messages[posting_job.status]
     return _page(
         f"""
 <section class="card terminal">
   <h1>{html.escape(message)}</h1>
-  <p>The decision is stored on your Mac. No Facebook action was taken.</p>
+  <p>{html.escape(detail)}</p>
 </section>
 """
     )
@@ -239,6 +317,7 @@ def _page(content: str) -> str:
     button {{ border: 0; border-radius: 9px; color: white; cursor: pointer;
       font-size: 1rem; font-weight: 750; margin-top: 12px; padding: 13px; width: 100%; }}
     .approve {{ background: #1f883d; }} .edit {{ background: #0969da; }}
+    .post {{ background: #8250df; }}
     .reject {{ background: #cf222e; }}
     .safety {{ color: #57606a; font-size: .9rem; text-align: center; }}
     .terminal {{ margin-top: 25vh; text-align: center; }}
@@ -299,7 +378,7 @@ def run_remote_approval_server(
     )
     print(f"Remote approval origin: http://{LOOPBACK_HOST}:{port}")
     print(f"Expected secure relay URL: {public_base_url}")
-    print("No Facebook actions can be taken. Press Ctrl-C to stop.")
+    print("Authorized approvals may queue guarded Facebook posting. Press Ctrl-C to stop.")
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:

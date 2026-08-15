@@ -79,6 +79,8 @@ class Settings(BaseSettings):
 
     posting_enabled: bool = False
     dry_run: bool = True
+    posting_queue_enabled: bool = False
+    posting_queue_poll_interval_seconds: int = Field(default=60, ge=30, le=900)
 
     scan_interval_seconds: int = Field(default=900, ge=300)
     lead_threshold: int = Field(default=75, ge=0, le=100)
@@ -305,6 +307,10 @@ class Settings(BaseSettings):
             raise PostingDisabledError("Posting is disabled by POSTING_ENABLED=false")
         if self.dry_run:
             raise PostingDisabledError("Posting is disabled while DRY_RUN=true")
+
+    def require_posting_queue_enabled(self) -> None:
+        if not self.posting_queue_enabled:
+            raise PostingDisabledError("Queued posting is disabled by POSTING_QUEUE_ENABLED=false")
 
     def require_read_only_mode(self) -> None:
         """Require both safe defaults before browser-based discovery can run."""

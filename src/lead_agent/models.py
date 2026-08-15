@@ -118,6 +118,18 @@ class PostingAttemptStatus(StrEnum):
     NEEDS_ATTENTION = "needs_attention"
 
 
+class PostingJobStatus(StrEnum):
+    """Durable queue states for an SMS-authorized Facebook submission."""
+
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    POSTED = "posted"
+    PENDING_MODERATION = "pending_moderation"
+    EXPIRED = "expired"
+    FAILED = "failed"
+    NEEDS_ATTENTION = "needs_attention"
+
+
 @dataclass(slots=True)
 class FacebookPost:
     group_id: str
@@ -310,6 +322,30 @@ class PostingWorkItem:
     attempt: PostingAttempt
     lead: Lead
     post: FacebookPost
+
+
+@dataclass(slots=True)
+class PostingJob:
+    """One explicit mobile approval queued for asynchronous local submission."""
+
+    lead_id: int
+    approval_request_id: int
+    status: PostingJobStatus
+    requested_at: datetime
+    claimed_at: datetime | None = None
+    completed_at: datetime | None = None
+    error_code: str | None = None
+    outcome_notification_status: NotificationStatus | None = None
+    outcome_notification_attempted_at: datetime | None = None
+    outcome_notification_sent_at: datetime | None = None
+    outcome_provider: str | None = None
+    outcome_provider_message_id: str | None = None
+    outcome_notification_error_code: str | None = None
+    id: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.lead_id < 1 or self.approval_request_id < 1:
+            raise ValueError("posting job IDs must be positive")
 
 
 @dataclass(slots=True)

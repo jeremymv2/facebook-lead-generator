@@ -5,6 +5,7 @@ from pathlib import Path
 from lead_agent.config import Settings
 from lead_agent.launchd import (
     CYCLE_AGENT_LABEL,
+    POSTING_AGENT_LABEL,
     REMOTE_AGENT_LABEL,
     build_launch_agents,
     write_launch_agents,
@@ -72,6 +73,39 @@ def test_remote_launch_agent_requires_ready_config_but_embeds_no_credentials(
     assert b"signing-secret" not in serialized
     assert b"+15025550101" not in serialized
     assert b"+15025550100" not in serialized
+
+
+def test_posting_worker_has_process_local_live_flags_and_no_secrets(tmp_path: Path) -> None:
+    configured = settings(
+        tmp_path,
+        posting_queue_enabled=True,
+        posting_queue_poll_interval_seconds=60,
+        notifications_enabled=True,
+        sms_provider="telnyx",
+        remote_approval_base_url="https://approve.example",
+        approval_signing_key="signing-secret-" * 4,
+        sms_recipient_number="+15025550101",
+        telnyx_api_key="telnyx-secret",
+        telnyx_from_number="+15025550100",
+    )
+
+    definitions = build_launch_agents(
+        configured,
+        executable=tmp_path / ".venv" / "bin" / "lead-agent",
+        working_directory=tmp_path,
+        include_remote_approval=True,
+        include_posting_worker=True,
+    )
+
+    worker = next(value for value in definitions if value.label == POSTING_AGENT_LABEL)
+    assert worker.payload["ProgramArguments"][-1] == "process-posting-queue"  # type: ignore[index]
+    assert worker.payload["StartInterval"] == 60
+    assert worker.payload["EnvironmentVariables"] == {
+        "POSTING_ENABLED": "true",
+        "DRY_RUN": "false",
+    }
+    assert b"telnyx-secret" not in worker.to_bytes()
+    assert b"signing-secret" not in worker.to_bytes()
 
 
 def test_launch_agent_files_are_written_privately(tmp_path: Path) -> None:

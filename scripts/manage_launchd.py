@@ -11,6 +11,7 @@ from pathlib import Path
 from lead_agent.config import load_settings
 from lead_agent.launchd import (
     CYCLE_AGENT_LABEL,
+    POSTING_AGENT_LABEL,
     REMOTE_AGENT_LABEL,
     build_launch_agents,
     write_launch_agents,
@@ -25,6 +26,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-remote-approval",
         action="store_true",
         help="Also install the Telnyx/tunnel review server; requires ready configuration",
+    )
+    install.add_argument(
+        "--include-posting-worker",
+        action="store_true",
+        help="Install the guarded queued-posting worker with process-local live flags",
     )
     subparsers.add_parser("uninstall")
     subparsers.add_parser("status")
@@ -42,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("Run this command from the repository after creating .venv")
     destination = Path.home() / "Library" / "LaunchAgents"
     domain = f"gui/{os.getuid()}"
-    labels = (CYCLE_AGENT_LABEL, REMOTE_AGENT_LABEL)
+    labels = (CYCLE_AGENT_LABEL, REMOTE_AGENT_LABEL, POSTING_AGENT_LABEL)
 
     if args.command == "install":
         settings = load_settings()
@@ -54,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
             executable=executable,
             working_directory=repository,
             include_remote_approval=args.include_remote_approval,
+            include_posting_worker=args.include_posting_worker,
         )
         paths = write_launch_agents(definitions, destination=destination)
         for path in paths:

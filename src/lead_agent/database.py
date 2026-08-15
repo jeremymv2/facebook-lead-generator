@@ -29,13 +29,15 @@ from lead_agent.models import (
     NotificationStatus,
     PostingAttempt,
     PostingAttemptStatus,
+    PostingJob,
+    PostingJobStatus,
     PostingWorkItem,
     PostStatus,
     RejectionReason,
     utc_now,
 )
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 _REVIEW_DEDUPE_REPEATED_FRAGMENT_MINIMUM_TOKENS = 7
 
 
@@ -315,6 +317,32 @@ class Database:
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_posting_attempts_one_live_per_lead
                     ON posting_attempts(lead_id)
                     WHERE dry_run = 0;
+
+                CREATE TABLE IF NOT EXISTS posting_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    lead_id INTEGER NOT NULL,
+                    approval_request_id INTEGER NOT NULL UNIQUE,
+                    status TEXT NOT NULL,
+                    requested_at TEXT NOT NULL,
+                    claimed_at TEXT,
+                    completed_at TEXT,
+                    error_code TEXT,
+                    outcome_notification_status TEXT,
+                    outcome_notification_attempted_at TEXT,
+                    outcome_notification_sent_at TEXT,
+                    outcome_provider TEXT,
+                    outcome_provider_message_id TEXT,
+                    outcome_notification_error_code TEXT,
+                    FOREIGN KEY(lead_id) REFERENCES leads(id) ON DELETE RESTRICT,
+                    FOREIGN KEY(approval_request_id)
+                        REFERENCES approval_requests(id) ON DELETE RESTRICT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_posting_jobs_status_requested
+                    ON posting_jobs(status, requested_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_posting_jobs_one_active_per_lead
+                    ON posting_jobs(lead_id)
+                    WHERE status IN ('queued', 'processing');
 
                 CREATE TABLE IF NOT EXISTS audit_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1324,11 +1352,14 @@ class Database:
         decided_at: datetime,
         edited_response: str | None = None,
         rejection_reason: RejectionReason | None = None,
+        enqueue_posting: bool = False,
     ) -> tuple[ApprovalReview, bool]:
         """Apply one terminal review decision; return false when already terminal or expired."""
         allowed = {ApprovalStatus.APPROVED, ApprovalStatus.EDITED, ApprovalStatus.REJECTED}
         if decision not in allowed:
             raise ValueError("Approval decision must be approved, edited, or rejected")
+        if enqueue_posting and decision is ApprovalStatus.REJECTED:
+            raise ValueError("Rejected approvals cannot be queued for posting")
         with self.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -1399,7 +1430,330 @@ class Database:
                     request.lead_id,
                 ),
             )
+            if enqueue_posting:
+                connection.execute(
+                    """
+                    INSERT INTO posting_jobs (
+                        lead_id, approval_request_id, status, requested_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        request.lead_id,
+                        request_id,
+                        PostingJobStatus.QUEUED.value,
+                        _serialize_datetime(decided_at),
+                    ),
+                )
             return _approval_review_from_connection(connection, request_id), True
+
+    def get_posting_job(self, job_id: int) -> PostingJob | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM posting_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return _posting_job_from_row(row) if row is not None else None
+
+    def get_posting_job_for_approval(self, request_id: int) -> PostingJob | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM posting_jobs WHERE approval_request_id = ?", (request_id,)
+            ).fetchone()
+        return _posting_job_from_row(row) if row is not None else None
+
+    def claim_next_posting_job(self, *, claimed_at: datetime) -> PostingJob | None:
+        """Atomically claim the oldest queued mobile-authorized submission."""
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT * FROM posting_jobs
+                WHERE status = ?
+                ORDER BY requested_at, id
+                LIMIT 1
+                """,
+                (PostingJobStatus.QUEUED.value,),
+            ).fetchone()
+            if row is None:
+                return None
+            job = _posting_job_from_row(row)
+            if job.id is None:  # pragma: no cover - persisted job contract
+                raise RuntimeError("Posting job is missing its ID")
+            connection.execute(
+                """
+                UPDATE posting_jobs SET status = ?, claimed_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                (
+                    PostingJobStatus.PROCESSING.value,
+                    _serialize_datetime(claimed_at),
+                    job.id,
+                    PostingJobStatus.QUEUED.value,
+                ),
+            )
+            claimed = connection.execute(
+                "SELECT * FROM posting_jobs WHERE id = ?", (job.id,)
+            ).fetchone()
+            if claimed is None:  # pragma: no cover - protected by transaction
+                raise RuntimeError("Failed to retrieve claimed posting job")
+            return _posting_job_from_row(claimed)
+
+    def has_queued_posting_job(self) -> bool:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM posting_jobs WHERE status = ? LIMIT 1",
+                (PostingJobStatus.QUEUED.value,),
+            ).fetchone()
+        return row is not None
+
+    def list_processing_posting_jobs(self) -> list[PostingJob]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM posting_jobs
+                WHERE status = ?
+                ORDER BY claimed_at, id
+                """,
+                (PostingJobStatus.PROCESSING.value,),
+            ).fetchall()
+        return [_posting_job_from_row(row) for row in rows]
+
+    def requeue_unstarted_posting_job(
+        self,
+        job_id: int,
+        *,
+        stale_before: datetime,
+    ) -> PostingJob | None:
+        """Safely requeue a stale claim only when no live attempt was ever reserved."""
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM posting_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"Posting job {job_id} does not exist")
+            job = _posting_job_from_row(row)
+            if (
+                job.status is not PostingJobStatus.PROCESSING
+                or job.claimed_at is None
+                or job.claimed_at > stale_before
+            ):
+                return None
+            attempt = connection.execute(
+                "SELECT 1 FROM posting_attempts WHERE lead_id = ? AND dry_run = 0 LIMIT 1",
+                (job.lead_id,),
+            ).fetchone()
+            if attempt is not None:
+                return None
+            connection.execute(
+                """
+                UPDATE posting_jobs SET status = ?, claimed_at = NULL
+                WHERE id = ?
+                """,
+                (PostingJobStatus.QUEUED.value, job_id),
+            )
+            requeued = connection.execute(
+                "SELECT * FROM posting_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if requeued is None:  # pragma: no cover - protected by transaction
+                raise RuntimeError("Failed to retrieve requeued posting job")
+            return _posting_job_from_row(requeued)
+
+    def complete_posting_job(
+        self,
+        job_id: int,
+        *,
+        status: PostingJobStatus,
+        completed_at: datetime,
+        error_code: str | None = None,
+    ) -> PostingJob:
+        terminal = {
+            PostingJobStatus.POSTED,
+            PostingJobStatus.PENDING_MODERATION,
+            PostingJobStatus.EXPIRED,
+            PostingJobStatus.FAILED,
+            PostingJobStatus.NEEDS_ATTENTION,
+        }
+        if status not in terminal:
+            raise ValueError("Posting job completion requires a terminal status")
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM posting_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"Posting job {job_id} does not exist")
+            job = _posting_job_from_row(row)
+            if job.status in terminal:
+                return job
+            if job.status is not PostingJobStatus.PROCESSING:
+                raise ValueError("Posting job is not being processed")
+            connection.execute(
+                """
+                UPDATE posting_jobs SET status = ?, completed_at = ?, error_code = ?
+                WHERE id = ?
+                """,
+                (status.value, _serialize_datetime(completed_at), error_code, job_id),
+            )
+            completed = connection.execute(
+                "SELECT * FROM posting_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if completed is None:  # pragma: no cover - protected by transaction
+                raise RuntimeError("Failed to retrieve completed posting job")
+            return _posting_job_from_row(completed)
+
+    def expire_posting_job_for_rereview(
+        self,
+        job_id: int,
+        *,
+        expired_at: datetime,
+    ) -> PostingJob:
+        """Expire an unsubmitted queue job and return its lead to the review backlog."""
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM posting_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"Posting job {job_id} does not exist")
+            job = _posting_job_from_row(row)
+            if job.status is PostingJobStatus.EXPIRED:
+                return job
+            if job.status is not PostingJobStatus.PROCESSING:
+                raise ValueError("Posting job is not being processed")
+            live_attempt = connection.execute(
+                "SELECT 1 FROM posting_attempts WHERE lead_id = ? AND dry_run = 0 LIMIT 1",
+                (job.lead_id,),
+            ).fetchone()
+            if live_attempt is not None:
+                raise ValueError("A started posting attempt cannot return to review")
+            connection.execute(
+                """
+                UPDATE posting_jobs SET status = ?, completed_at = ?, error_code = ?
+                WHERE id = ?
+                """,
+                (
+                    PostingJobStatus.EXPIRED.value,
+                    _serialize_datetime(expired_at),
+                    "posting_approval_expired",
+                    job_id,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE leads SET status = ?, approved_response = NULL,
+                    approval_timestamp = NULL, posting_timestamp = NULL,
+                    updated_at = ?, error_state = NULL
+                WHERE id = ? AND status IN (?, ?)
+                """,
+                (
+                    LeadStatus.CANDIDATE.value,
+                    _serialize_datetime(expired_at),
+                    job.lead_id,
+                    LeadStatus.APPROVED.value,
+                    LeadStatus.EDITED.value,
+                ),
+            )
+            expired = connection.execute(
+                "SELECT * FROM posting_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if expired is None:  # pragma: no cover - protected by transaction
+                raise RuntimeError("Failed to retrieve expired posting job")
+            return _posting_job_from_row(expired)
+
+    def list_unnotified_posting_jobs(self, *, limit: int) -> list[PostingJob]:
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        terminal_values = tuple(
+            status.value
+            for status in (
+                PostingJobStatus.POSTED,
+                PostingJobStatus.PENDING_MODERATION,
+                PostingJobStatus.EXPIRED,
+                PostingJobStatus.FAILED,
+                PostingJobStatus.NEEDS_ATTENTION,
+            )
+        )
+        placeholders = ",".join("?" for _ in terminal_values)
+        with self.connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM posting_jobs
+                WHERE status IN ({placeholders})
+                  AND outcome_notification_status IS NULL
+                ORDER BY completed_at, id
+                LIMIT ?
+                """,
+                (*terminal_values, limit),
+            ).fetchall()
+        return [_posting_job_from_row(row) for row in rows]
+
+    def claim_posting_outcome_notification(
+        self,
+        job_id: int,
+        *,
+        provider: str,
+        attempted_at: datetime,
+    ) -> bool:
+        with self.connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE posting_jobs SET outcome_notification_status = ?,
+                    outcome_notification_attempted_at = ?, outcome_provider = ?
+                WHERE id = ? AND outcome_notification_status IS NULL
+                """,
+                (
+                    NotificationStatus.SENDING.value,
+                    _serialize_datetime(attempted_at),
+                    provider,
+                    job_id,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def complete_posting_outcome_notification(
+        self,
+        job_id: int,
+        *,
+        status: NotificationStatus,
+        completed_at: datetime,
+        provider_message_id: str | None = None,
+        error_code: str | None = None,
+    ) -> PostingJob:
+        if status not in {NotificationStatus.SENT, NotificationStatus.FAILED}:
+            raise ValueError("Outcome notification completion must be sent or failed")
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM posting_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"Posting job {job_id} does not exist")
+            job = _posting_job_from_row(row)
+            if job.outcome_notification_status is not NotificationStatus.SENDING:
+                raise ValueError("Posting outcome notification is not being sent")
+            connection.execute(
+                """
+                UPDATE posting_jobs SET outcome_notification_status = ?,
+                    outcome_notification_sent_at = ?, outcome_provider_message_id = ?,
+                    outcome_notification_error_code = ?
+                WHERE id = ?
+                """,
+                (
+                    status.value,
+                    _serialize_datetime(completed_at)
+                    if status is NotificationStatus.SENT
+                    else None,
+                    provider_message_id,
+                    error_code,
+                    job_id,
+                ),
+            )
+            completed = connection.execute(
+                "SELECT * FROM posting_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if completed is None:  # pragma: no cover - protected by transaction
+                raise RuntimeError("Failed to retrieve completed posting notification")
+            return _posting_job_from_row(completed)
 
     def expire_approval_requests(self, *, expired_at: datetime) -> list[ApprovalReview]:
         """Atomically expire every pending request whose review window has closed."""
@@ -2289,6 +2643,31 @@ def _posting_attempt_from_row(row: sqlite3.Row) -> PostingAttempt:
         before_screenshot_path=row["before_screenshot_path"],
         after_screenshot_path=row["after_screenshot_path"],
         error_code=row["error_code"],
+    )
+
+
+def _posting_job_from_row(row: sqlite3.Row) -> PostingJob:
+    notification_status = row["outcome_notification_status"]
+    requested_at = _parse_datetime(row["requested_at"])
+    if requested_at is None:  # pragma: no cover - schema requires a timestamp
+        raise ValueError("Posting job is missing its requested timestamp")
+    return PostingJob(
+        id=row["id"],
+        lead_id=row["lead_id"],
+        approval_request_id=row["approval_request_id"],
+        status=PostingJobStatus(row["status"]),
+        requested_at=requested_at,
+        claimed_at=_parse_datetime(row["claimed_at"]),
+        completed_at=_parse_datetime(row["completed_at"]),
+        error_code=row["error_code"],
+        outcome_notification_status=(
+            NotificationStatus(notification_status) if notification_status is not None else None
+        ),
+        outcome_notification_attempted_at=_parse_datetime(row["outcome_notification_attempted_at"]),
+        outcome_notification_sent_at=_parse_datetime(row["outcome_notification_sent_at"]),
+        outcome_provider=row["outcome_provider"],
+        outcome_provider_message_id=row["outcome_provider_message_id"],
+        outcome_notification_error_code=row["outcome_notification_error_code"],
     )
 
 
