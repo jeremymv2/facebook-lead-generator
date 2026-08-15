@@ -5,5 +5,7 @@ groups:
     name: Louisville Homeowners (example only)
     url: https://www.facebook.com/groups/REPLACE_ME
     enabled: false
+    # Fail closed: enable only after a manual comment is confirmed publicly visible.
+    posting_enabled: false
     priority: 1
     geography: Louisville, Kentucky

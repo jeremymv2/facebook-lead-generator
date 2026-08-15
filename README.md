@@ -51,6 +51,8 @@ The project fails closed:
 - Telnyx is isolated behind an `SmsProvider` protocol and is disabled unless every required local
   setting is explicitly enabled.
 - Only groups explicitly marked `enabled: true` in the local allowlist can be scanned.
+- Scanning and posting permissions are independent. A group must also be explicitly marked
+  `posting_enabled: true` before even a posting dry run can start; the default is `false`.
 - Login pages, CAPTCHA, checkpoints, off-domain redirects, missing posts, and unreadable UI stop the
   scan and produce at most one local diagnostic screenshot.
 - Posting additionally requires a fresh immutable approval, an exact post/group identifier,
@@ -58,6 +60,9 @@ The project fails closed:
   available daily limits, and a durable one-live-attempt reservation.
 - Once browser submission begins, an uncertain result is never retried automatically; the lead is
   moved to `needs_attention` for manual inspection.
+- If the exact response appears in the group's private pending-content page, it is recorded as
+  `pending_moderation` instead of posted. Pending comments have no public permalink and are never
+  retried.
 - Browser profiles, cookies, databases, screenshots, `.env`, and local group configuration are
   excluded from Git.
 - SQLite backups use the online backup API, private filesystem permissions, integrity checks, and
@@ -304,8 +309,9 @@ Keep your normal browser out of this workflow. Playwright uses the separate dire
    BROWSER_HEADLESS=false
    ```
 
-2. Copy and edit the private group allowlist. Use the real Facebook group URL and set only the group
-   you approve to `enabled: true`:
+2. Copy and edit the private group allowlist. Use the real Facebook group URL and set only groups
+   approved for read-only scanning to `enabled: true`. Leave `posting_enabled: false` until a
+   manually submitted comment in that specific group is confirmed publicly visible:
 
    ```bash
    cp config/groups.example.yaml config/groups.yaml
@@ -645,7 +651,7 @@ lead-agent post-approved --lead-id 123
 
 The command opens the exact saved permalink and requires all of the following before it succeeds:
 
-- the group is still enabled in `config/groups.yaml`;
+- the group has both `enabled: true` and `posting_enabled: true` in `config/groups.yaml`;
 - the immutable approval snapshot is still fresh;
 - the Facebook post ID and group match the saved target;
 - the visible source text is unchanged except for tightly bounded rendering drift;
@@ -672,9 +678,12 @@ lead-agent post-approved --lead-id 123 --submit
 SQLite reserves the lead before the browser opens, enforces global and per-group daily limits, and
 allows only one live attempt for that lead. Immediately before Playwright presses Enter, the
 service durably records the no-retry submission boundary. It then succeeds only if the exact
-approved response becomes visible in a Facebook comment article. Any uncertainty after that
-boundary becomes `needs_attention` and is never retried automatically. Restore the safe defaults
-after any controlled live test.
+approved response becomes visible in a Facebook comment article and survives loading its stable
+`comment_id` permalink. If Facebook instead lists the exact response in the group's private
+pending-content page, the attempt becomes `pending_moderation`: it is not reported as public and is
+never retried. Any remaining uncertainty after the submission boundary becomes `needs_attention`
+and is likewise never retried automatically. Restore the safe defaults after any controlled live
+test.
 
 ## Local unattended operation on macOS
 

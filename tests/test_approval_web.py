@@ -121,6 +121,10 @@ def test_dashboard_renders_cycle_trends_and_current_group_health(tmp_path: Path)
     page = controller.render(now=now)
 
     assert "Historical trends" in page
+    assert "Facebook posting outcomes" in page
+    assert "Publicly posted" in page
+    assert "Pending group moderation" in page
+    assert "never\n        submitted again automatically" in page
     assert "Candidate review quality" in page
     assert "68.8%" in page
     assert "Full group coverage" in page

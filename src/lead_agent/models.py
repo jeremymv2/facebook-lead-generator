@@ -63,6 +63,7 @@ class LeadStatus(StrEnum):
     REJECTED = "rejected"
     POSTING = "posting"
     POSTED = "posted"
+    PENDING_MODERATION = "pending_moderation"
     EXPIRED = "expired"
     FAILED = "failed"
     NEEDS_ATTENTION = "needs_attention"
@@ -112,6 +113,7 @@ class PostingAttemptStatus(StrEnum):
     DRY_RUN_VALIDATED = "dry_run_validated"
     SUBMITTING = "submitting"
     POSTED = "posted"
+    PENDING_MODERATION = "pending_moderation"
     FAILED = "failed"
     NEEDS_ATTENTION = "needs_attention"
 

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from lead_agent.database import ApprovalFeedbackSummary, Database
-from lead_agent.models import AuditEvent, GroupScanState
+from lead_agent.models import AuditEvent, GroupScanState, PostingAttemptStatus
 
 DEFAULT_HISTORY_LIMIT = 48
 
@@ -47,12 +47,23 @@ class CycleTrend:
 
 
 @dataclass(frozen=True, slots=True)
+class PostingOutcomeSummary:
+    """Content-free totals for live Facebook posting outcomes."""
+
+    posted: int
+    pending_moderation: int
+    needs_attention: int
+    failed: int
+
+
+@dataclass(frozen=True, slots=True)
 class DashboardTrendSnapshot:
     """Recent cycle history plus the latest content-free state for each group."""
 
     cycles: tuple[CycleTrend, ...]
     groups: tuple[GroupScanState, ...]
     feedback: ApprovalFeedbackSummary
+    posting: PostingOutcomeSummary
 
     @property
     def groups_scanned(self) -> int:
@@ -123,10 +134,17 @@ class DashboardMetricsService:
             newest_first=True,
         )
         cycles = tuple(_cycle_from_event(event) for event in reversed(newest_events))
+        posting_counts = self.database.posting_attempt_status_counts()
         return DashboardTrendSnapshot(
             cycles=cycles,
             groups=tuple(self.database.list_group_scan_states()),
             feedback=self.database.approval_feedback_summary(),
+            posting=PostingOutcomeSummary(
+                posted=posting_counts.get(PostingAttemptStatus.POSTED, 0),
+                pending_moderation=posting_counts.get(PostingAttemptStatus.PENDING_MODERATION, 0),
+                needs_attention=posting_counts.get(PostingAttemptStatus.NEEDS_ATTENTION, 0),
+                failed=posting_counts.get(PostingAttemptStatus.FAILED, 0),
+            ),
         )
 
 

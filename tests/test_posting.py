@@ -16,6 +16,7 @@ from lead_agent.facebook import STORY_MESSAGE_SELECTOR
 from lead_agent.facebook_posting import (
     FacebookCommentBrowser,
     confirmed_comment_permalink,
+    pending_content_url,
     post_text_is_safe_match,
     select_comment_permalink,
     validate_post_snapshot,
@@ -103,11 +104,13 @@ class FakePostingAdapter:
         submission_error: Exception | None = None,
         cross_boundary: bool = True,
         return_permalink: bool = True,
+        pending_moderation: bool = False,
     ) -> None:
         self.validation_error = validation_error
         self.submission_error = submission_error
         self.cross_boundary = cross_boundary
         self.return_permalink = return_permalink
+        self.pending_moderation = pending_moderation
         self.validate_calls = 0
         self.submit_calls = 0
         self.responses: list[str] = []
@@ -135,8 +138,11 @@ class FakePostingAdapter:
             raise self.submission_error
         return PostingSubmissionResult(
             facebook_reply_url=(
-                f"{work.attempt.post_url}?comment_id=999" if self.return_permalink else None
+                f"{work.attempt.post_url}?comment_id=999"
+                if self.return_permalink and not self.pending_moderation
+                else None
             ),
+            pending_moderation=self.pending_moderation,
             after_screenshot_path=Path("after.png"),
         )
 
@@ -157,7 +163,7 @@ def test_dry_run_validates_without_submit_and_can_repeat(
     service = ApprovedPostingService(
         database,
         settings(tmp_path),
-        enabled_group_ids={"fixture-group"},
+        posting_enabled_group_ids={"fixture-group"},
     )
     adapter = FakePostingAdapter()
 
@@ -195,7 +201,7 @@ def test_live_post_uses_snapshot_once_and_second_invocation_is_idempotent(
     service = ApprovedPostingService(
         database,
         settings(tmp_path, live=True),
-        enabled_group_ids={"fixture-group"},
+        posting_enabled_group_ids={"fixture-group"},
     )
     first_adapter = FakePostingAdapter()
 
@@ -239,7 +245,7 @@ def test_stale_approval_stops_before_creating_an_attempt(
     service = ApprovedPostingService(
         database,
         settings(tmp_path),
-        enabled_group_ids={"fixture-group"},
+        posting_enabled_group_ids={"fixture-group"},
     )
     adapter = FakePostingAdapter()
 
@@ -263,10 +269,10 @@ def test_disabled_group_stops_before_claim_or_browser(
 ) -> None:
     approved_at = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
     lead = create_approved_lead(database, now=approved_at)
-    service = ApprovedPostingService(database, settings(tmp_path), enabled_group_ids=set())
+    service = ApprovedPostingService(database, settings(tmp_path), posting_enabled_group_ids=set())
     adapter = FakePostingAdapter()
 
-    with pytest.raises(PostingEligibilityError, match="not currently enabled"):
+    with pytest.raises(PostingEligibilityError, match="explicitly enabled for posting"):
         asyncio.run(
             service.execute(
                 lead.id or 0,
@@ -289,7 +295,7 @@ def test_live_validation_failure_never_submits_and_requires_attention(
     service = ApprovedPostingService(
         database,
         settings(tmp_path, live=True),
-        enabled_group_ids={"fixture-group"},
+        posting_enabled_group_ids={"fixture-group"},
     )
     adapter = FakePostingAdapter(
         validation_error=PostingValidationError("Post changed", screenshot_path=Path("bad.png"))
@@ -322,7 +328,7 @@ def test_uncertain_submission_is_never_retried(
     service = ApprovedPostingService(
         database,
         settings(tmp_path, live=True),
-        enabled_group_ids={"fixture-group"},
+        posting_enabled_group_ids={"fixture-group"},
     )
     adapter = FakePostingAdapter(
         submission_error=PostingSubmissionUncertainError(
@@ -357,6 +363,53 @@ def test_uncertain_submission_is_never_retried(
     assert retry_adapter.validate_calls == 0
 
 
+def test_uncertain_submission_can_be_manually_reconciled_as_pending_moderation(
+    database: Database,
+    tmp_path: Path,
+) -> None:
+    approved_at = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    lead = create_approved_lead(database, now=approved_at)
+    service = ApprovedPostingService(
+        database,
+        settings(tmp_path, live=True),
+        posting_enabled_group_ids={"fixture-group"},
+    )
+
+    with pytest.raises(PostingSubmissionUncertainError):
+        asyncio.run(
+            service.execute(
+                lead.id or 0,
+                FakePostingAdapter(
+                    submission_error=PostingSubmissionUncertainError("Result unknown")
+                ),
+                dry_run=False,
+                now=approved_at + timedelta(minutes=2),
+            )
+        )
+
+    attempt = database.list_posting_attempts(lead_id=lead.id)[0]
+    reconciled_at = approved_at + timedelta(minutes=10)
+    work = database.reconcile_posting_moderation(
+        attempt.id or 0,
+        reconciled_at=reconciled_at,
+        after_screenshot_path="manual-pending-proof.png",
+    )
+
+    assert work.attempt.status is PostingAttemptStatus.PENDING_MODERATION
+    assert work.attempt.error_code is None
+    assert work.lead.status is LeadStatus.PENDING_MODERATION
+    assert work.lead.posting_timestamp == attempt.submission_started_at
+    assert work.lead.error_state is None
+    assert work.lead.screenshot_path == "manual-pending-proof.png"
+    assert (
+        database.reconcile_posting_moderation(
+            attempt.id or 0,
+            reconciled_at=reconciled_at + timedelta(minutes=1),
+        ).attempt.status
+        is PostingAttemptStatus.PENDING_MODERATION
+    )
+
+
 def test_permalinkless_submission_requires_attention(
     database: Database,
     tmp_path: Path,
@@ -366,7 +419,7 @@ def test_permalinkless_submission_requires_attention(
     service = ApprovedPostingService(
         database,
         settings(tmp_path, live=True),
-        enabled_group_ids={"fixture-group"},
+        posting_enabled_group_ids={"fixture-group"},
     )
 
     with pytest.raises(PostingSubmissionUncertainError, match="stable comment permalink"):
@@ -385,6 +438,46 @@ def test_permalinkless_submission_requires_attention(
     assert database.get_lead(lead.id or 0).status is LeadStatus.NEEDS_ATTENTION  # type: ignore[union-attr]
 
 
+def test_pending_moderation_is_durable_and_never_retried(
+    database: Database,
+    tmp_path: Path,
+) -> None:
+    approved_at = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    lead = create_approved_lead(database, now=approved_at)
+    service = ApprovedPostingService(
+        database,
+        settings(tmp_path, live=True),
+        posting_enabled_group_ids={"fixture-group"},
+    )
+
+    first = asyncio.run(
+        service.execute(
+            lead.id or 0,
+            FakePostingAdapter(pending_moderation=True),
+            dry_run=False,
+            now=approved_at + timedelta(minutes=2),
+        )
+    )
+
+    assert first.work.attempt.status is PostingAttemptStatus.PENDING_MODERATION
+    persisted = database.get_lead(lead.id or 0)
+    assert persisted is not None
+    assert persisted.status is LeadStatus.PENDING_MODERATION
+    assert persisted.facebook_reply_url is None
+    retry_adapter = FakePostingAdapter()
+    retry = asyncio.run(
+        service.execute(
+            lead.id or 0,
+            retry_adapter,
+            dry_run=False,
+            now=approved_at + timedelta(minutes=3),
+        )
+    )
+    assert retry.created is False
+    assert retry.work.attempt.status is PostingAttemptStatus.PENDING_MODERATION
+    assert retry_adapter.validate_calls == 0
+
+
 def test_daily_limit_reserves_live_attempts_transactionally(
     database: Database,
     tmp_path: Path,
@@ -395,7 +488,7 @@ def test_daily_limit_reserves_live_attempts_transactionally(
     service = ApprovedPostingService(
         database,
         settings(tmp_path, live=True, daily_posting_limit=1),
-        enabled_group_ids={"fixture-group"},
+        posting_enabled_group_ids={"fixture-group"},
     )
     asyncio.run(
         service.execute(
@@ -429,7 +522,7 @@ def test_per_group_limit_is_independent_from_global_limit(
     service = ApprovedPostingService(
         database,
         settings(tmp_path, live=True, daily_posting_limit=5, per_group_daily_posting_limit=1),
-        enabled_group_ids={"fixture-group"},
+        posting_enabled_group_ids={"fixture-group"},
     )
     asyncio.run(
         service.execute(
@@ -553,6 +646,57 @@ def test_comment_confirmation_rejects_transient_or_permalinkless_ui() -> None:
         )
         == comment_url
     )
+
+
+def test_pending_content_url_is_scoped_to_the_exact_group() -> None:
+    assert (
+        pending_content_url("https://www.facebook.com/groups/111/posts/222")
+        == "https://www.facebook.com/groups/111/my_pending_content"
+    )
+    assert pending_content_url("https://www.facebook.com/story.php?story_fbid=222") is None
+
+
+def test_pending_moderation_requires_exact_response_in_group_queue(
+    database: Database,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    approved_at = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    lead = create_approved_lead(database, now=approved_at)
+    claimed = database.begin_posting_attempt(
+        lead.id or 0,
+        dry_run=True,
+        started_at=approved_at + timedelta(minutes=2),
+        oldest_approval_at=approved_at,
+        day_started_at=datetime(2026, 8, 8, 4, 0, tzinfo=UTC),
+        next_day_started_at=datetime(2026, 8, 9, 4, 0, tzinfo=UTC),
+        daily_limit=5,
+        per_group_daily_limit=2,
+    )
+    browser = FacebookCommentBrowser(settings(tmp_path))
+    page = MagicMock()
+    page.goto = AsyncMock()
+    texts = MagicMock()
+    exact_text = MagicMock()
+    page.locator.return_value = texts
+    texts.count = AsyncMock(return_value=1)
+    texts.nth.return_value = exact_text
+    exact_text.is_visible = AsyncMock(return_value=True)
+    exact_text.inner_text = AsyncMock(return_value=VALID_RESPONSE)
+    require_normal_page = AsyncMock()
+    innermost_locators = AsyncMock(return_value=[exact_text])
+    monkeypatch.setattr(browser, "_require_normal_page", require_normal_page)
+    monkeypatch.setattr(browser, "_innermost_locators", innermost_locators)
+
+    pending = asyncio.run(browser._pending_moderation_is_visible(page, claimed.work))
+
+    assert pending is True
+    page.goto.assert_awaited_once_with(
+        "https://www.facebook.com/groups/111/my_pending_content",
+        wait_until="domcontentloaded",
+    )
+    require_normal_page.assert_awaited_once_with(page, lead_id=lead.id or 0)
+    innermost_locators.assert_awaited_once_with([exact_text])
 
 
 def test_comment_confirmation_reloads_the_stable_permalink(
