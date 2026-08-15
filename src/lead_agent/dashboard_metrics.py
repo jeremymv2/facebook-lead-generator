@@ -19,6 +19,7 @@ class CycleTrend:
     status: str
     groups_scanned: int
     groups_failed: int
+    groups_shortfall: int
     groups_partial: int
     groups_severely_partial: int
     groups_retried: int
@@ -44,6 +45,10 @@ class CycleTrend:
     @property
     def groups_complete(self) -> int:
         return max(0, self.groups_scanned - self.groups_partial)
+
+    @property
+    def groups_near_complete(self) -> int:
+        return max(0, self.groups_shortfall - self.groups_partial)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +81,14 @@ class DashboardTrendSnapshot:
     @property
     def groups_partial(self) -> int:
         return sum(cycle.groups_partial for cycle in self.cycles)
+
+    @property
+    def groups_shortfall(self) -> int:
+        return sum(cycle.groups_shortfall for cycle in self.cycles)
+
+    @property
+    def groups_near_complete(self) -> int:
+        return max(0, self.groups_shortfall - self.groups_partial)
 
     @property
     def groups_severely_partial(self) -> int:
@@ -154,12 +167,18 @@ def _cycle_from_event(event: AuditEvent) -> CycleTrend:
     posts_new = _counter(details, "posts_new")
     posts_classified = _counter(details, "posts_classified")
     candidates_created = _counter(details, "candidates_created")
+    groups_partial = _counter(details, "groups_partial")
     return CycleTrend(
         occurred_at=event.occurred_at,
         status=event.result if event.result in {"success", "degraded", "failed"} else "unknown",
         groups_scanned=_counter(details, "groups_scanned"),
         groups_failed=_counter(details, "groups_failed"),
-        groups_partial=_counter(details, "groups_partial"),
+        groups_shortfall=_counter(
+            details,
+            "groups_shortfall",
+            fallback=groups_partial,
+        ),
+        groups_partial=groups_partial,
         groups_severely_partial=_counter(details, "groups_severely_partial"),
         groups_retried=_counter(details, "groups_retried"),
         groups_recovered=_counter(details, "groups_recovered"),

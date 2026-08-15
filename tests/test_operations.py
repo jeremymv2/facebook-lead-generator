@@ -181,7 +181,7 @@ def test_cycle_runner_records_success_and_safe_failure_type(tmp_path: Path) -> N
     assert "private customer text" not in paths_text(state.paths.health_path)
 
 
-def test_ordinary_partial_yields_remain_degraded_without_advancing_pause(
+def test_ordinary_partial_yields_remain_healthy_without_advancing_pause(
     tmp_path: Path,
 ) -> None:
     state = OperationsState(operation_paths(tmp_path))
@@ -225,10 +225,10 @@ def test_ordinary_partial_yields_remain_degraded_without_advancing_pause(
     )
 
     assert first is not None
-    assert first.status == "degraded"
+    assert first.status == "success"
     assert first.circuit_breaker_tripped is False
     assert second is not None
-    assert second.status == "degraded"
+    assert second.status == "success"
     assert second.circuit_breaker_tripped is False
     assert state.paused is False
     health = state.read_health()

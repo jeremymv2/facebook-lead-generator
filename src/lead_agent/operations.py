@@ -66,6 +66,7 @@ class ScanCycleSummary:
     duplicates: int
     groups_retried: int = 0
     groups_recovered: int = 0
+    groups_shortfall: int = 0
     groups_partial: int = 0
     groups_severely_partial: int = 0
     posts_requested: int = 0
@@ -81,6 +82,10 @@ class ScanCycleSummary:
     @property
     def groups_incomplete(self) -> int:
         return self.groups_failed + self.groups_partial
+
+    @property
+    def groups_near_complete(self) -> int:
+        return max(0, self.groups_shortfall - self.groups_partial)
 
     @property
     def groups_materially_incomplete(self) -> int:
@@ -418,7 +423,7 @@ class OperationsCycleRunner:
                 retention = retain()
                 status = (
                     "degraded"
-                    if scan_summary.groups_incomplete or notification.failed
+                    if scan_summary.groups_materially_incomplete or notification.failed
                     else "success"
                 )
                 previous_streak = self.state.read_health().get("consecutive_degraded_cycles", 0)

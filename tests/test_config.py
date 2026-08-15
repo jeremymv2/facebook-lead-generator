@@ -306,3 +306,18 @@ def test_invalid_log_level_is_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path
 
     with pytest.raises(ValidationError, match="LOG_LEVEL"):
         Settings(_env_file=None, log_level="verbose")
+
+
+def test_severe_group_yield_threshold_must_remain_below_healthy_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError, match="severe group yield threshold"):
+        Settings(
+            _env_file=None,
+            facebook_profile_path=tmp_path.parent / "browser-profile",
+            operations_minimum_group_post_yield_rate=0.8,
+            operations_healthy_group_post_yield_rate=0.8,
+        )

@@ -109,6 +109,7 @@ class Settings(BaseSettings):
     operations_degraded_cycle_limit: int = Field(default=2, ge=1, le=10)
     operations_incomplete_group_rate_threshold: float = Field(default=0.25, ge=0.1, le=1)
     operations_minimum_group_post_yield_rate: float = Field(default=0.5, gt=0, le=1)
+    operations_healthy_group_post_yield_rate: float = Field(default=0.8, gt=0, le=1)
     cycle_classification_limit: int = Field(default=100, ge=1, le=1_000)
 
     data_dir: Path = Path("data")
@@ -121,6 +122,8 @@ class Settings(BaseSettings):
     browser_headless: bool = False
     facebook_navigation_timeout_seconds: int = Field(default=30, ge=10, le=120)
     facebook_post_load_timeout_seconds: int = Field(default=15, ge=5, le=60)
+    facebook_scan_max_wait_seconds: int = Field(default=25, ge=10, le=90)
+    facebook_scan_idle_seconds: int = Field(default=5, ge=2, le=15)
     facebook_group_max_retries: int = Field(default=1, ge=0, le=2)
     facebook_group_retry_backoff_seconds: float = Field(default=5, ge=1, le=30)
     facebook_group_delay_seconds: float = Field(default=2, ge=0.25, le=30)
@@ -193,6 +196,17 @@ class Settings(BaseSettings):
     def validate_quiet_hours_window(self) -> Self:
         if self.operations_quiet_hours_start == self.operations_quiet_hours_end:
             raise ValueError("quiet-hours start and end must differ")
+        return self
+
+    @model_validator(mode="after")
+    def validate_group_yield_thresholds(self) -> Self:
+        if (
+            self.operations_minimum_group_post_yield_rate
+            >= self.operations_healthy_group_post_yield_rate
+        ):
+            raise ValueError(
+                "severe group yield threshold must be below the healthy yield threshold"
+            )
         return self
 
     @field_validator("facebook_profile_path")

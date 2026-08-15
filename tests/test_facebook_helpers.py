@@ -1,14 +1,18 @@
+import asyncio
 import json
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from lead_agent.config import Settings
 from lead_agent.facebook import (
     STORY_MESSAGE_SELECTOR,
     FacebookPostCandidate,
+    FacebookReadOnlyBrowser,
     build_facebook_post,
     cleanup_old_screenshots,
     extract_post_id,
@@ -20,8 +24,19 @@ from lead_agent.facebook import (
 )
 from lead_agent.groups import FacebookGroup
 from lead_agent.models import FacebookPost, is_exact_facebook_post_url
+from lead_agent.scanner import FacebookReadDiagnostics, FacebookReadResult
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "facebook_post_candidates.json"
+
+
+def browser_settings(tmp_path: Path) -> Settings:
+    return Settings(
+        _env_file=None,
+        facebook_profile_path=tmp_path.parent / "facebook-profile",
+        screenshot_dir=tmp_path / "screenshots",
+        facebook_scan_max_wait_seconds=25,
+        facebook_scan_idle_seconds=5,
+    )
 
 
 @pytest.mark.parametrize(
@@ -240,6 +255,147 @@ def test_sanitized_candidate_fixtures_cover_supported_selector_shapes() -> None:
         assert post.post_text == expected["text"]
         assert post.post_url == expected["post_url"]
         assert post.external_post_id == expected["external_post_id"]
+
+
+def test_progress_aware_feed_collection_keeps_scrolling_until_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = FacebookGroup(
+        id="fixture-group",
+        name="Fixture Group",
+        url="https://www.facebook.com/groups/111",
+        enabled=True,
+    )
+    posts = [
+        FacebookPost(
+            external_post_id=str(index),
+            post_url=f"https://www.facebook.com/groups/111/posts/{index}",
+            group_id=group.id,
+            group_name=group.name,
+            post_text=f"Readable Louisville project request number {index}.",
+        )
+        for index in range(10)
+    ]
+    browser = FacebookReadOnlyBrowser(browser_settings(tmp_path))
+    page = MagicMock()
+    story_nodes = MagicMock()
+    page.locator.return_value = story_nodes
+    story_nodes.count = AsyncMock(return_value=10)
+    page.wait_for_timeout = AsyncMock()
+    extract = AsyncMock(side_effect=[posts[:3], posts[:7], posts])
+    require_normal = AsyncMock()
+    scroll = AsyncMock()
+    monkeypatch.setattr(browser, "_extract_story_posts", extract)
+    monkeypatch.setattr(browser, "_require_normal_page", require_normal)
+    monkeypatch.setattr(browser, "_scroll_for_more", scroll)
+
+    result = asyncio.run(browser._wait_for_readable_posts(page, group, max_posts=10))
+
+    assert len(result.posts) == 10
+    assert result.diagnostics.stop_reason == "target_met"
+    assert result.diagnostics.progress_events == 3
+    assert result.diagnostics.scrolls == 2
+    assert scroll.await_count == 2
+
+
+def test_target_batch_gets_a_fresh_permalink_hydration_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = FacebookGroup(
+        id="fixture-group",
+        name="Fixture Group",
+        url="https://www.facebook.com/groups/111",
+        enabled=True,
+    )
+    content_only = [
+        FacebookPost(
+            group_id=group.id,
+            group_name=group.name,
+            post_text=f"Readable Louisville project request number {index}.",
+        )
+        for index in range(10)
+    ]
+    hydrated = [
+        FacebookPost(
+            external_post_id=str(index),
+            post_url=f"https://www.facebook.com/groups/111/posts/{index}",
+            group_id=group.id,
+            group_name=group.name,
+            post_text=value.post_text,
+        )
+        for index, value in enumerate(content_only)
+    ]
+    browser = FacebookReadOnlyBrowser(browser_settings(tmp_path))
+    page = MagicMock()
+    story_nodes = MagicMock()
+    page.locator.return_value = story_nodes
+    story_nodes.count = AsyncMock(return_value=10)
+    page.wait_for_timeout = AsyncMock()
+    articles = MagicMock()
+    articles.count = AsyncMock(return_value=0)
+    monkeypatch.setattr(
+        browser,
+        "_extract_story_posts",
+        AsyncMock(side_effect=[content_only, hydrated]),
+    )
+    monkeypatch.setattr(browser, "_require_normal_page", AsyncMock())
+    monkeypatch.setattr(browser, "_scroll_for_more", AsyncMock())
+    monkeypatch.setattr(browser, "_post_articles", AsyncMock(return_value=articles))
+
+    result = asyncio.run(browser._wait_for_readable_posts(page, group, max_posts=10))
+
+    assert result.diagnostics.stop_reason == "target_met"
+    assert result.diagnostics.permalinked_posts == 10
+    assert result.diagnostics.missing_permalinks == 0
+    page.wait_for_timeout.assert_awaited_once_with(250)
+
+
+def test_severe_partial_feed_captures_one_local_diagnostic_screenshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = FacebookGroup(
+        id="fixture-group",
+        name="Fixture Group",
+        url="https://www.facebook.com/groups/111",
+        enabled=True,
+    )
+    posts = tuple(
+        FacebookPost(
+            external_post_id=str(index),
+            post_url=f"https://www.facebook.com/groups/111/posts/{index}",
+            group_id=group.id,
+            group_name=group.name,
+            post_text=f"Readable Louisville project request number {index}.",
+        )
+        for index in range(4)
+    )
+    browser = FacebookReadOnlyBrowser(browser_settings(tmp_path))
+    page = MagicMock()
+    page.goto = AsyncMock()
+    page.url = group.url
+    screenshot = tmp_path / "severe-partial.png"
+    monkeypatch.setattr(browser, "_page", AsyncMock(return_value=page))
+    monkeypatch.setattr(browser, "_require_normal_page", AsyncMock())
+    monkeypatch.setattr(
+        browser,
+        "_wait_for_readable_posts",
+        AsyncMock(
+            return_value=FacebookReadResult(
+                posts=posts,
+                diagnostics=FacebookReadDiagnostics(readable_posts=4),
+            )
+        ),
+    )
+    capture = AsyncMock(return_value=screenshot)
+    monkeypatch.setattr(browser, "_capture_failure", capture)
+
+    result = asyncio.run(browser.read_group(group, max_posts=10))
+
+    assert result.severe_screenshot_path == screenshot
+    capture.assert_awaited_once_with(page, group.id, "severe-partial")
 
 
 def test_screenshot_cleanup_deletes_only_expired_png_files(tmp_path: Path) -> None:

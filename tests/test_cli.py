@@ -661,7 +661,7 @@ groups:
     assert "No queued Facebook submissions" in capsys.readouterr().out
 
 
-def test_unattended_cycle_retries_only_transient_group_failures(
+def test_unattended_cycle_reports_bounded_retries_and_isolates_group_failures(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -679,15 +679,18 @@ def test_unattended_cycle_retries_only_transient_group_failures(
             enabled=True,
         ),
     ]
-    outcomes: dict[str, list[ScanSummary | Exception]] = {
-        "recovering": [
-            TransientFacebookReadError(stage="feed", kind="timeout"),
-            ScanSummary(groups[0], posts_seen=4, new_posts=(), posts_requested=10),
-        ],
-        "failing": [
-            TransientFacebookReadError(stage="navigation", kind="timeout"),
-            TransientFacebookReadError(stage="navigation", kind="timeout"),
-        ],
+    failed_after_retry = TransientFacebookReadError(stage="navigation", kind="timeout")
+    failed_after_retry.retry_count = 1
+    outcomes: dict[str, ScanSummary | Exception] = {
+        "recovering": ScanSummary(
+            groups[0],
+            posts_seen=6,
+            new_posts=(),
+            posts_requested=10,
+            retry_count=1,
+            recovered=True,
+        ),
+        "failing": failed_after_retry,
     }
     sleeps: list[float] = []
 
@@ -705,9 +708,16 @@ def test_unattended_cycle_retries_only_transient_group_failures(
         def __init__(self, database: Database, browser: object) -> None:
             del database, browser
 
-        async def scan_group(self, group: FacebookGroup, *, max_posts: int) -> ScanSummary:
+        async def scan_group(
+            self,
+            group: FacebookGroup,
+            *,
+            max_posts: int,
+            **kwargs: object,
+        ) -> ScanSummary:
+            del kwargs
             assert max_posts == 10
-            outcome = outcomes[group.id].pop(0)
+            outcome = outcomes[group.id]
             if isinstance(outcome, Exception):
                 raise outcome
             return outcome
@@ -735,10 +745,10 @@ def test_unattended_cycle_retries_only_transient_group_failures(
     assert summary.groups_retried == 2
     assert summary.groups_recovered == 1
     assert summary.groups_partial == 1
-    assert summary.groups_severely_partial == 1
-    assert summary.posts_seen == 4
+    assert summary.groups_severely_partial == 0
+    assert summary.posts_seen == 6
     assert summary.posts_requested == 20
-    assert sleeps == [5, 2, 5]
+    assert sleeps == [2]
 
 
 def test_unattended_cycle_never_retries_a_facebook_safety_stop(
@@ -766,8 +776,14 @@ def test_unattended_cycle_never_retries_a_facebook_safety_stop(
         def __init__(self, database: Database, browser: object) -> None:
             del database, browser
 
-        async def scan_group(self, group: FacebookGroup, *, max_posts: int) -> ScanSummary:
-            del group, max_posts
+        async def scan_group(
+            self,
+            group: FacebookGroup,
+            *,
+            max_posts: int,
+            **kwargs: object,
+        ) -> ScanSummary:
+            del group, max_posts, kwargs
             raise FacebookSafetyStop(FacebookPageState.CHECKPOINT, "human review required")
 
     monkeypatch.setattr(cli_module, "FacebookReadOnlyBrowser", FakeBrowser)
@@ -855,6 +871,7 @@ def test_run_cycle_command_executes_content_free_pipeline(
         "candidates_created": 0,
         "duplicates": 4,
         "groups_failed": 0,
+        "groups_shortfall": 0,
         "groups_partial": 0,
         "groups_severely_partial": 0,
         "groups_recovered": 1,
