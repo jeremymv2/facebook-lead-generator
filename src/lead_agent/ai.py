@@ -16,6 +16,7 @@ CLASSIFICATION_VERSION = "2026-08-13.v13"
 COMPANY_NAME = "JJ Miller & Co."
 COMPANY_WEBSITE = "https://jjmillerco.com"
 COMPANY_TEXT_PHONE = "502-528-0858"
+DRAFT_BRAND_HEADER = "◆ JJ Miller & Co. | Licensed & Insured"
 
 
 class AIProviderError(RuntimeError):
@@ -88,7 +89,11 @@ class DraftResponse(BaseModel):
     @field_validator("response")
     @classmethod
     def validate_response(cls, value: str) -> str:
-        normalized = normalize_post_text(value)
+        normalized = "\n".join(
+            normalized_line
+            for line in value.splitlines()
+            if (normalized_line := normalize_post_text(line))
+        )
         folded = normalized.casefold()
         if COMPANY_NAME.casefold() not in folded:
             raise ValueError("draft must identify JJ Miller & Co.")
@@ -275,9 +280,8 @@ class GeminiAIProvider:
             "Do not ask whether the customer needs help or restate an obvious request as a "
             "rhetorical question. Landscaping drafts must describe the work as landscaping, "
             "not lawn care or lawn services. Acknowledge the specific project without inventing "
-            "prices, availability, or other facts. Identify JJ Miller & Co., include the exact "
-            "phrase "
-            '"Licensed & Insured," state that estimates are free, include the exact '
+            "prices, availability, or other facts. Begin with this exact standalone first line: "
+            f'"{DRAFT_BRAND_HEADER}". Then state that estimates are free, include the exact '
             "URL "
             f"{COMPANY_WEBSITE}, and use this exact primary call to action: Text me at "
             f"{COMPANY_TEXT_PHONE}. Do not ask the customer to message on Facebook. Avoid "
@@ -790,33 +794,33 @@ class HeuristicAIProvider:
             raise AIResponseError("Cannot draft a response without an enabled service")
         service = _draft_service_name(classification.service_category)
         variants = (
-            f"JJ Miller & Co. provides free estimates for {service}. We'd be happy to help. Text "
-            f"me at {COMPANY_TEXT_PHONE} or visit {COMPANY_WEBSITE}.",
-            f"We'd be happy to help with {service}. JJ Miller & Co. provides free estimates. Text "
-            f"me at {COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
-            f"For {service}, JJ Miller & Co. offers free estimates in the Louisville area. Text me "
-            f"at {COMPANY_TEXT_PHONE} to discuss the work. {COMPANY_WEBSITE}",
-            f"JJ Miller & Co. handles {service} and provides free estimates. Text me at "
-            f"{COMPANY_TEXT_PHONE} and we can talk through the details. {COMPANY_WEBSITE}",
-            f"We can help with {service}. JJ Miller & Co. provides free estimates around "
-            f"Louisville. Text me at {COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
-            f"JJ Miller & Co. would be glad to help with {service}. Free estimates are available. "
-            f"Text me at {COMPANY_TEXT_PHONE} and we can go over what you need. {COMPANY_WEBSITE}",
-            f"JJ Miller & Co. provides free estimates for {service}. Text me at "
-            f"{COMPANY_TEXT_PHONE} and I'll be glad to discuss the details. {COMPANY_WEBSITE}",
-            f"{service.capitalize()} is something JJ Miller & Co. can help with. We provide free "
-            f"estimates. Text me at {COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
-            f"JJ Miller & Co. provides {service} in the Louisville area. Free estimates are "
-            f"available. Text me at {COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
-            f"I'd be glad to discuss {service} with you. JJ Miller & Co. provides free "
-            f"estimates. Text me at {COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
-            f"For a free estimate on {service}, text me at {COMPANY_TEXT_PHONE}. JJ Miller & Co. "
-            f"would be happy to help. {COMPANY_WEBSITE}",
-            f"JJ Miller & Co. offers free estimates on {service}. If you'd like us to take a look, "
-            f"text me at {COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
+            f"We provide free estimates for {service} and would be happy to help. Text me at "
+            f"{COMPANY_TEXT_PHONE} or visit {COMPANY_WEBSITE}.",
+            f"We'd be happy to help with {service} and provide free estimates. Text me at "
+            f"{COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
+            f"For {service}, we offer free estimates in the Louisville area. Text me at "
+            f"{COMPANY_TEXT_PHONE} to discuss the work. {COMPANY_WEBSITE}",
+            f"We handle {service} and provide free estimates. Text me at {COMPANY_TEXT_PHONE} and "
+            f"we can talk through the details. {COMPANY_WEBSITE}",
+            f"We can help with {service} and provide free estimates around Louisville. Text me at "
+            f"{COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
+            f"We'd be glad to help with {service}. Free estimates are available. Text me at "
+            f"{COMPANY_TEXT_PHONE} and we can go over what you need. {COMPANY_WEBSITE}",
+            f"We provide free estimates for {service}. Text me at {COMPANY_TEXT_PHONE} and I'll be "
+            f"glad to discuss the details. {COMPANY_WEBSITE}",
+            f"{service.capitalize()} is something we can help with. We provide free estimates. "
+            f"Text me at {COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
+            f"We provide {service} in the Louisville area, with free estimates available. Text me "
+            f"at {COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
+            f"I'd be glad to discuss {service} with you. We provide free estimates. Text me at "
+            f"{COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
+            f"For a free estimate on {service}, text me at {COMPANY_TEXT_PHONE}. We'd be happy to "
+            f"help. {COMPANY_WEBSITE}",
+            f"We offer free estimates on {service}. If you'd like us to take a look, text me at "
+            f"{COMPANY_TEXT_PHONE}. {COMPANY_WEBSITE}",
         )
         index = int(post.text_hash[:8], 16) % len(variants)
-        return DraftResponse(response=f"{variants[index]} Licensed & Insured.")
+        return DraftResponse(response=f"{DRAFT_BRAND_HEADER}\n{variants[index]}")
 
 
 def _draft_service_name(service_category: str) -> str:
