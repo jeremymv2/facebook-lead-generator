@@ -14,12 +14,13 @@ class GroupsConfigError(ValueError):
 
 
 class FacebookGroup(BaseModel):
-    """One explicitly approved group that the read-only scanner may visit."""
+    """One group with independent read-only scanning and posting permissions."""
 
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]*$", min_length=2, max_length=80)
     name: str = Field(min_length=1, max_length=200)
     url: str
     enabled: bool = False
+    posting_enabled: bool = False
     priority: int = Field(default=1, ge=1, le=100)
     geography: str | None = Field(default=None, max_length=200)
 
@@ -41,6 +42,12 @@ class FacebookGroup(BaseModel):
         if not parts.path.casefold().startswith("/groups/"):
             raise ValueError("Group URL must point to a Facebook group")
         return normalized.rstrip("/")
+
+    @model_validator(mode="after")
+    def posting_requires_scanning(self) -> FacebookGroup:
+        if self.posting_enabled and not self.enabled:
+            raise ValueError("Posting cannot be enabled for a scan-disabled group")
+        return self
 
 
 class GroupCatalog(BaseModel):
@@ -66,6 +73,13 @@ class GroupCatalog(BaseModel):
             if group.id == group_id:
                 return group
         raise GroupsConfigError(f"Enabled Facebook group '{group_id}' was not found")
+
+    def posting_enabled_groups(self) -> list[FacebookGroup]:
+        """Return only groups explicitly approved for Facebook comments."""
+        return sorted(
+            (group for group in self.groups if group.enabled and group.posting_enabled),
+            key=lambda group: (group.priority, group.id),
+        )
 
 
 def load_group_catalog(path: Path) -> GroupCatalog:

@@ -1612,6 +1612,19 @@ class Database:
                 ).fetchall()
         return [_posting_attempt_from_row(row) for row in rows]
 
+    def posting_attempt_status_counts(self) -> dict[PostingAttemptStatus, int]:
+        """Return content-free outcome counts for live Facebook posting attempts."""
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT status, COUNT(*) AS attempt_count
+                FROM posting_attempts
+                WHERE dry_run = 0
+                GROUP BY status
+                """
+            ).fetchall()
+        return {PostingAttemptStatus(str(row["status"])): int(row["attempt_count"]) for row in rows}
+
     def complete_posting_validation(
         self,
         attempt_id: int,
@@ -1746,6 +1759,109 @@ class Database:
             )
             return _posting_work_from_connection(connection, attempt_id)
 
+    def complete_posting_moderation(
+        self,
+        attempt_id: int,
+        *,
+        completed_at: datetime,
+        after_screenshot_path: str | None,
+    ) -> PostingWorkItem:
+        """Atomically record that Facebook accepted a comment for group review."""
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM posting_attempts WHERE id = ?", (attempt_id,)
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"Posting attempt {attempt_id} does not exist")
+            attempt = _posting_attempt_from_row(row)
+            if attempt.status is not PostingAttemptStatus.SUBMITTING or attempt.dry_run:
+                raise ValueError("Posting attempt is not awaiting moderation confirmation")
+            connection.execute(
+                """
+                UPDATE posting_attempts SET status = ?, completed_at = ?,
+                    facebook_reply_url = NULL, after_screenshot_path = ?, error_code = NULL
+                WHERE id = ?
+                """,
+                (
+                    PostingAttemptStatus.PENDING_MODERATION.value,
+                    _serialize_datetime(completed_at),
+                    after_screenshot_path,
+                    attempt_id,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE leads SET status = ?, posting_timestamp = ?, facebook_reply_url = NULL,
+                    screenshot_path = ?, updated_at = ?, error_state = NULL
+                WHERE id = ?
+                """,
+                (
+                    LeadStatus.PENDING_MODERATION.value,
+                    _serialize_datetime(completed_at),
+                    after_screenshot_path,
+                    _serialize_datetime(completed_at),
+                    attempt.lead_id,
+                ),
+            )
+            return _posting_work_from_connection(connection, attempt_id)
+
+    def reconcile_posting_moderation(
+        self,
+        attempt_id: int,
+        *,
+        reconciled_at: datetime,
+        after_screenshot_path: str | None = None,
+    ) -> PostingWorkItem:
+        """Reclassify one uncertain submitted comment after manual moderation proof."""
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM posting_attempts WHERE id = ?", (attempt_id,)
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"Posting attempt {attempt_id} does not exist")
+            attempt = _posting_attempt_from_row(row)
+            if attempt.status is PostingAttemptStatus.PENDING_MODERATION:
+                return _posting_work_from_connection(connection, attempt_id)
+            if (
+                attempt.dry_run
+                or attempt.status is not PostingAttemptStatus.NEEDS_ATTENTION
+                or attempt.submission_started_at is None
+            ):
+                raise ValueError("Posting attempt cannot be reconciled as pending moderation")
+            connection.execute(
+                """
+                UPDATE posting_attempts SET status = ?, completed_at = ?,
+                    facebook_reply_url = NULL,
+                    after_screenshot_path = COALESCE(?, after_screenshot_path),
+                    error_code = NULL
+                WHERE id = ?
+                """,
+                (
+                    PostingAttemptStatus.PENDING_MODERATION.value,
+                    _serialize_datetime(reconciled_at),
+                    after_screenshot_path,
+                    attempt_id,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE leads SET status = ?, posting_timestamp = ?, facebook_reply_url = NULL,
+                    screenshot_path = COALESCE(?, screenshot_path),
+                    updated_at = ?, error_state = NULL
+                WHERE id = ?
+                """,
+                (
+                    LeadStatus.PENDING_MODERATION.value,
+                    _serialize_datetime(attempt.submission_started_at),
+                    after_screenshot_path,
+                    _serialize_datetime(reconciled_at),
+                    attempt.lead_id,
+                ),
+            )
+            return _posting_work_from_connection(connection, attempt_id)
+
     def fail_posting_attempt(
         self,
         attempt_id: int,
@@ -1765,6 +1881,7 @@ class Database:
             attempt = _posting_attempt_from_row(row)
             if attempt.status in {
                 PostingAttemptStatus.POSTED,
+                PostingAttemptStatus.PENDING_MODERATION,
                 PostingAttemptStatus.DRY_RUN_VALIDATED,
                 PostingAttemptStatus.FAILED,
                 PostingAttemptStatus.NEEDS_ATTENTION,

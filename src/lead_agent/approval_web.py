@@ -158,6 +158,11 @@ def render_dashboard(
     .kpi {{ background: white; border: 1px solid #d8dee4; border-radius: 10px; padding: 14px; }}
     .kpi strong {{ display: block; font-size: 1.55rem; line-height: 1.2; }}
     .kpi span {{ color: #57606a; font-size: .88rem; }}
+    .outcome-grid {{ display: grid; gap: 12px;
+      grid-template-columns: repeat(4, minmax(0, 1fr)); }}
+    .outcome {{ background: #f6f8fa; border-radius: 10px; padding: 14px; }}
+    .outcome strong {{ display: block; font-size: 1.35rem; }}
+    .outcome span {{ color: #57606a; font-size: .84rem; }}
     .trend-grid {{ display: grid; gap: 16px; grid-template-columns: minmax(0, 1.2fr)
       minmax(280px, .8fr); }}
     .panel {{ margin: 16px 0 0; min-width: 0; }}
@@ -214,6 +219,7 @@ def render_dashboard(
     .expiry {{ color: #9a6700; font-weight: 650; }}
     @media (max-width: 820px) {{
       .kpis {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+      .outcome-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
       .trend-grid {{ grid-template-columns: 1fr; }}
     }}
   </style>
@@ -286,6 +292,7 @@ def _render_trends(trends: DashboardTrendSnapshot, *, display_timezone: tzinfo) 
         cycle_table = _render_cycle_table(displayed_cycles, display_timezone=display_timezone)
     group_table = _render_group_health_table(trends, display_timezone=display_timezone)
     feedback_panel = _render_feedback_panel(trends)
+    posting_panel = _render_posting_outcomes(trends)
     return f"""
     <section aria-labelledby="historical-trends">
       <div class="section-heading">
@@ -296,7 +303,28 @@ def _render_trends(trends: DashboardTrendSnapshot, *, display_timezone: tzinfo) 
       {cycle_panels}
       {cycle_table}
       {group_table}
+      {posting_panel}
       {feedback_panel}
+    </section>"""
+
+
+def _render_posting_outcomes(trends: DashboardTrendSnapshot) -> str:
+    posting = trends.posting
+    return f"""
+    <section class="panel">
+      <h3>Facebook posting outcomes</h3>
+      <p class="legend">Live attempts only. Pending moderation is terminal and is never
+        submitted again automatically.</p>
+      <div class="outcome-grid">
+        <div class="outcome"><strong>{posting.posted}</strong>
+          <span>Publicly posted</span></div>
+        <div class="outcome"><strong>{posting.pending_moderation}</strong>
+          <span>Pending group moderation</span></div>
+        <div class="outcome"><strong>{posting.needs_attention}</strong>
+          <span>Needs manual review</span></div>
+        <div class="outcome"><strong>{posting.failed}</strong>
+          <span>Failed before confirmation</span></div>
+      </div>
     </section>"""
 
 

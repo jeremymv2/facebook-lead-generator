@@ -74,6 +74,10 @@ def test_snapshot_reconstructs_legacy_and_rich_cycle_history(tmp_path: Path) -> 
     assert snapshot.candidates_created == 1
     assert snapshot.retries == 4
     assert snapshot.recoveries == 1
+    assert snapshot.posting.posted == 0
+    assert snapshot.posting.pending_moderation == 0
+    assert snapshot.posting.needs_attention == 0
+    assert snapshot.posting.failed == 0
 
 
 def test_snapshot_is_bounded_to_newest_cycles_and_sanitizes_counters(tmp_path: Path) -> None:

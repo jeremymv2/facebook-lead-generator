@@ -168,6 +168,14 @@ def confirmed_comment_permalink(
     return select_comment_permalink(hrefs, post_url)
 
 
+def pending_content_url(post_url: str) -> str | None:
+    """Return the authenticated group page that lists this user's pending content."""
+    group_key = facebook_group_key(post_url)
+    if group_key is None:
+        return None
+    return f"https://www.facebook.com/groups/{group_key}/my_pending_content"
+
+
 @dataclass(slots=True)
 class _ValidatedBrowserState:
     attempt_id: int
@@ -321,7 +329,21 @@ class FacebookCommentBrowser:  # pragma: no cover - requires an interactive Face
             on_before_submit()
             boundary_crossed = True
             await composer.press("Enter")
-            reply_url = await self._wait_for_exact_comment(page, work)
+            try:
+                reply_url = await self._wait_for_exact_comment(page, work)
+            except PostingSubmissionUncertainError:
+                try:
+                    pending_moderation = await self._pending_moderation_is_visible(page, work)
+                except Exception:
+                    pending_moderation = False
+                if pending_moderation:
+                    after = await self._capture(page, work.lead.id or 0, "pending-moderation")
+                    self._validated = None
+                    return PostingSubmissionResult(
+                        pending_moderation=True,
+                        after_screenshot_path=after,
+                    )
+                raise
             reply_url = await self._confirm_comment_survived_reload(page, work, reply_url)
             after = await self._capture(page, work.lead.id or 0, "posted")
             self._validated = None
@@ -354,6 +376,17 @@ class FacebookCommentBrowser:  # pragma: no cover - requires an interactive Face
                     self._validated = None
                     return PostingSubmissionResult(
                         facebook_reply_url=recovered_reply_url,
+                        after_screenshot_path=after,
+                    )
+                try:
+                    pending_moderation = await self._pending_moderation_is_visible(page, work)
+                except Exception:
+                    pending_moderation = False
+                if pending_moderation:
+                    after = await self._capture(page, work.lead.id or 0, "pending-moderation")
+                    self._validated = None
+                    return PostingSubmissionResult(
+                        pending_moderation=True,
                         after_screenshot_path=after,
                     )
                 screenshot = await self._capture(page, work.lead.id or 0, "submission-uncertain")
@@ -505,6 +538,28 @@ class FacebookCommentBrowser:  # pragma: no cover - requires an interactive Face
             )
         return confirmed_url
 
+    async def _pending_moderation_is_visible(
+        self,
+        page: Page,
+        work: PostingWorkItem,
+    ) -> bool:
+        """Prove the exact response is listed in this group's private moderation queue."""
+        url = pending_content_url(work.attempt.post_url)
+        if url is None:
+            return False
+        await page.goto(url, wait_until="domcontentloaded")
+        await self._require_normal_page(page, lead_id=work.lead.id or 0)
+        expected = normalize_post_text(work.attempt.approved_response)
+        texts = page.locator('[dir="auto"]')
+        matches: list[Locator] = []
+        for index in range(min(await texts.count(), 200)):
+            text = texts.nth(index)
+            if not await text.is_visible(timeout=1000):
+                continue
+            if normalize_post_text(await text.inner_text(timeout=1000)) == expected:
+                matches.append(text)
+        return len(await self._innermost_locators(matches)) == 1
+
     async def _find_exact_comment(self, page: Page, work: PostingWorkItem) -> str | None:
         expected = normalize_post_text(work.attempt.approved_response)
         articles = page.get_by_role("article")
@@ -591,6 +646,7 @@ def _attempt_id(work: PostingWorkItem) -> int:
 __all__ = [
     "FacebookCommentBrowser",
     "confirmed_comment_permalink",
+    "pending_content_url",
     "post_text_is_safe_match",
     "select_comment_permalink",
     "validate_post_snapshot",

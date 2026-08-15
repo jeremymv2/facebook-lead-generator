@@ -60,10 +60,15 @@ class PostingValidation:
 
 @dataclass(frozen=True, slots=True)
 class PostingSubmissionResult:
-    """Evidence returned only after the exact comment is visible on Facebook."""
+    """Durable evidence that Facebook published or queued the exact comment."""
 
     facebook_reply_url: str | None = None
+    pending_moderation: bool = False
     after_screenshot_path: Path | None = None
+
+    def __post_init__(self) -> None:
+        if self.pending_moderation and self.facebook_reply_url is not None:
+            raise ValueError("A moderated comment cannot also have a public reply permalink")
 
 
 class FacebookPostingAdapter(Protocol):
@@ -100,11 +105,11 @@ class ApprovedPostingService:
         database: Database,
         settings: Settings,
         *,
-        enabled_group_ids: set[str],
+        posting_enabled_group_ids: set[str],
     ) -> None:
         self.database = database
         self.settings = settings
-        self.enabled_group_ids = enabled_group_ids
+        self.posting_enabled_group_ids = posting_enabled_group_ids
 
     async def execute(
         self,
@@ -125,16 +130,18 @@ class ApprovedPostingService:
         post = self.database.get_post(lead.facebook_post_id)
         if post is None:  # pragma: no cover - database foreign key contract
             raise PostingEligibilityError("Lead is missing its Facebook post")
-        if post.group_id not in self.enabled_group_ids:
+        if post.group_id not in self.posting_enabled_group_ids:
             self._record_event(
                 lead_id=lead.id,
                 post_id=post.id,
                 group_id=post.group_id,
                 action="posting.blocked",
-                result="disabled_group",
+                result="posting_disabled_group",
                 details={"dry_run": dry_run},
             )
-            raise PostingEligibilityError("The lead's Facebook group is not currently enabled")
+            raise PostingEligibilityError(
+                "The lead's Facebook group is not explicitly enabled for posting"
+            )
 
         day_started_at, next_day_started_at = self._posting_day_bounds(timestamp)
         try:
@@ -206,6 +213,18 @@ class ApprovedPostingService:
                 validation,
                 on_before_submit=mark_submission_boundary,
             )
+            if outcome.pending_moderation:
+                moderated = self.database.complete_posting_moderation(
+                    self._attempt_id(work),
+                    completed_at=self._event_time(now),
+                    after_screenshot_path=_path_string(outcome.after_screenshot_path),
+                )
+                self._record_work_event(
+                    moderated,
+                    action="posting.pending_moderation",
+                    result="pending_moderation",
+                )
+                return PostingExecutionResult(work=moderated, created=True)
             if outcome.facebook_reply_url is None:
                 raise PostingSubmissionUncertainError(
                     "Facebook did not return a stable comment permalink"

@@ -14,11 +14,13 @@ groups:
     name: Second group
     url: https://www.facebook.com/groups/222
     enabled: true
+    posting_enabled: false
     priority: 2
   - id: first
     name: First group
     url: https://facebook.com/groups/111/
     enabled: true
+    posting_enabled: true
     priority: 1
   - id: disabled
     name: Disabled group
@@ -33,6 +35,25 @@ groups:
 
     assert [group.id for group in catalog.enabled_groups()] == ["first", "second"]
     assert catalog.enabled_group("first").url == "https://facebook.com/groups/111"
+    assert [group.id for group in catalog.posting_enabled_groups()] == ["first"]
+
+
+def test_catalog_rejects_posting_for_scan_disabled_group(tmp_path: Path) -> None:
+    path = tmp_path / "groups.yaml"
+    path.write_text(
+        """
+groups:
+  - id: unsafe
+    name: Unsafe
+    url: https://facebook.com/groups/111
+    enabled: false
+    posting_enabled: true
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(GroupsConfigError, match="scan-disabled"):
+        load_group_catalog(path)
 
 
 def test_catalog_rejects_non_facebook_and_non_group_urls(tmp_path: Path) -> None:

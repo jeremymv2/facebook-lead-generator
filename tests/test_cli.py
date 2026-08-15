@@ -743,6 +743,7 @@ groups:
     name: Fixture Group
     url: https://www.facebook.com/groups/111
     enabled: true
+    posting_enabled: true
     priority: 1
 """,
         encoding="utf-8",
@@ -1030,6 +1031,41 @@ def test_post_approved_dry_run_reports_validation_without_browser_actions(
 
     assert result == 0
     assert "DRY RUN lead=12 validated" in capsys.readouterr().out
+
+
+def test_post_approved_reports_pending_group_moderation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_cycle_fixture(monkeypatch, tmp_path)
+    monkeypatch.setenv("POSTING_ENABLED", "true")
+    monkeypatch.setenv("DRY_RUN", "false")
+    monkeypatch.setattr(cli_module, "ApprovedPostingService", lambda *args, **kwargs: object())
+
+    async def fake_execute(
+        settings: Settings,
+        service: object,
+        *,
+        lead_id: int,
+        dry_run: bool,
+    ) -> object:
+        del settings, service
+        assert lead_id == 12
+        assert dry_run is False
+        return SimpleNamespace(
+            created=True,
+            work=SimpleNamespace(
+                attempt=SimpleNamespace(status=SimpleNamespace(value="pending_moderation"))
+            ),
+        )
+
+    monkeypatch.setattr(cli_module, "_execute_approved_posting", fake_execute)
+
+    result = main(["post-approved", "--lead-id", "12", "--submit"])
+
+    assert result == 0
+    assert "PENDING MODERATION lead=12" in capsys.readouterr().out
 
 
 def test_scan_command_fails_closed_when_no_group_is_enabled(

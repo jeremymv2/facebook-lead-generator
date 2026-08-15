@@ -1056,15 +1056,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 settings.require_posting_allowed()
             catalog = load_group_catalog(settings.groups_config_path)
-            enabled_group_ids = {group.id for group in catalog.enabled_groups()}
-            if not enabled_group_ids:
-                raise GroupsConfigError("No Facebook groups are enabled in the group allowlist")
+            posting_enabled_group_ids = {group.id for group in catalog.posting_enabled_groups()}
+            if not posting_enabled_group_ids:
+                raise GroupsConfigError("No Facebook groups are explicitly enabled for posting")
             database = Database(settings.database_path)
             database.initialize()
             posting_service = ApprovedPostingService(
                 database,
                 settings,
-                enabled_group_ids=enabled_group_ids,
+                posting_enabled_group_ids=posting_enabled_group_ids,
             )
             posting_result = asyncio.run(
                 _execute_approved_posting(
@@ -1093,11 +1093,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"No action taken: live posting attempt already exists "
                 f"with status={attempt.status.value}"
             )
-            return 0 if attempt.status.value == "posted" else 2
+            return 0 if attempt.status.value in {"posted", "pending_moderation"} else 2
         if dry_run:
             print(
                 f"DRY RUN lead={args.lead_id} validated; "
                 "no Facebook comment was entered or submitted"
+            )
+        elif attempt.status.value == "pending_moderation":
+            print(
+                f"PENDING MODERATION lead={args.lead_id}; "
+                "Facebook accepted the comment for admin review and no retry will occur"
             )
         else:
             print(f"POSTED lead={args.lead_id} exactly once")
