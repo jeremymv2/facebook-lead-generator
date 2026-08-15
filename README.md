@@ -361,12 +361,16 @@ Top-level post text is isolated from nested comment articles so a long reply is 
 the parent post's permalink. Facebook comment and reply articles are also rejected by their
 semantic `aria-label`, including when Facebook exposes them outside the parent article subtree.
 Current Facebook group feeds are read from semantic `story_message` nodes and paired with the
-nearest owning group-post permalink; role-based article extraction remains a guarded fallback.
+nearest owning group-post permalink. Before returning a full batch, the reader gives content-only
+stories a bounded hydration window and merges a later article-level permalink into the original
+discovery. Role-based article extraction remains a guarded recovery path.
 When Facebook exposes no post permalink, the scanner leaves the URL empty and uses the normalized
 top-level text hash for deduplication; it never substitutes a comment, photo, or unrelated URL. If
 Facebook exposes the permalink or post ID on a later scan, the database attaches those identifiers
 to the original content discovery instead of inserting another row. Distinct Facebook post IDs are
-never merged solely because their text matches.
+never merged solely because their text matches. URL-less discoveries remain available for human
+review and classifier feedback, but both dashboards label them review-only and every posting path
+rejects them until an exact group-post permalink is recovered.
 `--max-posts` is a target and hard cap: the scanner accumulates unique posts across bounded
 sub-viewport scrolls until it reaches the target, its scroll limit, or its load timeout. It rechecks
 login, CAPTCHA, checkpoint, redirect, and page state after every scroll.
@@ -653,7 +657,9 @@ PER_GROUP_DAILY_POSTING_LIMIT=1
 For posting-enabled groups, the tokenized page then displays separate **Approve** and
 **Approve & Post** choices, plus an **Approve edited response & post** choice. The posting choice
 atomically stores the approval and a durable queue job. It returns immediately and never opens
-Facebook inside the tunneled HTTP request.
+Facebook inside the tunneled HTTP request. These posting choices appear only when the scanner has
+captured an exact HTTPS Facebook group-post permalink; otherwise the page clearly remains
+review-only and a crafted posting request is rejected server-side.
 
 The one-shot local worker owns browser submission. Its launchd definition supplies
 `POSTING_ENABLED=true` and `DRY_RUN=false` only to that worker process; those flags are not copied

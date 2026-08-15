@@ -34,6 +34,7 @@ from lead_agent.models import (
     PostingWorkItem,
     PostStatus,
     RejectionReason,
+    is_exact_facebook_post_url,
     utc_now,
 )
 
@@ -1370,6 +1371,18 @@ class Database:
             request = _approval_request_from_row(row)
             if request.status is not ApprovalStatus.PENDING:
                 return _approval_review_from_connection(connection, request_id), False
+            if enqueue_posting:
+                post_row = connection.execute(
+                    """
+                    SELECT posts.post_url
+                    FROM leads
+                    JOIN facebook_posts AS posts ON posts.id = leads.facebook_post_id
+                    WHERE leads.id = ?
+                    """,
+                    (request.lead_id,),
+                ).fetchone()
+                if post_row is None or not is_exact_facebook_post_url(post_row["post_url"]):
+                    raise ValueError("Queued posting requires an exact Facebook post URL")
             if decided_at >= request.expires_at:
                 connection.execute(
                     "UPDATE approval_requests SET status = ? WHERE id = ?",
@@ -1845,7 +1858,7 @@ class Database:
             if post_row is None:  # pragma: no cover - foreign key constraint
                 raise RuntimeError("Lead is missing its Facebook post")
             post = _post_from_row(post_row)
-            if post.post_url is None:
+            if not is_exact_facebook_post_url(post.post_url):
                 raise ValueError("Approved posting requires an exact Facebook post URL")
 
             approval_row = connection.execute(

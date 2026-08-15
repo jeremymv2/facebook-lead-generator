@@ -22,7 +22,7 @@ from lead_agent.approvals import (
     LocalReviewItem,
 )
 from lead_agent.dashboard_metrics import CycleTrend, DashboardMetricsService, DashboardTrendSnapshot
-from lead_agent.models import RejectionReason, utc_now
+from lead_agent.models import RejectionReason, is_exact_facebook_post_url, utc_now
 
 LOOPBACK_HOST = "127.0.0.1"
 MAX_FORM_BYTES = 4096
@@ -217,6 +217,8 @@ def render_dashboard(
     .reject {{ background: #cf222e; color: white; }}
     .flash {{ background: #ddf4ff; border: 1px solid #54aeff; border-radius: 8px; padding: 12px; }}
     .expiry {{ color: #9a6700; font-weight: 650; }}
+    .postability {{ background: #fff8c5; border-radius: 8px; color: #633c01;
+      font-weight: 650; padding: 10px 12px; }}
     @media (max-width: 820px) {{
       .kpis {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
       .outcome-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
@@ -490,6 +492,11 @@ def _render_review(review: LocalReviewItem, *, csrf_token: str) -> str:
         post_link = (
             f'<p><a href="{safe_url}" target="_blank" rel="noreferrer">Open Facebook post</a></p>'
         )
+    else:
+        post_link = (
+            '<p class="postability">Review only — an exact Facebook post link was not captured. '
+            "This lead cannot be submitted until a later scan recovers its permalink.</p>"
+        )
     csrf = html.escape(csrf_token, quote=True)
     draft = html.escape(review.draft_response)
     rejection_options = "".join(
@@ -537,15 +544,7 @@ def _render_review(review: LocalReviewItem, *, csrf_token: str) -> str:
 
 
 def _safe_facebook_post_url(value: str | None) -> str | None:
-    if not value:
-        return None
-    parts = urlsplit(value)
-    hostname = (parts.hostname or "").casefold()
-    if parts.scheme != "https" or (
-        hostname != "facebook.com" and not hostname.endswith(".facebook.com")
-    ):
-        return None
-    return value
+    return value if is_exact_facebook_post_url(value) else None
 
 
 def _is_local_dashboard_url(value: str | None, *, port: int, allow_path: bool) -> bool:

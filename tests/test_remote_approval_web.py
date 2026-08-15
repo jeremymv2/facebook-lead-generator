@@ -48,6 +48,7 @@ def prepared_controller(
     post = database.save_post(
         FacebookPost(
             external_post_id="remote-fixture",
+            post_url="https://www.facebook.com/groups/111/posts/remote-fixture",
             group_id="fixture-group",
             group_name="<script>Fixture Group</script>",
             post_text="<img src=x onerror=alert(1)> Need a deck repair in Louisville.",
@@ -169,6 +170,39 @@ def test_remote_post_action_fails_closed_for_scan_only_group(tmp_path: Path) -> 
     assert "approve-post" not in page
     with pytest.raises(ApprovalStateError, match="not enabled"):
         queue_enabled.submit(
+            TOKEN,
+            "approve-post",
+            {"csrf_token": [csrf_from_page(page)]},
+            now=now + timedelta(minutes=1),
+        )
+    assert database.get_approval_request(request_id).status.value == "pending"  # type: ignore[union-attr]
+    assert database.get_posting_job_for_approval(request_id) is None
+
+
+def test_remote_post_action_is_hidden_and_blocked_without_exact_permalink(
+    tmp_path: Path,
+) -> None:
+    controller, database, request_id, now = prepared_controller(tmp_path)
+    review = database.get_approval_request(request_id)
+    assert review is not None
+    lead = database.get_lead(review.lead_id)
+    assert lead is not None
+    post = database.get_post(lead.facebook_post_id)
+    assert post is not None
+    with database.connection() as connection:
+        connection.execute("UPDATE facebook_posts SET post_url = NULL WHERE id = ?", (post.id,))
+    enabled = RemoteApprovalController(
+        controller.approvals,
+        signing_key="s" * 48,
+        posting_queue_enabled=True,
+        posting_enabled_group_ids={"fixture-group"},
+    )
+    page = enabled.render(TOKEN, now=now)
+
+    assert "approve-post" not in page
+    assert "Review only: an exact Facebook post link was not captured" in page
+    with pytest.raises(ApprovalStateError, match="review-only"):
+        enabled.submit(
             TOKEN,
             "approve-post",
             {"csrf_token": [csrf_from_page(page)]},
