@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import cast
 from urllib.error import URLError
 from urllib.parse import urlencode
+from urllib.request import Request
 
 import pytest
 
@@ -357,7 +358,16 @@ def test_relay_healthcheck_requires_exact_success_response(
             assert limit == 16
             return b"ok"
 
-    monkeypatch.setattr(remote_web_module, "urlopen", lambda request, timeout: FakeResponse())
+    def open_healthcheck(request: object, timeout: int) -> FakeResponse:
+        assert isinstance(request, Request)
+        assert request.full_url == "https://approve.example/health"
+        assert request.get_method() == "GET"
+        assert request.get_header("Accept") == "text/plain"
+        assert request.get_header("User-agent") == "JJMillerLeadAgent/1.0"
+        assert timeout == 5
+        return FakeResponse()
+
+    monkeypatch.setattr(remote_web_module, "urlopen", open_healthcheck)
 
     assert relay_is_healthy("https://approve.example") is True
 

@@ -36,6 +36,7 @@ from lead_agent.notifications import remote_token_hash
 
 LOOPBACK_HOST = "127.0.0.1"
 MAX_FORM_BYTES = 4096
+RELAY_HEALTH_USER_AGENT = "JJMillerLeadAgent/1.0"
 REMOTE_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}")
 REVIEW_PATH = re.compile(r"^/review/([A-Za-z0-9_-]{43})$")
 DECISION_PATH = re.compile(
@@ -55,7 +56,10 @@ def relay_is_healthy(public_base_url: str, *, timeout_seconds: int = 5) -> bool:
     """Confirm the configured HTTPS relay reaches this Mac before sending any link."""
     request = Request(
         f"{public_base_url.rstrip('/')}/health",
-        headers={"Accept": "text/plain"},
+        headers={
+            "Accept": "text/plain",
+            "User-Agent": RELAY_HEALTH_USER_AGENT,
+        },
         method="GET",
     )
     try:
