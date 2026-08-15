@@ -138,6 +138,7 @@ def test_remote_approve_and_post_atomically_queues_only_an_enabled_group(
         signing_key="s" * 48,
         posting_queue_enabled=True,
         posting_enabled_group_ids={"fixture-group"},
+        sms_return_number="+15025550100",
     )
     page = enabled.render(TOKEN, now=now)
     csrf = csrf_from_page(page)
@@ -156,6 +157,8 @@ def test_remote_approve_and_post_atomically_queues_only_an_enabled_group(
     assert job.status is PostingJobStatus.QUEUED
     terminal = enabled.render(TOKEN, now=now + timedelta(minutes=2))
     assert "Facebook submission is queued on your Mac" in terminal
+    assert 'href="sms:+15025550100"' in terminal
+    assert "Back to SMS reviews" in terminal
 
 
 def test_remote_post_action_fails_closed_for_scan_only_group(tmp_path: Path) -> None:
@@ -218,6 +221,12 @@ def test_remote_controller_rejects_weak_or_unknown_tokens(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="at least 32"):
         RemoteApprovalController(controller.approvals, signing_key="short")
+    with pytest.raises(ValueError, match=r"E\.164"):
+        RemoteApprovalController(
+            controller.approvals,
+            signing_key="s" * 48,
+            sms_return_number="not-a-phone-number",
+        )
     with pytest.raises(RemoteApprovalTokenError, match="invalid"):
         controller.resolve("not-a-valid-token", now=now)
     with pytest.raises(RemoteApprovalTokenError, match="invalid"):
