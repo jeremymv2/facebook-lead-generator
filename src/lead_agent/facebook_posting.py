@@ -272,7 +272,11 @@ class FacebookCommentBrowser:  # pragma: no cover - requires an interactive Face
                 raise PostingValidationError(
                     "The exact approved response is already visible; manual review is required"
                 )
-            composer = await self._comment_composer(page, matching_messages[0])
+            composer = await self._comment_composer(
+                page,
+                matching_messages[0],
+                lead_id=work.lead.id or 0,
+            )
             before = await self._capture(page, work.lead.id or 0, "before-posting")
             self._validated = _ValidatedBrowserState(
                 attempt_id=attempt_id,
@@ -471,19 +475,35 @@ class FacebookCommentBrowser:  # pragma: no cover - requires an interactive Face
             for _candidate, handle in resolved:
                 await handle.dispose()
 
-    async def _comment_composer(self, page: Page, message: Locator) -> Locator:
-        owner = message.locator("xpath=ancestor::*[self::article or @role='article'][1]")
-        scoped = owner.locator('[contenteditable="true"][role="textbox"]')
-        candidates = await self._visible_comment_composers(scoped)
-        if not candidates:
-            candidates = await self._visible_comment_composers(
-                page.locator('[contenteditable="true"][role="textbox"]')
-            )
-        if len(candidates) != 1:
-            raise PostingValidationError(
-                "Facebook did not expose exactly one recognizable comment composer"
-            )
-        return candidates[0]
+    async def _comment_composer(
+        self,
+        page: Page,
+        message: Locator,
+        *,
+        lead_id: int,
+    ) -> Locator:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.settings.facebook_post_load_timeout_seconds
+        while True:
+            owner = message.locator("xpath=ancestor::*[self::article or @role='article'][1]")
+            scoped = owner.locator('[contenteditable="true"][role="textbox"]')
+            candidates = await self._visible_comment_composers(scoped)
+            if not candidates:
+                candidates = await self._visible_comment_composers(
+                    page.locator('[contenteditable="true"][role="textbox"]')
+                )
+            if len(candidates) == 1:
+                return candidates[0]
+            if len(candidates) > 1:
+                raise PostingValidationError(
+                    "Facebook exposed more than one recognizable comment composer"
+                )
+            if loop.time() >= deadline:
+                raise PostingValidationError(
+                    "Facebook did not expose a recognizable comment composer before timeout"
+                )
+            await self._require_normal_page(page, lead_id=lead_id)
+            await page.wait_for_timeout(250)
 
     async def _visible_comment_composers(self, locators: Locator) -> list[Locator]:
         visible: list[Locator] = []
