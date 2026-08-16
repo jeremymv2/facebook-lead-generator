@@ -34,11 +34,14 @@ from lead_agent.models import (
     PostingWorkItem,
     PostStatus,
     RejectionReason,
+    hash_post_text,
     is_exact_facebook_post_url,
+    is_post_text_expansion,
+    normalize_post_text,
     utc_now,
 )
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 _REVIEW_DEDUPE_REPEATED_FRAGMENT_MINIMUM_TOKENS = 7
 
 
@@ -323,7 +326,10 @@ class Database:
                     ON posting_attempts(group_id, started_at DESC);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_posting_attempts_one_live_per_lead
                     ON posting_attempts(lead_id)
-                    WHERE dry_run = 0;
+                    WHERE dry_run = 0 AND status IN (
+                        'validating', 'submitting', 'posted',
+                        'pending_moderation', 'needs_attention'
+                    );
 
                 CREATE TABLE IF NOT EXISTS posting_jobs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -445,6 +451,17 @@ class Database:
                 WHERE remote_token_hash IS NOT NULL
                 """
             )
+            connection.execute("DROP INDEX IF EXISTS idx_posting_attempts_one_live_per_lead")
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX idx_posting_attempts_one_live_per_lead
+                ON posting_attempts(lead_id)
+                WHERE dry_run = 0 AND status IN (
+                    'validating', 'submitting', 'posted',
+                    'pending_moderation', 'needs_attention'
+                )
+                """
+            )
             self._backfill_post_identity_aliases(connection)
             connection.execute(
                 """
@@ -507,13 +524,23 @@ class Database:
                     raise RuntimeError("Failed to retrieve inserted post ID")
                 existing_post_id = inserted_post_id
             else:
+                existing_row = connection.execute(
+                    "SELECT post_text FROM facebook_posts WHERE id = ?",
+                    (existing_post_id,),
+                ).fetchone()
+                should_expand_text = existing_row is not None and is_post_text_expansion(
+                    str(existing_row["post_text"]),
+                    post.post_text,
+                )
                 connection.execute(
                     """
                     UPDATE facebook_posts SET
                         external_post_id = COALESCE(external_post_id, ?),
                         post_url = COALESCE(post_url, ?),
                         author_name = COALESCE(author_name, ?),
-                        posted_at = COALESCE(posted_at, ?)
+                        posted_at = COALESCE(posted_at, ?),
+                        post_text = CASE WHEN ? THEN ? ELSE post_text END,
+                        text_hash = CASE WHEN ? THEN ? ELSE text_hash END
                     WHERE id = ?
                     """,
                     (
@@ -521,6 +548,10 @@ class Database:
                         post.post_url,
                         post.author_name,
                         _serialize_datetime(post.posted_at),
+                        should_expand_text,
+                        post.post_text,
+                        should_expand_text,
+                        post.text_hash,
                         existing_post_id,
                     ),
                 )
@@ -543,6 +574,50 @@ class Database:
                 "SELECT * FROM facebook_posts WHERE id = ?", (post_id,)
             ).fetchone()
         return _post_from_row(row) if row is not None else None
+
+    def expand_post_text_for_rereview(
+        self,
+        post_id: int,
+        *,
+        expected_text_hash: str,
+        expanded_text: str,
+    ) -> FacebookPost:
+        """Persist one verified prefix expansion without overwriting unrelated source edits."""
+        normalized = normalize_post_text(expanded_text)
+        expanded_hash = hash_post_text(normalized)
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM facebook_posts WHERE id = ?",
+                (post_id,),
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"Facebook post {post_id} does not exist")
+            post = _post_from_row(row)
+            if post.text_hash != expected_text_hash:
+                if post.post_text == normalized:
+                    return post
+                raise ValueError("Facebook post changed before its expansion could be saved")
+            if not is_post_text_expansion(post.post_text, normalized):
+                raise ValueError("Replacement text is not a source-prefix expansion")
+            connection.execute(
+                "UPDATE facebook_posts SET post_text = ?, text_hash = ? WHERE id = ?",
+                (normalized, expanded_hash, post_id),
+            )
+            updated_row = connection.execute(
+                "SELECT * FROM facebook_posts WHERE id = ?",
+                (post_id,),
+            ).fetchone()
+            if updated_row is None:  # pragma: no cover - protected by transaction
+                raise RuntimeError("Failed to retrieve expanded Facebook post")
+            updated = _post_from_row(updated_row)
+            _insert_identity_aliases(
+                connection,
+                post_id=post_id,
+                aliases=updated.identity_aliases(),
+                created_at=updated.discovered_at,
+            )
+            return updated
 
     def list_posts(self, *, limit: int = 100) -> list[FacebookPost]:
         if limit < 1:
@@ -1846,9 +1921,16 @@ class Database:
                 existing = connection.execute(
                     """
                     SELECT id FROM posting_attempts
-                    WHERE lead_id = ? AND dry_run = 0
+                    WHERE lead_id = ? AND dry_run = 0 AND status IN (?, ?, ?, ?, ?)
                     """,
-                    (lead_id,),
+                    (
+                        lead_id,
+                        PostingAttemptStatus.VALIDATING.value,
+                        PostingAttemptStatus.SUBMITTING.value,
+                        PostingAttemptStatus.POSTED.value,
+                        PostingAttemptStatus.PENDING_MODERATION.value,
+                        PostingAttemptStatus.NEEDS_ATTENTION.value,
+                    ),
                 ).fetchone()
                 if existing is not None:
                     return PostingAttemptSaveResult(
@@ -1903,7 +1985,8 @@ class Database:
                 live_today = connection.execute(
                     """
                     SELECT COUNT(*) AS total FROM posting_attempts
-                    WHERE dry_run = 0 AND started_at >= ? AND started_at < ?
+                    WHERE dry_run = 0 AND submission_started_at IS NOT NULL
+                      AND started_at >= ? AND started_at < ?
                     """,
                     (
                         _serialize_datetime(day_started_at),
@@ -1915,7 +1998,7 @@ class Database:
                 group_today = connection.execute(
                     """
                     SELECT COUNT(*) AS total FROM posting_attempts
-                    WHERE dry_run = 0 AND group_id = ?
+                    WHERE dry_run = 0 AND submission_started_at IS NOT NULL AND group_id = ?
                       AND started_at >= ? AND started_at < ?
                     """,
                     (
@@ -2290,20 +2373,38 @@ class Database:
                 ),
             )
             if not attempt.dry_run:
-                connection.execute(
-                    """
-                    UPDATE leads SET status = ?, updated_at = ?, error_state = ?,
-                        screenshot_path = COALESCE(?, screenshot_path)
-                    WHERE id = ?
-                    """,
-                    (
-                        LeadStatus.NEEDS_ATTENTION.value,
-                        _serialize_datetime(failed_at),
-                        error_code,
-                        after_screenshot_path,
-                        attempt.lead_id,
-                    ),
-                )
+                if status is PostingAttemptStatus.FAILED:
+                    connection.execute(
+                        """
+                        UPDATE leads SET status = ?, approved_response = NULL,
+                            approval_timestamp = NULL, posting_timestamp = NULL,
+                            updated_at = ?, error_state = ?,
+                            screenshot_path = COALESCE(?, screenshot_path)
+                        WHERE id = ?
+                        """,
+                        (
+                            LeadStatus.CANDIDATE.value,
+                            _serialize_datetime(failed_at),
+                            error_code,
+                            after_screenshot_path,
+                            attempt.lead_id,
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE leads SET status = ?, updated_at = ?, error_state = ?,
+                            screenshot_path = COALESCE(?, screenshot_path)
+                        WHERE id = ?
+                        """,
+                        (
+                            LeadStatus.NEEDS_ATTENTION.value,
+                            _serialize_datetime(failed_at),
+                            error_code,
+                            after_screenshot_path,
+                            attempt.lead_id,
+                        ),
+                    )
             return _posting_work_from_connection(connection, attempt_id)
 
     def record_audit_event(self, event: AuditEvent) -> AuditEvent:

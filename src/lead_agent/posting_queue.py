@@ -150,7 +150,7 @@ class PostingQueueProcessor:
                 job.id,
                 status=status,
                 completed_at=timestamp,
-                error_code=type(error).__name__,
+                error_code=_posting_error_code(error),
             )
             self._record(failed, result=status.value)
             return PostingQueueResult(job=failed, result=status.value)
@@ -252,6 +252,18 @@ class PostingOutcomeNotificationService:
             PostingJobStatus.NEEDS_ATTENTION: "needs manual Facebook review",
         }
         result = outcomes[job.status]
+        failure_reasons = {
+            "source_text_expanded": "Facebook revealed more post text; review it again",
+            "source_text_mismatch": "the source post changed",
+            "source_text_updated": "the saved source post changed; review it again",
+            "comment_composer_missing": "Facebook did not expose a comment box",
+            "comment_composer_ambiguous": "Facebook exposed ambiguous comment boxes",
+            "response_already_visible": "the approved response may already be visible",
+            "posting_controls_unreadable": "Facebook controls were not readable",
+        }
+        reason = failure_reasons.get(job.error_code or "")
+        if job.status is PostingJobStatus.FAILED and reason is not None:
+            result = f"stopped before sending: {reason}"
         body = f"{SMS_BRAND_NAME}: Lead {job.lead_id} {result}. {SMS_OPT_OUT_INSTRUCTION}"
         if len(body) > 160:  # pragma: no cover - fixed messages stay within one segment
             raise ValueError("Posting outcome SMS exceeds one segment")
@@ -274,6 +286,11 @@ class PostingOutcomeNotificationService:
                 },
             )
         )
+
+
+def _posting_error_code(error: PostingError) -> str:
+    code = getattr(error, "code", None)
+    return code[:100] if isinstance(code, str) and code else type(error).__name__[:100]
 
 
 __all__ = [

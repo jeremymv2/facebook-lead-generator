@@ -22,6 +22,7 @@ from lead_agent.posting import (
     PostingSubmissionResult,
     PostingSubmissionUncertainError,
     PostingValidation,
+    PostingValidationError,
 )
 from lead_agent.posting_queue import (
     PostingOutcomeNotificationService,
@@ -40,13 +41,17 @@ class FakePostingAdapter:
         *,
         pending_moderation: bool = False,
         uncertain: bool = False,
+        validation_error: PostingValidationError | None = None,
     ) -> None:
         self.pending_moderation = pending_moderation
         self.uncertain = uncertain
+        self.validation_error = validation_error
         self.submit_calls = 0
 
     async def validate(self, work: object) -> PostingValidation:
         del work
+        if self.validation_error is not None:
+            raise self.validation_error
         return PostingValidation(before_screenshot_path=Path("before.png"))
 
     async def submit(
@@ -300,7 +305,45 @@ def test_stale_claim_with_reserved_attempt_is_terminalized_without_retry(
     assert attempt is not None
     assert job.status is PostingJobStatus.FAILED
     assert attempt.status is PostingAttemptStatus.FAILED
-    assert database.get_lead(lead_id).status is LeadStatus.NEEDS_ATTENTION  # type: ignore[union-attr]
+    assert database.get_lead(lead_id).status is LeadStatus.CANDIDATE  # type: ignore[union-attr]
+
+
+def test_validation_failure_sms_names_the_safe_pre_submission_reason(tmp_path: Path) -> None:
+    settings = live_settings(tmp_path)
+    database = Database(settings.database_path)
+    database.initialize()
+    now = datetime(2026, 8, 14, 16, tzinfo=UTC)
+    lead_id, job_id = queued_job(database, now=now)
+    service = processor(database, settings)
+    claimed = service.claim(now=now + timedelta(minutes=2))
+    assert claimed is not None
+
+    result = asyncio.run(
+        service.process(
+            claimed,
+            FakePostingAdapter(
+                validation_error=PostingValidationError(
+                    "Source changed",
+                    code="source_text_mismatch",
+                )
+            ),
+            now=now + timedelta(minutes=2),
+        )
+    )
+
+    assert result.result == "failed"
+    job = database.get_posting_job(job_id)
+    assert job is not None
+    assert job.error_code == "source_text_mismatch"
+    assert database.get_lead(lead_id).status is LeadStatus.CANDIDATE  # type: ignore[union-attr]
+    provider = FakeSmsProvider()
+    notifier = PostingOutcomeNotificationService(
+        database,
+        provider,
+        recipient_number="+15025280858",
+    )
+    assert notifier.notify_pending(now=now + timedelta(minutes=3)) == 1
+    assert "stopped before sending: the source post changed" in provider.messages[0].body
 
 
 def test_outcome_sms_failure_is_recorded_without_automatic_retry(tmp_path: Path) -> None:

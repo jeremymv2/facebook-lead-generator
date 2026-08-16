@@ -686,6 +686,14 @@ An approval that cannot start within `POSTING_APPROVAL_MAX_AGE_MINUTES` expires 
 Facebook and returns the lead for a fresh review. A result that may have crossed Facebook's submit
 boundary is never retried automatically.
 
+Facebook messages ending in a collapsed **See more** control enter classification only when the
+same story node exposes one longer prefix-preserving rendering. Later complete renderings safely
+hydrate an earlier saved prefix. If Facebook reveals additional source text during final posting
+validation, the comment remains unsent, the complete text is saved, and the lead returns for a
+fresh human approval. Validation failures before submission never consume a posting slot; any
+failure at or after the durable submission boundary still requires manual attention and cannot be
+retried automatically.
+
 ## Test approved posting safely
 
 Keep the safe defaults in `.env`:

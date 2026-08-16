@@ -63,6 +63,23 @@ def test_post_discovery_is_deduplicated(database: Database) -> None:
     assert len(database.list_posts()) == 1
 
 
+def test_later_prefix_expansion_hydrates_saved_post_text(database: Database) -> None:
+    first = database.save_post(
+        make_post(post_text="Need someone to install cabinets and a quartz countertop f")
+    )
+    expanded_text = (
+        "Need someone to install cabinets and a quartz countertop faucet. "
+        "DM your quotes; the job site is in Shawnee."
+    )
+
+    hydrated = database.save_post(make_post(post_text=expanded_text))
+
+    assert hydrated.created is False
+    assert hydrated.post.id == first.post.id
+    assert hydrated.post.post_text == expanded_text
+    assert hydrated.post.text_hash != first.post.text_hash
+
+
 def test_content_fallback_deduplicates_posts_without_ids_or_urls(database: Database) -> None:
     first = database.save_post(
         make_post(external_post_id=None, post_url=None, post_text="Need a fence estimate.")
