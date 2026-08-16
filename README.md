@@ -150,7 +150,7 @@ Important settings include:
 | `DRY_RUN` | `true` | Prevents submission while exercising future workflows |
 | `POSTING_QUEUE_ENABLED` | `false` | Show guarded Approve & Post controls and permit the queue worker |
 | `POSTING_QUEUE_POLL_INTERVAL_SECONDS` | `60` | Delay between one-shot queued-posting workers |
-| `SCAN_INTERVAL_SECONDS` | `900` | Conservative interval between unattended cycles |
+| `SCAN_INTERVAL_SECONDS` | `900` | Fixed wall-clock cadence between unattended cycle starts |
 | `LEAD_THRESHOLD` | `75` | Minimum score for an approval candidate |
 | `SERVICE_AREA` | `Louisville, Kentucky` | Primary geographic target |
 | `APPROVAL_EXPIRATION_MINUTES` | `600` | Single-use local and mobile review lifetime (10 hours) |
@@ -788,7 +788,9 @@ Install and load only the cycle agent while Telnyx is pending:
 The generated plist contains only executable paths and non-secret scheduling metadata. It reads the
 ignored `.env` from the repository at runtime; credentials and phone numbers are never copied into
 the plist. Logs live under `data/logs/`, and content-free health lives at
-`data/operations/health.json`.
+`data/operations/health.json`. The default cycle starts on fixed quarter-hour boundaries (`:00`,
+`:15`, `:30`, and `:45`) instead of waiting 15 minutes after the previous cycle finishes. If a
+cycle is still running at the next boundary, launchd and the cycle lock prevent an overlapping run.
 
 After the Telnyx campaign is active and `lead-agent doctor` reports
 `remote_approval_ready: true`, install the scan and remote-approval agents:
