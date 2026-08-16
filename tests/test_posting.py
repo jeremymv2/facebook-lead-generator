@@ -32,6 +32,7 @@ from lead_agent.models import (
 from lead_agent.posting import (
     ApprovedPostingService,
     PostingEligibilityError,
+    PostingSourceTextExpandedError,
     PostingSubmissionResult,
     PostingSubmissionUncertainError,
     PostingValidation,
@@ -286,7 +287,7 @@ def test_disabled_group_stops_before_claim_or_browser(
     assert adapter.validate_calls == 0
 
 
-def test_live_validation_failure_never_submits_and_requires_attention(
+def test_live_validation_failure_returns_for_fresh_review_and_can_retry(
     database: Database,
     tmp_path: Path,
 ) -> None:
@@ -316,7 +317,74 @@ def test_live_validation_failure_never_submits_and_requires_attention(
     assert attempt.submission_started_at is None
     assert attempt.error_code == "facebook_validation_failed"
     assert adapter.submit_calls == 0
-    assert database.get_lead(lead.id or 0).status is LeadStatus.NEEDS_ATTENTION  # type: ignore[union-attr]
+    returned = database.get_lead(lead.id or 0)
+    assert returned is not None
+    assert returned.status is LeadStatus.CANDIDATE
+    assert returned.approved_response is None
+    assert returned.approval_timestamp is None
+
+    approvals = LocalApprovalService(database, expiration_minutes=20)
+    request = approvals.prepare_candidates(
+        limit=1,
+        now=approved_at + timedelta(minutes=3),
+    )[0].request
+    approvals.decide(
+        request.id or 0,
+        ApprovalAction.APPROVE,
+        now=approved_at + timedelta(minutes=4),
+    )
+    retried = asyncio.run(
+        service.execute(
+            lead.id or 0,
+            FakePostingAdapter(),
+            dry_run=False,
+            now=approved_at + timedelta(minutes=5),
+        )
+    )
+
+    assert retried.created is True
+    assert retried.work.attempt.status is PostingAttemptStatus.POSTED
+    assert [value.status for value in database.list_posting_attempts(lead_id=lead.id)] == [
+        PostingAttemptStatus.FAILED,
+        PostingAttemptStatus.POSTED,
+    ]
+
+
+def test_source_prefix_expansion_is_saved_for_fresh_review(
+    database: Database,
+    tmp_path: Path,
+) -> None:
+    approved_at = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    lead = create_approved_lead(database, now=approved_at)
+    original = database.get_post(lead.facebook_post_id)
+    assert original is not None
+    expanded = f"{original.post_text} Pickup is in Shawnee."
+    service = ApprovedPostingService(
+        database,
+        settings(tmp_path, live=True),
+        posting_enabled_group_ids={"fixture-group"},
+    )
+
+    with pytest.raises(PostingSourceTextExpandedError):
+        asyncio.run(
+            service.execute(
+                lead.id or 0,
+                FakePostingAdapter(
+                    validation_error=PostingSourceTextExpandedError(
+                        "More text",
+                        observed_post_text=expanded,
+                    )
+                ),
+                dry_run=False,
+                now=approved_at + timedelta(minutes=2),
+            )
+        )
+
+    refreshed = database.get_post(lead.facebook_post_id)
+    assert refreshed is not None
+    assert refreshed.post_text == expanded
+    assert database.get_lead(lead.id or 0).status is LeadStatus.CANDIDATE  # type: ignore[union-attr]
+    assert database.list_posting_attempts(lead_id=lead.id)[0].error_code == ("source_text_expanded")
 
 
 def test_uncertain_submission_is_never_retried(
@@ -588,6 +656,16 @@ def test_snapshot_validation_requires_exact_post_group_and_integrity(
             current_url="https://www.facebook.com/groups/999/posts/222",
             rendered_post_texts=[claimed.work.post.post_text],
         )
+
+    expanded = f"{claimed.work.post.post_text} Pickup is in Shawnee."
+    with pytest.raises(PostingSourceTextExpandedError) as expansion:
+        validate_post_snapshot(
+            claimed.work,
+            current_url="https://www.facebook.com/groups/111/posts/222",
+            rendered_post_texts=[expanded],
+        )
+    assert expansion.value.code == "source_text_expanded"
+    assert expansion.value.observed_post_text == expanded
 
 
 def test_comment_permalink_keeps_only_same_post_comment_identity() -> None:

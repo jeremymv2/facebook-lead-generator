@@ -25,6 +25,7 @@ from lead_agent.models import (
     FacebookPost,
     canonicalize_facebook_url,
     is_facebook_comment_ui_text,
+    is_post_text_expansion,
     normalize_post_text,
 )
 from lead_agent.scanner import (
@@ -72,6 +73,7 @@ class FacebookPostCandidate:
     article_label: str | None = None
     author_name: str | None = None
     is_nested_article: bool = False
+    is_collapsed_message: bool = False
 
 
 def is_facebook_comment_label(label: str | None) -> bool:
@@ -90,6 +92,11 @@ def clean_facebook_message_text(value: str) -> str:
         if repeated_at >= REPEATED_MESSAGE_PREFIX_LENGTH:
             normalized = normalized[:repeated_at].rstrip(" …")
     return normalize_post_text(normalized)
+
+
+def message_text_requires_expansion(value: str) -> bool:
+    """Identify a collapsed Facebook message whose visible text ends at “See more”."""
+    return bool(SEE_MORE_SUFFIX_PATTERN.search(normalize_post_text(value)))
 
 
 def extract_post_id(url: str) -> str | None:
@@ -157,7 +164,13 @@ def select_message_text(
 
     semantic = candidates(semantic_messages)
     if semantic:
-        return max(semantic, key=len)
+        selected = max(semantic, key=len)
+        expansions = [
+            value
+            for value in candidates(automatic_texts)
+            if is_post_text_expansion(selected, value)
+        ]
+        return max((selected, *expansions), key=len)
     automatic = candidates(automatic_texts)
     if automatic:
         return max(automatic, key=len)
@@ -183,6 +196,11 @@ def build_facebook_post(
         min_length=min_length,
     )
     if post_text is None or is_facebook_comment_ui_text(post_text):
+        return None
+    if candidate.is_collapsed_message and not any(
+        is_post_text_expansion(clean_facebook_message_text(value), post_text)
+        for value in candidate.semantic_messages
+    ):
         return None
     post_url = select_facebook_permalink(candidate.hrefs, group.url)
     if post_url is not None and facebook_group_key(post_url) != facebook_group_key(group.url):
@@ -221,6 +239,9 @@ def merge_facebook_post(
         existing.external_post_id = incoming.external_post_id
     if existing.author_name is None and incoming.author_name is not None:
         existing.author_name = incoming.author_name
+    if is_post_text_expansion(existing.post_text, incoming.post_text):
+        existing.post_text = incoming.post_text
+        existing.text_hash = incoming.text_hash
 
 
 def cleanup_old_screenshots(
@@ -639,6 +660,10 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                         }
                         return [{
                             text: node.innerText || '',
+                            content: node.textContent || '',
+                            collapsed: /(?:…|\.\.\.)?\s*see more\s*$/i.test(
+                                node.innerText || ''
+                            ),
                             label: article?.getAttribute('aria-label') || null,
                             nested,
                             hrefs,
@@ -659,8 +684,13 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
             nested_value = snapshot.get("nested")
             is_nested_article = nested_value if isinstance(nested_value, bool) else False
             text_value = snapshot.get("text")
+            content_value = snapshot.get("content")
+            collapsed_value = snapshot.get("collapsed")
             post_text = clean_facebook_message_text(
                 text_value if isinstance(text_value, str) else ""
+            )
+            content_text = clean_facebook_message_text(
+                content_value if isinstance(content_value, str) else ""
             )
             href_values = snapshot.get("hrefs")
             snapshot_hrefs = (
@@ -672,9 +702,13 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 FacebookPostCandidate(
                     full_text=post_text,
                     semantic_messages=(post_text,),
+                    automatic_texts=(content_text,),
                     hrefs=snapshot_hrefs,
                     article_label=comment_label,
                     is_nested_article=is_nested_article,
+                    is_collapsed_message=(
+                        collapsed_value if isinstance(collapsed_value, bool) else False
+                    ),
                 ),
                 group,
                 min_length=self.settings.min_post_text_length,
@@ -708,15 +742,21 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                         "); }"
                     )
                 )
-                post_text = clean_facebook_message_text(await message.inner_text(timeout=1000))
+                raw_post_text = await message.inner_text(timeout=1000)
+                post_text = clean_facebook_message_text(raw_post_text)
+                content_text = clean_facebook_message_text(
+                    cast(str, await message.evaluate("node => node.textContent || ''"))
+                )
                 hrefs = await self._nearest_post_hrefs(message)
                 post = build_facebook_post(
                     FacebookPostCandidate(
                         full_text=post_text,
                         semantic_messages=(post_text,),
+                        automatic_texts=(content_text,),
                         hrefs=tuple(hrefs),
                         article_label=comment_label,
                         is_nested_article=is_nested_article,
+                        is_collapsed_message=message_text_requires_expansion(raw_post_text),
                     ),
                     group,
                     min_length=self.settings.min_post_text_length,
@@ -842,6 +882,9 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 hrefs=tuple(hrefs),
                 article_label=article_label,
                 author_name=author_name,
+                is_collapsed_message=any(
+                    message_text_requires_expansion(value) for value in semantic_messages
+                ),
             ),
             group,
             min_length=self.settings.min_post_text_length,

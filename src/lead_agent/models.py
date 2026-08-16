@@ -33,6 +33,15 @@ def normalize_post_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def is_post_text_expansion(shorter: str, longer: str) -> bool:
+    """Return whether one rendering strictly extends the same visible source prefix."""
+    shorter_normalized = normalize_post_text(shorter).casefold()
+    longer_normalized = normalize_post_text(longer).casefold()
+    return len(longer_normalized) > len(shorter_normalized) and longer_normalized.startswith(
+        shorter_normalized
+    )
+
+
 def is_facebook_comment_ui_text(text: str) -> bool:
     """Recognize a rendered comment row that leaked its author, age, and reply controls."""
     normalized = normalize_post_text(text)

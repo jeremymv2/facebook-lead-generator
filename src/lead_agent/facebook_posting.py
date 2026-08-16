@@ -35,8 +35,9 @@ from lead_agent.facebook import (
     is_facebook_comment_label,
 )
 from lead_agent.facebook_state import FacebookPageState, FacebookSafetyStop, assess_facebook_page
-from lead_agent.models import PostingWorkItem, normalize_post_text
+from lead_agent.models import PostingWorkItem, is_post_text_expansion, normalize_post_text
 from lead_agent.posting import (
+    PostingSourceTextExpandedError,
     PostingSubmissionResult,
     PostingSubmissionUncertainError,
     PostingValidation,
@@ -97,7 +98,10 @@ def validate_post_snapshot(
     if expected_group is None or facebook_group_key(current_url) != expected_group:
         raise PostingValidationError("Facebook did not remain in the approved group")
     if work.post.text_hash != work.attempt.source_text_hash:
-        raise PostingValidationError("The local source-post snapshot changed after approval")
+        raise PostingValidationError(
+            "The local source-post snapshot changed after approval",
+            code="source_text_updated",
+        )
     response_hash = hashlib.sha256(work.attempt.approved_response.encode("utf-8")).hexdigest()
     if response_hash != work.attempt.approved_response_hash:
         raise PostingValidationError("The approved response snapshot failed its integrity check")
@@ -113,7 +117,18 @@ def validate_post_snapshot(
         text for text in unique_renderings if post_text_is_safe_match(work.post.post_text, text)
     ]
     if not matches:
-        raise PostingValidationError("The Facebook post text no longer matches the approved source")
+        expansions = [
+            text for text in unique_renderings if is_post_text_expansion(work.post.post_text, text)
+        ]
+        if len(expansions) == 1:
+            raise PostingSourceTextExpandedError(
+                "Facebook revealed more source-post text; fresh review is required",
+                observed_post_text=expansions[0],
+            )
+        raise PostingValidationError(
+            "The Facebook post text no longer matches the approved source",
+            code="source_text_mismatch",
+        )
     if len(matches) > 1:
         raise PostingValidationError("More than one Facebook post matches the approved source")
     return matches[0]
@@ -270,7 +285,8 @@ class FacebookCommentBrowser:  # pragma: no cover - requires an interactive Face
                 )
             if await self._find_exact_comment(page, work) is not None:
                 raise PostingValidationError(
-                    "The exact approved response is already visible; manual review is required"
+                    "The exact approved response is already visible; manual review is required",
+                    code="response_already_visible",
                 )
             composer = await self._comment_composer(
                 page,
@@ -290,12 +306,14 @@ class FacebookCommentBrowser:  # pragma: no cover - requires an interactive Face
             screenshot = error.screenshot_path or await self._capture(
                 page, work.lead.id or 0, "validation-failed"
             )
-            raise PostingValidationError(str(error), screenshot_path=screenshot) from error
+            error.screenshot_path = screenshot
+            raise
         except (Error, PlaywrightTimeoutError) as error:
             screenshot = await self._capture(page, work.lead.id or 0, "validation-failed")
             raise PostingValidationError(
                 "Facebook posting controls did not become safely readable",
                 screenshot_path=screenshot,
+                code="posting_controls_unreadable",
             ) from error
 
     async def submit(
@@ -496,11 +514,13 @@ class FacebookCommentBrowser:  # pragma: no cover - requires an interactive Face
                 return candidates[0]
             if len(candidates) > 1:
                 raise PostingValidationError(
-                    "Facebook exposed more than one recognizable comment composer"
+                    "Facebook exposed more than one recognizable comment composer",
+                    code="comment_composer_ambiguous",
                 )
             if loop.time() >= deadline:
                 raise PostingValidationError(
-                    "Facebook did not expose a recognizable comment composer before timeout"
+                    "Facebook did not expose a recognizable comment composer before timeout",
+                    code="comment_composer_missing",
                 )
             await self._require_normal_page(page, lead_id=lead_id)
             await page.wait_for_timeout(250)

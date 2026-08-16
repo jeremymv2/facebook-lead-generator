@@ -260,6 +260,59 @@ def test_message_selection_removes_duplicated_see_more_preview() -> None:
     assert selected == complete
 
 
+def test_collapsed_message_uses_a_hidden_prefix_expansion() -> None:
+    group = FacebookGroup(
+        id="fixture-group",
+        name="Synthetic Fixture Group",
+        url="https://www.facebook.com/groups/111",
+        enabled=True,
+    )
+    truncated = "Need someone to install all cabinets and a quartz countertop and sink f… See more"
+    complete = (
+        "Need someone to install all cabinets and a quartz countertop and sink faucet install. "
+        "DM your quotes. Pickup is on Poplar Level and job site is Shawnee."
+    )
+
+    post = build_facebook_post(
+        FacebookPostCandidate(
+            full_text=truncated,
+            semantic_messages=(truncated,),
+            automatic_texts=(complete,),
+            hrefs=("/groups/111/posts/222",),
+            is_collapsed_message=True,
+        ),
+        group,
+        min_length=15,
+    )
+
+    assert post is not None
+    assert post.post_text == complete
+
+
+def test_unexpanded_collapsed_message_does_not_enter_the_scanner() -> None:
+    group = FacebookGroup(
+        id="fixture-group",
+        name="Synthetic Fixture Group",
+        url="https://www.facebook.com/groups/111",
+        enabled=True,
+    )
+    truncated = "Need someone to install cabinets and a quartz countertop… See more"
+
+    post = build_facebook_post(
+        FacebookPostCandidate(
+            full_text=truncated,
+            semantic_messages=(truncated,),
+            automatic_texts=(truncated,),
+            hrefs=("/groups/111/posts/222",),
+            is_collapsed_message=True,
+        ),
+        group,
+        min_length=15,
+    )
+
+    assert post is None
+
+
 def test_sanitized_candidate_fixtures_cover_supported_selector_shapes() -> None:
     fixtures = cast(list[dict[str, object]], json.loads(FIXTURE_PATH.read_text(encoding="utf-8")))
     group = FacebookGroup(

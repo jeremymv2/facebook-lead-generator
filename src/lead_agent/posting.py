@@ -36,9 +36,33 @@ class PostingValidationError(PostingError):
 
     code = "facebook_validation_failed"
 
-    def __init__(self, message: str, *, screenshot_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        screenshot_path: Path | None = None,
+        code: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.screenshot_path = screenshot_path
+        if code is not None:
+            self.code = code
+
+
+class PostingSourceTextExpandedError(PostingValidationError):
+    """Raised when Facebook reveals a longer prefix-preserving version of the source post."""
+
+    code = "source_text_expanded"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        observed_post_text: str,
+        screenshot_path: Path | None = None,
+    ) -> None:
+        super().__init__(message, screenshot_path=screenshot_path)
+        self.observed_post_text = observed_post_text
 
 
 class PostingSubmissionUncertainError(PostingError):
@@ -246,6 +270,16 @@ class ApprovedPostingService:
                 error_code=error_code,
                 after_screenshot_path=_path_string(screenshot_path),
             )
+            if (
+                isinstance(error, PostingSourceTextExpandedError)
+                and failed.attempt.status is PostingAttemptStatus.FAILED
+                and failed.post.id is not None
+            ):
+                self.database.expand_post_text_for_rereview(
+                    failed.post.id,
+                    expected_text_hash=failed.post.text_hash,
+                    expanded_text=error.observed_post_text,
+                )
             self._record_work_event(
                 failed,
                 action="posting.stopped",
@@ -343,6 +377,7 @@ __all__ = [
     "PostingEligibilityError",
     "PostingError",
     "PostingExecutionResult",
+    "PostingSourceTextExpandedError",
     "PostingSubmissionResult",
     "PostingSubmissionUncertainError",
     "PostingValidation",
