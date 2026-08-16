@@ -33,7 +33,7 @@ def prepared_controller(tmp_path: Path) -> tuple[LocalApprovalController, int, d
     post = database.save_post(
         FacebookPost(
             external_post_id="web-fixture",
-            post_url="javascript:alert(1)",
+            post_url="https://www.facebook.com/groups/111/posts/web-fixture",
             group_id="fixture-group",
             group_name="<script>Fixture Group</script>",
             post_text="<img src=x onerror=alert(1)> Need a deck repair in Louisville.",
@@ -66,8 +66,8 @@ def test_dashboard_escapes_facebook_content_and_states_safety_boundary(tmp_path:
     assert "Remains in this local backlog until you approve or reject it" in page
     assert 'name="csrf_token" value="fixture-csrf"' in page
     assert controller.service.database.list_pending_approval_reviews() == []
-    assert "javascript:alert" not in page
-    assert "Review only — an exact Facebook post link was not captured" in page
+    assert "View original Facebook post" in page
+    assert 'href="https://www.facebook.com/groups/111/posts/web-fixture"' in page
 
 
 def test_dashboard_renders_cycle_trends_and_current_group_health(tmp_path: Path) -> None:
@@ -147,6 +147,7 @@ def test_dashboard_refresh_adds_candidates_without_starting_expiration(tmp_path:
     post = database.save_post(
         FacebookPost(
             external_post_id="new-after-dashboard-start",
+            post_url=("https://www.facebook.com/groups/111/posts/new-after-dashboard-start"),
             group_id="fixture-group",
             group_name="Synthetic Fixture Group",
             post_text="Looking for someone to replace a window in Louisville.",

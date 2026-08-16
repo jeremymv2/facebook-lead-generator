@@ -21,7 +21,12 @@ from lead_agent.facebook_state import (
     assess_facebook_page,
 )
 from lead_agent.groups import FacebookGroup
-from lead_agent.models import FacebookPost, canonicalize_facebook_url, normalize_post_text
+from lead_agent.models import (
+    FacebookPost,
+    canonicalize_facebook_url,
+    is_facebook_comment_ui_text,
+    normalize_post_text,
+)
 from lead_agent.scanner import (
     FacebookReadDiagnostics,
     FacebookReadResult,
@@ -177,7 +182,7 @@ def build_facebook_post(
         candidate.automatic_texts,
         min_length=min_length,
     )
-    if post_text is None:
+    if post_text is None or is_facebook_comment_ui_text(post_text):
         return None
     post_url = select_facebook_permalink(candidate.hrefs, group.url)
     if post_url is not None and facebook_group_key(post_url) != facebook_group_key(group.url):
@@ -609,6 +614,9 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                         );
                         if (!visible) return [];
                         const article = node.closest('article, [role=article]');
+                        const nested = Boolean(
+                            article?.parentElement?.closest('article, [role=article]')
+                        );
                         let owner = node;
                         let hrefs = [];
                         while (owner && owner.getAttribute('role') !== 'feed') {
@@ -632,6 +640,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                         return [{
                             text: node.innerText || '',
                             label: article?.getAttribute('aria-label') || null,
+                            nested,
                             hrefs,
                         }];
                     })
@@ -647,6 +656,8 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
             comment_label = label_value if isinstance(label_value, str) else None
             if is_facebook_comment_label(comment_label):
                 continue
+            nested_value = snapshot.get("nested")
+            is_nested_article = nested_value if isinstance(nested_value, bool) else False
             text_value = snapshot.get("text")
             post_text = clean_facebook_message_text(
                 text_value if isinstance(text_value, str) else ""
@@ -663,6 +674,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                     semantic_messages=(post_text,),
                     hrefs=snapshot_hrefs,
                     article_label=comment_label,
+                    is_nested_article=is_nested_article,
                 ),
                 group,
                 min_length=self.settings.min_post_text_length,
@@ -688,6 +700,14 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 )
                 if is_facebook_comment_label(comment_label):
                     continue
+                is_nested_article = bool(
+                    await message.evaluate(
+                        "node => { const article = node.closest('article, [role=article]'); "
+                        "return Boolean("
+                        "article?.parentElement?.closest('article, [role=article]')"
+                        "); }"
+                    )
+                )
                 post_text = clean_facebook_message_text(await message.inner_text(timeout=1000))
                 hrefs = await self._nearest_post_hrefs(message)
                 post = build_facebook_post(
@@ -696,6 +716,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                         semantic_messages=(post_text,),
                         hrefs=tuple(hrefs),
                         article_label=comment_label,
+                        is_nested_article=is_nested_article,
                     ),
                     group,
                     min_length=self.settings.min_post_text_length,

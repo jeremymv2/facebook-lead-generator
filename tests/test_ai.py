@@ -179,6 +179,20 @@ def test_heuristic_recognizes_who_are_you_using_as_recommendation() -> None:
     assert classification.overall_score >= context().lead_threshold
 
 
+def test_heuristic_rejects_a_rendered_facebook_comment_row() -> None:
+    classification = HeuristicAIProvider().classify_post(
+        post(
+            "Jacob Suell · 22hI\u2019d recommend putting the cabinets on a 2x4 base and trim it "
+            "out just so they\u2019re off the ground and vacuums and mops don\u2019t ruin the base."
+            "LikeReplyShare"
+        ),
+        context(),
+    )
+
+    assert classification.intent is LeadIntent.UNRELATED
+    assert classification.overall_score <= 10
+
+
 def test_heuristic_rejects_commercial_property_request() -> None:
     provider = HeuristicAIProvider()
 

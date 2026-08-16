@@ -156,6 +156,12 @@ class Database:
             _review_posts_are_duplicates,
             deterministic=True,
         )
+        connection.create_function(
+            "is_exact_facebook_post_url",
+            1,
+            lambda value: int(is_exact_facebook_post_url(value)),
+            deterministic=True,
+        )
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
         try:
@@ -942,6 +948,7 @@ class Database:
                 FROM leads
                 JOIN facebook_posts AS posts ON posts.id = leads.facebook_post_id
                 WHERE leads.status = ? AND leads.drafted_response IS NOT NULL
+                  AND is_exact_facebook_post_url(posts.post_url) = 1
                   AND (? IS NULL OR leads.classification_version = ?)
                   AND (? = 0 OR NOT EXISTS (
                     SELECT 1
@@ -1041,6 +1048,14 @@ class Database:
             lead = _lead_from_row(lead_row)
             if lead.status is not LeadStatus.CANDIDATE or lead.drafted_response is None:
                 raise ValueError("Only draft-bearing candidate leads can enter approval")
+            post_row = connection.execute(
+                "SELECT post_url FROM facebook_posts WHERE id = ?",
+                (lead.facebook_post_id,),
+            ).fetchone()
+            if post_row is None or not is_exact_facebook_post_url(post_row["post_url"]):
+                raise ValueError(
+                    "Only candidates with an exact Facebook post URL can enter approval"
+                )
             existing = connection.execute(
                 "SELECT id FROM approval_requests WHERE lead_id = ? AND status = ?",
                 (request.lead_id, ApprovalStatus.PENDING.value),
