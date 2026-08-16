@@ -11,6 +11,7 @@ from pathlib import Path
 from lead_agent.config import load_settings
 from lead_agent.launchd import (
     CYCLE_AGENT_LABEL,
+    DASHBOARD_AGENT_LABEL,
     POSTING_AGENT_LABEL,
     REMOTE_AGENT_LABEL,
     build_launch_agents,
@@ -48,7 +49,12 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("Run this command from the repository after creating .venv")
     destination = Path.home() / "Library" / "LaunchAgents"
     domain = f"gui/{os.getuid()}"
-    labels = (CYCLE_AGENT_LABEL, REMOTE_AGENT_LABEL, POSTING_AGENT_LABEL)
+    labels = (
+        CYCLE_AGENT_LABEL,
+        DASHBOARD_AGENT_LABEL,
+        REMOTE_AGENT_LABEL,
+        POSTING_AGENT_LABEL,
+    )
 
     if args.command == "install":
         settings = load_settings()

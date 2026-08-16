@@ -5,6 +5,7 @@ from pathlib import Path
 from lead_agent.config import Settings
 from lead_agent.launchd import (
     CYCLE_AGENT_LABEL,
+    DASHBOARD_AGENT_LABEL,
     POSTING_AGENT_LABEL,
     REMOTE_AGENT_LABEL,
     build_launch_agents,
@@ -35,18 +36,26 @@ def test_cycle_launch_agent_uses_fixed_cadence_and_contains_no_environment_secre
         include_remote_approval=False,
     )
 
-    assert len(definitions) == 1
-    definition = definitions[0]
-    assert definition.label == CYCLE_AGENT_LABEL
-    assert definition.payload["StartCalendarInterval"] == [
+    assert {definition.label for definition in definitions} == {
+        CYCLE_AGENT_LABEL,
+        DASHBOARD_AGENT_LABEL,
+    }
+    cycle = next(value for value in definitions if value.label == CYCLE_AGENT_LABEL)
+    assert cycle.payload["StartCalendarInterval"] == [
         {"Minute": 0},
         {"Minute": 15},
         {"Minute": 30},
         {"Minute": 45},
     ]
-    assert "StartInterval" not in definition.payload
-    assert definition.payload["ProgramArguments"][-1] == "run-cycle"  # type: ignore[index]
-    assert "EnvironmentVariables" not in definition.payload
+    assert "StartInterval" not in cycle.payload
+    assert cycle.payload["ProgramArguments"][-1] == "run-cycle"  # type: ignore[index]
+    assert "EnvironmentVariables" not in cycle.payload
+
+    dashboard = next(value for value in definitions if value.label == DASHBOARD_AGENT_LABEL)
+    assert dashboard.payload["ProgramArguments"][-1] == "approval-dashboard"  # type: ignore[index]
+    assert dashboard.payload["KeepAlive"] == {"SuccessfulExit": False}
+    assert dashboard.payload["RunAtLoad"] is True
+    assert "EnvironmentVariables" not in dashboard.payload
 
 
 def test_remote_launch_agent_requires_ready_config_but_embeds_no_credentials(
@@ -73,6 +82,7 @@ def test_remote_launch_agent_requires_ready_config_but_embeds_no_credentials(
 
     assert {definition.label for definition in definitions} == {
         CYCLE_AGENT_LABEL,
+        DASHBOARD_AGENT_LABEL,
         REMOTE_AGENT_LABEL,
     }
     assert b"telnyx-secret" not in serialized
@@ -124,7 +134,10 @@ def test_launch_agent_files_are_written_privately(tmp_path: Path) -> None:
 
     paths = write_launch_agents(definitions, destination=tmp_path / "LaunchAgents")
 
-    assert len(paths) == 1
-    assert stat.S_IMODE(paths[0].stat().st_mode) == 0o600
-    payload = plistlib.loads(paths[0].read_bytes())
-    assert payload["Label"] == CYCLE_AGENT_LABEL
+    assert len(paths) == 2
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in paths)
+    payloads = [plistlib.loads(path.read_bytes()) for path in paths]
+    assert {payload["Label"] for payload in payloads} == {
+        CYCLE_AGENT_LABEL,
+        DASHBOARD_AGENT_LABEL,
+    }

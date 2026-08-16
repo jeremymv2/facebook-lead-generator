@@ -8,7 +8,7 @@ import pytest
 
 import scripts.manage_launchd as manage_launchd
 from lead_agent.config import NotificationConfigurationError
-from lead_agent.launchd import CYCLE_AGENT_LABEL, REMOTE_AGENT_LABEL
+from lead_agent.launchd import CYCLE_AGENT_LABEL, DASHBOARD_AGENT_LABEL, REMOTE_AGENT_LABEL
 
 
 def prepare_macos_fixture(
@@ -42,12 +42,15 @@ def test_install_and_uninstall_cycle_launch_agent(
 
     assert manage_launchd.main(["install"]) == 0
     cycle_path = destination / f"{CYCLE_AGENT_LABEL}.plist"
+    dashboard_path = destination / f"{DASHBOARD_AGENT_LABEL}.plist"
     assert cycle_path.exists()
+    assert dashboard_path.exists()
     assert calls[0][:2] == ("bootstrap", f"gui/{os.getuid()}")
     assert CYCLE_AGENT_LABEL in capsys.readouterr().out
 
     assert manage_launchd.main(["uninstall"]) == 0
     assert not cycle_path.exists()
+    assert not dashboard_path.exists()
     assert "Removed" in capsys.readouterr().out
 
 
@@ -76,6 +79,7 @@ def test_status_reports_loaded_state_without_printing_launchctl_output(
     assert manage_launchd.main(["status"]) == 0
     output = capsys.readouterr().out
     assert f"{CYCLE_AGENT_LABEL}: loaded" in output
+    assert f"{DASHBOARD_AGENT_LABEL}: loaded" in output
     assert f"{REMOTE_AGENT_LABEL}: loaded" in output
 
 

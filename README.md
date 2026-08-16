@@ -778,29 +778,30 @@ lead-agent run-cycle --max-posts 10 --skip-notifications
 lead-agent group-report
 ```
 
-Install and load only the cycle agent while Telnyx is pending:
+Install and load the cycle agent and local dashboard while Telnyx is pending:
 
 ```bash
 .venv/bin/python scripts/manage_launchd.py install
 .venv/bin/python scripts/manage_launchd.py status
 ```
 
-The generated plist contains only executable paths and non-secret scheduling metadata. It reads the
-ignored `.env` from the repository at runtime; credentials and phone numbers are never copied into
-the plist. Logs live under `data/logs/`, and content-free health lives at
+The generated plists contain only executable paths and non-secret scheduling metadata. The local
+dashboard starts at login, remains bound to `127.0.0.1`, and is restarted by launchd if it exits
+unexpectedly. Each process reads the ignored `.env` from the repository at runtime; credentials
+and phone numbers are never copied into a plist. Logs live under `data/logs/`, and content-free health lives at
 `data/operations/health.json`. The default cycle starts on fixed quarter-hour boundaries (`:00`,
 `:15`, `:30`, and `:45`) instead of waiting 15 minutes after the previous cycle finishes. If a
 cycle is still running at the next boundary, launchd and the cycle lock prevent an overlapping run.
 
 After the Telnyx campaign is active and `lead-agent doctor` reports
-`remote_approval_ready: true`, install the scan and remote-approval agents:
+`remote_approval_ready: true`, install the scan, local-dashboard, and remote-approval agents:
 
 ```bash
 .venv/bin/python scripts/manage_launchd.py install --include-remote-approval
 ```
 
 When the guarded mobile queue is enabled, add `--include-posting-worker` as described above. The
-posting worker is a third launch agent and keeps its live flags process-local.
+posting worker keeps its live flags process-local.
 
 Remove all JJ Miller & Co. launch agents with:
 
