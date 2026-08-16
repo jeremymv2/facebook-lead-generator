@@ -9,6 +9,7 @@ from pathlib import Path
 from lead_agent.config import Settings
 
 CYCLE_AGENT_LABEL = "com.jjmillerco.lead-agent-cycle"
+DASHBOARD_AGENT_LABEL = "com.jjmillerco.lead-agent-dashboard"
 REMOTE_AGENT_LABEL = "com.jjmillerco.lead-agent-remote-approval"
 POSTING_AGENT_LABEL = "com.jjmillerco.lead-agent-posting-queue"
 
@@ -64,7 +65,20 @@ def build_launch_agents(
             "StandardErrorPath": str(log_directory / "cycle.stderr.log"),
         },
     )
-    agents = [cycle]
+    dashboard = LaunchAgentDefinition(
+        label=DASHBOARD_AGENT_LABEL,
+        payload={
+            **common,
+            "Label": DASHBOARD_AGENT_LABEL,
+            "ProgramArguments": [str(executable), "approval-dashboard"],
+            "RunAtLoad": True,
+            "KeepAlive": {"SuccessfulExit": False},
+            "ThrottleInterval": 30,
+            "StandardOutPath": str(log_directory / "dashboard.stdout.log"),
+            "StandardErrorPath": str(log_directory / "dashboard.stderr.log"),
+        },
+    )
+    agents = [cycle, dashboard]
     if include_remote_approval:
         settings.require_remote_approval_ready()
         agents.append(
