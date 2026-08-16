@@ -11,6 +11,7 @@ from lead_agent.scanner import (
     FacebookReadDiagnostics,
     FacebookReadResult,
     ReadOnlyScanService,
+    ScanSummary,
     TransientFacebookReadError,
     safe_scan_error_code,
 )
@@ -27,13 +28,17 @@ class FakeReader:
         self.error = error
         self.outcomes = outcomes
         self.calls = 0
+        self.request_contexts: list[tuple[int, frozenset[str]]] = []
 
     async def read_group(
         self,
         group: FacebookGroup,
         *,
         max_posts: int,
+        attempt: int = 0,
+        known_identities: frozenset[str] = frozenset(),
     ) -> FacebookReadResult | list[FacebookPost]:
+        self.request_contexts.append((attempt, known_identities))
         self.calls += 1
         if self.outcomes is not None:
             outcome = self.outcomes.pop(0)
@@ -168,11 +173,34 @@ def test_severe_partial_retry_merges_unique_posts_before_one_persisted_outcome(
     assert summary.severe_partial is False
     assert reader.calls == 2
     assert sleeps == [5]
+    assert reader.request_contexts == [
+        (0, frozenset()),
+        (1, frozenset(item.identity_key for item in first)),
+    ]
     assert len(database.list_posts()) == 7
     group_events = [event for event in database.list_audit_events() if event.action == "group.scan"]
     assert len(group_events) == 1
     assert group_events[0].details["retry_count"] == 1
     assert group_events[0].details["recovered"] is True
+
+
+def test_visible_but_safely_rejected_feed_is_not_materially_incomplete(
+    group: FacebookGroup,
+) -> None:
+    summary = ScanSummary(
+        group=group,
+        posts_seen=1,
+        new_posts=(),
+        posts_requested=10,
+        diagnostics=FacebookReadDiagnostics(
+            top_level_story_nodes_seen=4,
+            collapsed_unexpanded_observations=3,
+        ),
+    )
+
+    assert summary.severe_partial is True
+    assert summary.diagnostics.feed_responsive is True
+    assert summary.materially_incomplete is False
 
 
 def test_retry_merge_preserves_distinct_permalinks_with_identical_text(

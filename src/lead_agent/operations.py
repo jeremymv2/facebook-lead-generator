@@ -69,6 +69,7 @@ class ScanCycleSummary:
     groups_shortfall: int = 0
     groups_partial: int = 0
     groups_severely_partial: int = 0
+    groups_feed_responsive_partial: int = 0
     posts_requested: int = 0
 
     @property
@@ -89,7 +90,10 @@ class ScanCycleSummary:
 
     @property
     def groups_materially_incomplete(self) -> int:
-        return self.groups_failed + self.groups_severely_partial
+        return self.groups_failed + max(
+            0,
+            self.groups_severely_partial - self.groups_feed_responsive_partial,
+        )
 
 
 @dataclass(frozen=True, slots=True)
