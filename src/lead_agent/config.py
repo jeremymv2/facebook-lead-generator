@@ -90,7 +90,7 @@ class Settings(BaseSettings):
         default_factory=lambda: list(DEFAULT_SERVICES)
     )
 
-    approval_expiration_minutes: int = Field(default=20, ge=1, le=120)
+    approval_expiration_minutes: int = Field(default=600, ge=1, le=720)
     candidate_duplicate_window_hours: int = Field(default=72, ge=1, le=720)
     approval_local_port: int = Field(default=8765, ge=1024, le=65535)
     remote_approval_port: int = Field(default=8766, ge=1024, le=65535)

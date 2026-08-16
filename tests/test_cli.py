@@ -42,6 +42,7 @@ def test_doctor_reports_safe_state(
     assert payload["dry_run"] is True
     assert payload["posting_allowed"] is False
     assert payload["read_only_mode_ready"] is True
+    assert payload["approval_expiration_minutes"] == 600
     assert payload["posting_approval_max_age_minutes"] == 20
     assert payload["daily_posting_limit"] == 5
     assert payload["per_group_daily_posting_limit"] == 2

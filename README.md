@@ -153,7 +153,7 @@ Important settings include:
 | `SCAN_INTERVAL_SECONDS` | `900` | Conservative interval between unattended cycles |
 | `LEAD_THRESHOLD` | `75` | Minimum score for an approval candidate |
 | `SERVICE_AREA` | `Louisville, Kentucky` | Primary geographic target |
-| `APPROVAL_EXPIRATION_MINUTES` | `20` | Local review lifetime |
+| `APPROVAL_EXPIRATION_MINUTES` | `600` | Single-use local and mobile review lifetime (10 hours) |
 | `CANDIDATE_DUPLICATE_WINDOW_HOURS` | `72` | Suppress nearby exact-text reviews across groups |
 | `APPROVAL_LOCAL_PORT` | `8765` | Loopback-only local review dashboard port |
 | `REMOTE_APPROVAL_PORT` | `8766` | Separate loopback origin intended for a secure relay |
@@ -551,7 +551,7 @@ draft response, Facebook URL, phone number, or credential is copied into trend r
 Opening or refreshing the local dashboard does not start an expiration clock or change candidate
 state. When a reviewer submits a decision, the application snapshots the draft and applies that
 one-time decision immediately. Previously expired, undecided requests return to the candidate
-backlog. The 20-minute window still applies to separately tokenized mobile reviews. Every state
+backlog. A 10-hour window applies to separately tokenized, single-use mobile reviews. Every state
 change is written to the audit trail without logging source text or approved response content.
 
 The dashboard is intentionally local-only: it binds to `127.0.0.1`, has no configurable public host,
@@ -643,7 +643,7 @@ lead-agent remote-approval --retry-failed
 ```
 
 The tokenized service deliberately has no `/` dashboard or lead-list endpoint. A token expires with
-the 20-minute approval window and can produce only one approve, edit, or reject transition. With
+the 10-hour approval window and can produce only one approve, edit, or reject transition. With
 `POSTING_QUEUE_ENABLED=false`, approval cannot request a Facebook action.
 
 ### Queue a guarded post from the SMS review
