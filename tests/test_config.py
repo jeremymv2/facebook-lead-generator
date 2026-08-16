@@ -261,6 +261,19 @@ def test_environment_overrides_and_comma_separated_services(
     assert settings.operations_quiet_hours_end == time(hour=4, minute=30)
 
 
+def test_scan_interval_must_support_fixed_wall_clock_boundaries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError, match="evenly divide one hour"):
+        Settings(
+            _env_file=None,
+            facebook_profile_path=tmp_path.parent / "browser-profile",
+            scan_interval_seconds=700,
+        )
+
+
 def test_ai_provider_and_secret_configuration_are_normalized(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

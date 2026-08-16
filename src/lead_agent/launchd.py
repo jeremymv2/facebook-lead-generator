@@ -13,6 +13,14 @@ REMOTE_AGENT_LABEL = "com.jjmillerco.lead-agent-remote-approval"
 POSTING_AGENT_LABEL = "com.jjmillerco.lead-agent-posting-queue"
 
 
+def fixed_calendar_intervals(interval_seconds: int) -> list[dict[str, int]]:
+    """Return fixed minute boundaries so runtime does not extend scan cadence."""
+    if interval_seconds < 60 or interval_seconds > 3600 or 3600 % interval_seconds:
+        raise ValueError("cycle interval must evenly divide one hour")
+    interval_minutes = interval_seconds // 60
+    return [{"Minute": minute} for minute in range(0, 60, interval_minutes)]
+
+
 @dataclass(frozen=True, slots=True)
 class LaunchAgentDefinition:
     label: str
@@ -51,7 +59,7 @@ def build_launch_agents(
             "Label": CYCLE_AGENT_LABEL,
             "ProgramArguments": [str(executable), "run-cycle"],
             "RunAtLoad": True,
-            "StartInterval": settings.scan_interval_seconds,
+            "StartCalendarInterval": fixed_calendar_intervals(settings.scan_interval_seconds),
             "StandardOutPath": str(log_directory / "cycle.stdout.log"),
             "StandardErrorPath": str(log_directory / "cycle.stderr.log"),
         },

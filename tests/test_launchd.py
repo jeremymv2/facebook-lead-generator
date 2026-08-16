@@ -24,10 +24,10 @@ def settings(tmp_path: Path, **overrides: object) -> Settings:
     return Settings.model_validate(values)
 
 
-def test_cycle_launch_agent_is_bounded_and_contains_no_environment_secrets(
+def test_cycle_launch_agent_uses_fixed_cadence_and_contains_no_environment_secrets(
     tmp_path: Path,
 ) -> None:
-    configured = settings(tmp_path, scan_interval_seconds=600)
+    configured = settings(tmp_path)
     definitions = build_launch_agents(
         configured,
         executable=tmp_path / ".venv" / "bin" / "lead-agent",
@@ -38,7 +38,13 @@ def test_cycle_launch_agent_is_bounded_and_contains_no_environment_secrets(
     assert len(definitions) == 1
     definition = definitions[0]
     assert definition.label == CYCLE_AGENT_LABEL
-    assert definition.payload["StartInterval"] == 600
+    assert definition.payload["StartCalendarInterval"] == [
+        {"Minute": 0},
+        {"Minute": 15},
+        {"Minute": 30},
+        {"Minute": 45},
+    ]
+    assert "StartInterval" not in definition.payload
     assert definition.payload["ProgramArguments"][-1] == "run-cycle"  # type: ignore[index]
     assert "EnvironmentVariables" not in definition.payload
 
