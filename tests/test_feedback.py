@@ -18,6 +18,7 @@ def create_candidate(database: Database, *, external_id: str = "feedback") -> Le
     post = database.save_post(
         FacebookPost(
             external_post_id=external_id,
+            post_url=f"https://www.facebook.com/groups/111/posts/{external_id}",
             group_id="fixture-group",
             group_name="Synthetic Group",
             author_name="Sarah Example",

@@ -13,6 +13,14 @@ FACEBOOK_GROUP_POST_PATH_PATTERN = re.compile(
     r"^/groups/[^/]+/(?:posts|permalink)/[^/?#]+/?$",
     re.IGNORECASE,
 )
+FACEBOOK_COMMENT_METADATA_PREFIX_PATTERN = re.compile(
+    r"^.{1,100}\s*[·•]\s*(?:\d+\s*(?:m|h|d|w|y)|just now)",
+    re.IGNORECASE,
+)
+FACEBOOK_COMMENT_ACTION_SUFFIX_PATTERN = re.compile(
+    r"(?:like\s*)?reply(?:\s*share)?$",
+    re.IGNORECASE,
+)
 
 
 def utc_now() -> datetime:
@@ -23,6 +31,15 @@ def utc_now() -> datetime:
 def normalize_post_text(text: str) -> str:
     """Normalize insignificant whitespace without changing the post's words."""
     return re.sub(r"\s+", " ", text).strip()
+
+
+def is_facebook_comment_ui_text(text: str) -> bool:
+    """Recognize a rendered comment row that leaked its author, age, and reply controls."""
+    normalized = normalize_post_text(text)
+    return bool(
+        FACEBOOK_COMMENT_METADATA_PREFIX_PATTERN.search(normalized)
+        and FACEBOOK_COMMENT_ACTION_SUFFIX_PATTERN.search(normalized)
+    )
 
 
 def hash_post_text(text: str) -> str:

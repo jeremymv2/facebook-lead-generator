@@ -35,6 +35,7 @@ def create_candidate(database: Database) -> None:
     post = database.save_post(
         FacebookPost(
             external_post_id="notification-fixture",
+            post_url=("https://www.facebook.com/groups/111/posts/notification-fixture"),
             group_id="fixture-group",
             group_name="Synthetic Fixture Group",
             post_text="Looking for someone in Louisville to repair our deck this week.",

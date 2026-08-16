@@ -642,6 +642,7 @@ def save_candidate(
     post = database.save_post(
         FacebookPost(
             external_post_id=external_id,
+            post_url=(f"https://www.facebook.com/groups/{group_id}/posts/{external_id}"),
             group_id=group_id,
             group_name=group_id,
             post_text=post_text,

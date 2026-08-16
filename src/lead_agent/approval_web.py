@@ -492,7 +492,8 @@ def _render_review(review: LocalReviewItem, *, csrf_token: str) -> str:
     if safe_post_url:
         safe_url = html.escape(safe_post_url, quote=True)
         post_link = (
-            f'<p><a href="{safe_url}" target="_blank" rel="noreferrer">Open Facebook post</a></p>'
+            f'<p><a href="{safe_url}" target="_blank" rel="noopener noreferrer">'
+            "View original Facebook post</a></p>"
         )
     else:
         post_link = (

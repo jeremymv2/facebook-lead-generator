@@ -10,7 +10,12 @@ from typing import Protocol, cast
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from lead_agent.config import Settings
-from lead_agent.models import FacebookPost, LeadIntent, normalize_post_text
+from lead_agent.models import (
+    FacebookPost,
+    LeadIntent,
+    is_facebook_comment_ui_text,
+    normalize_post_text,
+)
 
 CLASSIFICATION_VERSION = "2026-08-13.v13"
 COMPANY_NAME = "JJ Miller & Co."
@@ -889,6 +894,8 @@ def _infer_service(text: str, enabled_services: tuple[str, ...]) -> str | None:
 
 
 def _infer_intent(text: str, service: str | None) -> LeadIntent:
+    if is_facebook_comment_ui_text(text):
+        return LeadIntent.UNRELATED
     resolved_subject = r"(?:i(?:['\u2019]ve| have| had)?|we(?:['\u2019]ve| have| had)?)"
     resolved_patterns = (
         rf"\b{resolved_subject} found some(?:one|body)\b",

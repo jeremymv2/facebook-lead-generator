@@ -124,10 +124,15 @@ def test_approve_is_one_time_and_preserves_exact_draft(database: Database) -> No
 
 
 def test_queue_posting_requires_exact_source_permalink_atomically(database: Database) -> None:
-    create_candidate(database, include_post_url=False)
+    lead = create_candidate(database)
     now = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
     service = LocalApprovalService(database, expiration_minutes=20)
     request_id = service.prepare_candidates(limit=10, now=now)[0].request.id or 0
+    with database.connection() as connection:
+        connection.execute(
+            "UPDATE facebook_posts SET post_url = NULL WHERE id = ?",
+            (lead.facebook_post_id,),
+        )
 
     with pytest.raises(ValueError, match="exact Facebook post URL"):
         service.decide(
@@ -141,6 +146,21 @@ def test_queue_posting_requires_exact_source_permalink_atomically(database: Data
     assert request is not None
     assert request.status is ApprovalStatus.PENDING
     assert database.get_posting_job_for_approval(request_id) is None
+
+
+def test_candidate_waits_for_an_exact_post_link_before_entering_review(
+    database: Database,
+) -> None:
+    lead = create_candidate(database, include_post_url=False)
+    now = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    service = LocalApprovalService(database, expiration_minutes=20)
+
+    assert service.prepare_candidates(limit=10, now=now) == []
+    assert service.list_local_backlog(now=now) == []
+    with pytest.raises(ApprovalStateError, match="no longer awaiting review"):
+        service.decide_local_lead(lead.id or 0, ApprovalAction.APPROVE, now=now)
+    assert database.get_lead(lead.id or 0).status is LeadStatus.CANDIDATE  # type: ignore[union-attr]
+    assert database.list_audit_events() == []
 
 
 def test_edit_requires_a_locally_valid_response(database: Database) -> None:

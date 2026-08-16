@@ -23,7 +23,11 @@ from lead_agent.facebook import (
     select_message_text,
 )
 from lead_agent.groups import FacebookGroup
-from lead_agent.models import FacebookPost, is_exact_facebook_post_url
+from lead_agent.models import (
+    FacebookPost,
+    is_exact_facebook_post_url,
+    is_facebook_comment_ui_text,
+)
 from lead_agent.scanner import FacebookReadDiagnostics, FacebookReadResult
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "facebook_post_candidates.json"
@@ -71,6 +75,40 @@ def test_group_key_is_scoped_to_the_group_path() -> None:
 )
 def test_comment_article_labels_are_rejected(label: str | None, expected: bool) -> None:
     assert is_facebook_comment_label(label) is expected
+
+
+def test_rendered_comment_ui_text_is_recognized_and_rejected() -> None:
+    group = FacebookGroup(
+        id="fixture-group",
+        name="Synthetic Fixture Group",
+        url="https://www.facebook.com/groups/111",
+        enabled=True,
+    )
+    text = (
+        "Jacob Suell · 22hI\u2019d recommend putting the cabinets on a 2x4 base and trim it "
+        "out just so they\u2019re off the ground and vacuums and mops don\u2019t ruin the base."
+        "LikeReplyShare"
+    )
+
+    assert is_facebook_comment_ui_text(text) is True
+    assert (
+        build_facebook_post(
+            FacebookPostCandidate(
+                full_text=text,
+                semantic_messages=(text,),
+                hrefs=("/groups/111/posts/222",),
+            ),
+            group,
+            min_length=15,
+        )
+        is None
+    )
+
+
+def test_top_level_post_controls_are_not_mistaken_for_a_comment() -> None:
+    text = "Jacob Suell · 22hLooking for cabinet installation help.LikeCommentShare"
+
+    assert is_facebook_comment_ui_text(text) is False
 
 
 def test_permalink_selection_ignores_external_and_tracking_urls() -> None:

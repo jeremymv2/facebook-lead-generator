@@ -95,6 +95,8 @@ def test_remote_page_resolves_only_opaque_token_and_escapes_content(tmp_path: Pa
     assert "<script>Fixture Group</script>" not in page
     assert f'action="/review/{TOKEN}/approve"' in page
     assert "cannot post to Facebook" in page
+    assert "View original Facebook post" in page
+    assert 'href="https://www.facebook.com/groups/111/posts/remote-fixture"' in page
 
 
 def test_remote_decision_requires_token_bound_csrf_and_is_one_time(tmp_path: Path) -> None:
@@ -203,6 +205,7 @@ def test_remote_post_action_is_hidden_and_blocked_without_exact_permalink(
 
     assert "approve-post" not in page
     assert "Review only: an exact Facebook post link was not captured" in page
+    assert "View original Facebook post" not in page
     with pytest.raises(ApprovalStateError, match="review-only"):
         enabled.submit(
             TOKEN,

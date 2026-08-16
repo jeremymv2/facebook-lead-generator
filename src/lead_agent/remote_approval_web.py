@@ -221,6 +221,13 @@ def _render_pending(
     token_path = html.escape(token, quote=True)
     csrf = html.escape(csrf_token, quote=True)
     draft = html.escape(review.request.draft_response)
+    post_link = ""
+    if is_exact_facebook_post_url(review.post.post_url):
+        safe_post_url = html.escape(review.post.post_url or "", quote=True)
+        post_link = (
+            f'<p><a href="{safe_post_url}" target="_blank" rel="noopener noreferrer">'
+            "View original Facebook post</a></p>"
+        )
     rejection_options = "".join(
         f'<option value="{reason.value}">{html.escape(reason.value.replace("_", " ").title())}'
         "</option>"
@@ -264,6 +271,7 @@ def _render_pending(
   <p class="expiry">Review expires in approximately {remaining_minutes} minute(s).</p>
   <h2>Facebook post</h2>
   <p class="post">{html.escape(review.post.post_text)}</p>
+  {post_link}
   <h2>Proposed response</h2>
   <form method="post" action="/review/{token_path}/edit">
     <input type="hidden" name="csrf_token" value="{csrf}">

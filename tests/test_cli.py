@@ -131,6 +131,7 @@ def test_replay_reclassify_and_feedback_export_commands_stay_local(
     saved = database.save_post(
         FacebookPost(
             external_post_id="maintenance-fixture",
+            post_url=("https://www.facebook.com/groups/111/posts/maintenance-fixture"),
             group_id="fixture-group",
             group_name="Synthetic Group",
             author_name="Fixture Person",
