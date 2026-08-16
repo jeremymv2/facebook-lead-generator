@@ -59,6 +59,14 @@ class _FeedTelemetry:
     visible_articles_seen: int = 0
     detached_nodes: int = 0
     progress_events: int = 0
+    top_level_story_nodes_seen: int = 0
+    collapsed_unexpanded_observations: int = 0
+    comment_observations: int = 0
+    nested_article_observations: int = 0
+    short_text_observations: int = 0
+    feed_movement_events: int = 0
+    feed_height_growth_events: int = 0
+    loading_observations: int = 0
     duplicate_identities: set[str] = field(default_factory=set)
 
 
@@ -187,31 +195,47 @@ def build_facebook_post(
     min_length: int,
 ) -> FacebookPost | None:
     """Convert sanitized DOM semantics into a group-scoped post or reject them safely."""
+    post, _ = _build_facebook_post_with_reason(candidate, group, min_length=min_length)
+    return post
+
+
+def _build_facebook_post_with_reason(
+    candidate: FacebookPostCandidate,
+    group: FacebookGroup,
+    *,
+    min_length: int,
+) -> tuple[FacebookPost | None, str | None]:
+    """Build a post while preserving a content-free reason for conservative rejections."""
     if candidate.is_nested_article or is_facebook_comment_label(candidate.article_label):
-        return None
+        return None, "nested_article" if candidate.is_nested_article else "comment"
     post_text = select_message_text(
         candidate.full_text,
         candidate.semantic_messages,
         candidate.automatic_texts,
         min_length=min_length,
     )
-    if post_text is None or is_facebook_comment_ui_text(post_text):
-        return None
+    if post_text is None:
+        return None, "short_text"
+    if is_facebook_comment_ui_text(post_text):
+        return None, "comment"
     if candidate.is_collapsed_message and not any(
         is_post_text_expansion(clean_facebook_message_text(value), post_text)
         for value in candidate.semantic_messages
     ):
-        return None
+        return None, "collapsed_unexpanded"
     post_url = select_facebook_permalink(candidate.hrefs, group.url)
     if post_url is not None and facebook_group_key(post_url) != facebook_group_key(group.url):
-        return None
-    return FacebookPost(
-        external_post_id=extract_post_id(post_url) if post_url else None,
-        post_url=post_url,
-        group_id=group.id,
-        group_name=group.name,
-        author_name=candidate.author_name,
-        post_text=post_text,
+        return None, "outside_group"
+    return (
+        FacebookPost(
+            external_post_id=extract_post_id(post_url) if post_url else None,
+            post_url=post_url,
+            group_id=group.id,
+            group_name=group.name,
+            author_name=candidate.author_name,
+            post_text=post_text,
+        ),
+        None,
     )
 
 
@@ -270,6 +294,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         self.settings = settings
         self._playwright: Playwright | None = None
         self._context: BrowserContext | None = None
+        self._active_feed_telemetry: _FeedTelemetry | None = None
 
     async def __aenter__(self) -> FacebookReadOnlyBrowser:
         self.settings.require_read_only_mode()
@@ -358,6 +383,8 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         group: FacebookGroup,
         *,
         max_posts: int,
+        attempt: int = 0,
+        known_identities: frozenset[str] = frozenset(),
     ) -> FacebookReadResult:
         """Wait for and read visible posts from one allowlisted group."""
         page = await self._page()
@@ -399,10 +426,17 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
             ) from error
 
         try:
-            result = await self._wait_for_readable_posts(page, group, max_posts=max_posts)
+            target_posts = max(1, max_posts - len(known_identities))
+            result = await self._wait_for_readable_posts(
+                page,
+                group,
+                max_posts=target_posts,
+                attempt=attempt,
+                known_identities=known_identities,
+            )
             if (
-                max_posts > 0
-                and len(result.posts) / max_posts
+                target_posts > 0
+                and len(result.posts) / target_posts
                 < self.settings.operations_minimum_group_post_yield_rate
             ):
                 screenshot = await self._capture_failure(page, group.id, "severe-partial")
@@ -431,135 +465,177 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         group: FacebookGroup,
         *,
         max_posts: int,
+        attempt: int = 0,
+        known_identities: frozenset[str] = frozenset(),
     ) -> FacebookReadResult:
         """Retry through Facebook placeholders and transient feed re-renders."""
         loop = asyncio.get_running_loop()
         started_at = loop.time()
-        deadline = started_at + self.settings.facebook_scan_max_wait_seconds
+        retry_hydration = attempt > 0
+        scan_wait_seconds = (
+            self.settings.facebook_retry_scan_max_wait_seconds
+            if retry_hydration
+            else self.settings.facebook_scan_max_wait_seconds
+        )
+        idle_seconds = (
+            self.settings.facebook_retry_scan_idle_seconds
+            if retry_hydration
+            else self.settings.facebook_scan_idle_seconds
+        )
+        settle_seconds = (
+            self.settings.facebook_retry_scroll_settle_seconds
+            if retry_hydration
+            else self.settings.facebook_scroll_settle_seconds
+        )
+        deadline = started_at + scan_wait_seconds
         initial_grace_deadline = started_at + 2
         permalink_grace_deadline: float | None = None
-        last_progress_at = started_at
+        last_feed_activity_at = started_at
+        previous_feed_observation: tuple[int, int, int] | None = None
         visible_article_seen = False
         collected: dict[str, FacebookPost] = {}
         scrolls = 0
         telemetry = _FeedTelemetry(started_at=started_at)
         stop_reason = "timeout"
 
-        while loop.time() < deadline:
-            telemetry.iterations += 1
-            await self._require_normal_page(page, group_id=group.id)
-            before_count = len(collected)
-            try:
-                story_node_count = await page.locator(STORY_MESSAGE_SELECTOR).count()
-                telemetry.story_nodes_seen = max(
-                    telemetry.story_nodes_seen,
-                    story_node_count,
-                )
-                story_posts = await self._extract_story_posts(page, group, max_posts=max_posts)
-            except Error:
-                telemetry.detached_nodes += 1
-                story_posts = []
-            for story_post in story_posts:
-                self._merge_feed_post(collected, story_post, telemetry)
-
-            if not story_posts or any(post.post_url is None for post in collected.values()):
+        self._active_feed_telemetry = telemetry
+        try:
+            while loop.time() < deadline:
+                telemetry.iterations += 1
+                await self._require_normal_page(page, group_id=group.id)
+                observation = await self._observe_feed(page)
+                if observation is not None:
+                    if previous_feed_observation is not None:
+                        previous_top, previous_height, previous_loading = previous_feed_observation
+                        current_top, current_height, current_loading = observation
+                        moved = current_top != previous_top
+                        grew = current_height > previous_height
+                        hydrated = current_loading < previous_loading
+                        if moved or grew or hydrated:
+                            last_feed_activity_at = loop.time()
+                        if moved:
+                            telemetry.feed_movement_events += 1
+                        if grew:
+                            telemetry.feed_height_growth_events += 1
+                    if observation[2] > 0:
+                        telemetry.loading_observations += 1
+                    previous_feed_observation = observation
+                before_count = len(collected)
                 try:
-                    articles = await self._post_articles(page)
-                    count = min(await articles.count(), max(max_posts * 5, 50))
-                except Error:
-                    count = 0
-
-                visible_articles = 0
-                for index in range(count):
-                    try:
-                        article = articles.nth(index)
-                        if not await article.is_visible(timeout=1000):
-                            continue
-                        visible_articles += 1
-                        visible_article_seen = True
-                        if is_facebook_comment_label(
-                            await article.get_attribute("aria-label", timeout=1000)
-                        ):
-                            continue
-                        if await self._is_nested_article(article):
-                            continue
-                        legacy_post = await self._extract_article(article, group)
-                    except Error:
-                        # Facebook commonly replaces placeholder nodes while the feed hydrates.
-                        telemetry.detached_nodes += 1
-                        continue
-                    if legacy_post is not None:
-                        self._merge_feed_post(collected, legacy_post, telemetry)
-                telemetry.visible_articles_seen = max(
-                    telemetry.visible_articles_seen,
-                    visible_articles,
-                )
-
-            if len(collected) > before_count:
-                telemetry.progress_events += 1
-                last_progress_at = loop.time()
-
-            if len(collected) >= max_posts:
-                selected = list(collected.values())[:max_posts]
-                if all(post.post_url is not None for post in selected):
-                    return self._read_result(loop.time(), selected, telemetry, "target_met")
-                if permalink_grace_deadline is None:
-                    permalink_grace_deadline = min(deadline, loop.time() + 2)
-                if loop.time() >= permalink_grace_deadline:
-                    return self._read_result(
-                        loop.time(),
-                        selected,
-                        telemetry,
-                        "target_missing_permalinks",
+                    story_node_count = await page.locator(STORY_MESSAGE_SELECTOR).count()
+                    telemetry.story_nodes_seen = max(
+                        telemetry.story_nodes_seen,
+                        story_node_count,
                     )
-                await page.wait_for_timeout(250)
-                continue
+                    story_posts = await self._extract_story_posts(page, group, max_posts=max_posts)
+                except Error:
+                    telemetry.detached_nodes += 1
+                    story_posts = []
+                for story_post in story_posts:
+                    if story_post.identity_key in known_identities:
+                        telemetry.duplicate_identities.add(story_post.identity_key)
+                        continue
+                    self._merge_feed_post(collected, story_post, telemetry)
 
-            if not collected and loop.time() < initial_grace_deadline:
-                await page.wait_for_timeout(250)
-                continue
-            if scrolls >= self.settings.facebook_max_scrolls:
-                stop_reason = "scroll_limit"
-                break
-            if (
-                collected
-                and scrolls >= 3
-                and loop.time() - last_progress_at >= self.settings.facebook_scan_idle_seconds
-            ):
-                stop_reason = "idle"
-                break
+                if not story_posts or any(post.post_url is None for post in collected.values()):
+                    try:
+                        articles = await self._post_articles(page)
+                        count = min(await articles.count(), max(max_posts * 5, 50))
+                    except Error:
+                        count = 0
 
-            try:
-                await self._scroll_for_more(page)
-            except Error:
-                # The feed can replace its final story between the count and scroll calls.
-                # Keep already collected posts and let the next loop inspect the new DOM.
-                await page.wait_for_timeout(100)
-            scrolls += 1
-            telemetry.scrolls = scrolls
-            remaining_seconds = max(deadline - loop.time(), 0)
-            if remaining_seconds > 0:
-                settle_milliseconds = min(
-                    int(self.settings.facebook_scroll_settle_seconds * 1000),
-                    max(int(remaining_seconds * 1000), 1),
+                    visible_articles = 0
+                    for index in range(count):
+                        try:
+                            article = articles.nth(index)
+                            if not await article.is_visible(timeout=1000):
+                                continue
+                            visible_articles += 1
+                            visible_article_seen = True
+                            article_label = await article.get_attribute("aria-label", timeout=1000)
+                            if is_facebook_comment_label(article_label):
+                                telemetry.comment_observations += 1
+                                continue
+                            if await self._is_nested_article(article):
+                                telemetry.nested_article_observations += 1
+                                continue
+                            legacy_post = await self._extract_article(article, group)
+                        except Error:
+                            # Facebook commonly replaces placeholder nodes while the feed hydrates.
+                            telemetry.detached_nodes += 1
+                            continue
+                        if legacy_post is not None:
+                            if legacy_post.identity_key in known_identities:
+                                telemetry.duplicate_identities.add(legacy_post.identity_key)
+                                continue
+                            self._merge_feed_post(collected, legacy_post, telemetry)
+                    telemetry.visible_articles_seen = max(
+                        telemetry.visible_articles_seen,
+                        visible_articles,
+                    )
+
+                if len(collected) > before_count:
+                    telemetry.progress_events += 1
+
+                if len(collected) >= max_posts:
+                    selected = list(collected.values())[:max_posts]
+                    if all(post.post_url is not None for post in selected):
+                        return self._read_result(loop.time(), selected, telemetry, "target_met")
+                    if permalink_grace_deadline is None:
+                        permalink_grace_deadline = min(deadline, loop.time() + 2)
+                    if loop.time() >= permalink_grace_deadline:
+                        return self._read_result(
+                            loop.time(),
+                            selected,
+                            telemetry,
+                            "target_missing_permalinks",
+                        )
+                    await page.wait_for_timeout(250)
+                    continue
+
+                if not collected and loop.time() < initial_grace_deadline:
+                    await page.wait_for_timeout(250)
+                    continue
+                if scrolls >= self.settings.facebook_max_scrolls:
+                    stop_reason = "scroll_limit"
+                    break
+                if scrolls >= 3 and loop.time() - last_feed_activity_at >= idle_seconds:
+                    stop_reason = "idle"
+                    break
+
+                try:
+                    await self._scroll_for_more(page)
+                except Error:
+                    # The feed can replace its final story between the count and scroll calls.
+                    # Keep already collected posts and let the next loop inspect the new DOM.
+                    await page.wait_for_timeout(100)
+                scrolls += 1
+                telemetry.scrolls = scrolls
+                remaining_seconds = max(deadline - loop.time(), 0)
+                if remaining_seconds > 0:
+                    settle_milliseconds = min(
+                        int(settle_seconds * 1000),
+                        max(int(remaining_seconds * 1000), 1),
+                    )
+                    await page.wait_for_timeout(settle_milliseconds)
+
+            if collected or telemetry.top_level_story_nodes_seen:
+                return self._read_result(
+                    loop.time(),
+                    list(collected.values())[:max_posts],
+                    telemetry,
+                    stop_reason,
                 )
-                await page.wait_for_timeout(settle_milliseconds)
 
-        if collected:
-            return self._read_result(
-                loop.time(),
-                list(collected.values())[:max_posts],
-                telemetry,
-                stop_reason,
+            await self._require_normal_page(page, group_id=group.id)
+            reason = (
+                "Facebook displayed post containers, but no readable post text loaded"
+                if visible_article_seen
+                else "No visible Facebook posts appeared before the safety timeout"
             )
-
-        await self._require_normal_page(page, group_id=group.id)
-        reason = (
-            "Facebook displayed post containers, but no readable post text loaded"
-            if visible_article_seen
-            else "No visible Facebook posts appeared before the safety timeout"
-        )
-        await self._stop(page, group.id, FacebookPageState.UNEXPECTED, reason)
+            await self._stop(page, group.id, FacebookPageState.UNEXPECTED, reason)
+        finally:
+            self._active_feed_telemetry = None
 
     @staticmethod
     def _merge_feed_post(
@@ -594,15 +670,67 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 detached_nodes=telemetry.detached_nodes,
                 duplicate_identities=len(telemetry.duplicate_identities),
                 progress_events=telemetry.progress_events,
+                top_level_story_nodes_seen=telemetry.top_level_story_nodes_seen,
+                collapsed_unexpanded_observations=(telemetry.collapsed_unexpanded_observations),
+                comment_observations=telemetry.comment_observations,
+                nested_article_observations=telemetry.nested_article_observations,
+                short_text_observations=telemetry.short_text_observations,
+                feed_movement_events=telemetry.feed_movement_events,
+                feed_height_growth_events=telemetry.feed_height_growth_events,
+                loading_observations=telemetry.loading_observations,
                 stop_reason=stop_reason,
             ),
         )
 
+    async def _observe_feed(self, page: Page) -> tuple[int, int, int] | None:
+        """Return content-free viewport, document-height, and loading measurements."""
+        try:
+            raw = await page.evaluate(
+                """
+                () => {
+                    const root = document.scrollingElement || document.documentElement;
+                    const loading = document.querySelectorAll(
+                        '[role="progressbar"], [aria-busy="true"], '
+                        '[data-visualcompletion="loading-state"]'
+                    ).length;
+                    return [
+                        Math.round(window.scrollY || window.pageYOffset || 0),
+                        Math.round(root?.scrollHeight || 0),
+                        Math.min(loading, 100),
+                    ];
+                }
+                """
+            )
+        except (Error, TypeError):
+            return None
+        if isinstance(raw, list) and len(raw) == 3 and all(isinstance(value, int) for value in raw):
+            return cast(tuple[int, int, int], tuple(raw))
+        return None
+
     async def _scroll_for_more(self, page: Page) -> None:
-        """Reach the last loaded story, then move less than one viewport without clicking."""
+        """Anchor on a top-level story, then move less than one viewport without clicking."""
         messages = page.locator(STORY_MESSAGE_SELECTOR)
-        if await messages.count():
-            await messages.last.scroll_into_view_if_needed(timeout=1000)
+        count = min(await messages.count(), 50)
+        for index in range(count - 1, -1, -1):
+            message = messages.nth(index)
+            try:
+                if not await message.is_visible(timeout=500):
+                    continue
+                article_label = await message.evaluate(
+                    "node => node.closest('article, [role=article]')?.getAttribute('aria-label')"
+                )
+                if is_facebook_comment_label(cast(str | None, article_label)):
+                    continue
+                nested = await message.evaluate(
+                    "node => { const article = node.closest('article, [role=article]'); "
+                    "return Boolean(article?.parentElement?.closest('article, [role=article]')); }"
+                )
+                if nested:
+                    continue
+                await message.scroll_into_view_if_needed(timeout=1000)
+                break
+            except Error:
+                continue
         await page.evaluate(
             """
             () => {
@@ -676,13 +804,31 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         except Error:
             snapshots = []
 
+        telemetry = self._active_feed_telemetry
+        if telemetry is not None:
+            top_level_nodes = 0
+            for item in snapshots:
+                label_value = item.get("label")
+                label = label_value if isinstance(label_value, str) else None
+                nested_value = item.get("nested")
+                nested = nested_value if isinstance(nested_value, bool) else False
+                if not is_facebook_comment_label(label) and not nested:
+                    top_level_nodes += 1
+            telemetry.top_level_story_nodes_seen = max(
+                telemetry.top_level_story_nodes_seen,
+                top_level_nodes,
+            )
         for snapshot in snapshots:
             label_value = snapshot.get("label")
             comment_label = label_value if isinstance(label_value, str) else None
             if is_facebook_comment_label(comment_label):
+                self._record_rejection("comment")
                 continue
             nested_value = snapshot.get("nested")
             is_nested_article = nested_value if isinstance(nested_value, bool) else False
+            if is_nested_article:
+                self._record_rejection("nested_article")
+                continue
             text_value = snapshot.get("text")
             content_value = snapshot.get("content")
             collapsed_value = snapshot.get("collapsed")
@@ -698,7 +844,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 if isinstance(href_values, list)
                 else ()
             )
-            post = build_facebook_post(
+            post, reason = _build_facebook_post_with_reason(
                 FacebookPostCandidate(
                     full_text=post_text,
                     semantic_messages=(post_text,),
@@ -714,6 +860,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 min_length=self.settings.min_post_text_length,
             )
             if post is None:
+                self._record_rejection(reason)
                 continue
             merge_facebook_post(collected, post)
 
@@ -733,6 +880,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                     ),
                 )
                 if is_facebook_comment_label(comment_label):
+                    self._record_rejection("comment")
                     continue
                 is_nested_article = bool(
                     await message.evaluate(
@@ -742,13 +890,22 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                         "); }"
                     )
                 )
+                if is_nested_article:
+                    self._record_rejection("nested_article")
+                    continue
+                telemetry = self._active_feed_telemetry
+                if telemetry is not None:
+                    telemetry.top_level_story_nodes_seen = max(
+                        telemetry.top_level_story_nodes_seen,
+                        1,
+                    )
                 raw_post_text = await message.inner_text(timeout=1000)
                 post_text = clean_facebook_message_text(raw_post_text)
                 content_text = clean_facebook_message_text(
                     cast(str, await message.evaluate("node => node.textContent || ''"))
                 )
                 hrefs = await self._nearest_post_hrefs(message)
-                post = build_facebook_post(
+                post, reason = _build_facebook_post_with_reason(
                     FacebookPostCandidate(
                         full_text=post_text,
                         semantic_messages=(post_text,),
@@ -765,9 +922,24 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 # Preserve other messages when one story node is detached during hydration.
                 continue
             if post is None:
+                self._record_rejection(reason)
                 continue
             merge_facebook_post(collected, post)
         return list(collected.values())[:max_posts]
+
+    def _record_rejection(self, reason: str | None) -> None:
+        """Record a bounded, content-free reason that visible feed text was skipped."""
+        telemetry = self._active_feed_telemetry
+        if telemetry is None:
+            return
+        if reason == "collapsed_unexpanded":
+            telemetry.collapsed_unexpanded_observations += 1
+        elif reason == "comment":
+            telemetry.comment_observations += 1
+        elif reason == "nested_article":
+            telemetry.nested_article_observations += 1
+        elif reason == "short_text":
+            telemetry.short_text_observations += 1
 
     async def _nearest_post_hrefs(self, message: Locator) -> list[str]:
         """Find permalink candidates on the smallest ancestor that owns the story message."""

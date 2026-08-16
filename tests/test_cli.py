@@ -876,6 +876,7 @@ def test_run_cycle_command_executes_content_free_pipeline(
         "groups_shortfall": 0,
         "groups_partial": 0,
         "groups_severely_partial": 0,
+        "groups_feed_responsive_partial": 0,
         "groups_recovered": 1,
         "groups_retried": 1,
         "groups_scanned": 1,

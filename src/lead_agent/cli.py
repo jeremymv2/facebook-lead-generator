@@ -507,6 +507,9 @@ async def _scan_groups_for_cycle(
         groups_shortfall=sum(summary.shortfall for summary in summaries),
         groups_partial=sum(summary.partial for summary in summaries),
         groups_severely_partial=sum(summary.severe_partial for summary in summaries),
+        groups_feed_responsive_partial=sum(
+            summary.severe_partial and summary.diagnostics.feed_responsive for summary in summaries
+        ),
         posts_requested=sum(summary.posts_requested for summary in summaries)
         + failures * max_posts,
     )
@@ -653,6 +656,7 @@ def _run_operations_cycle(
                     "groups_shortfall": result.scan.groups_shortfall,
                     "groups_partial": result.scan.groups_partial,
                     "groups_severely_partial": result.scan.groups_severely_partial,
+                    "groups_feed_responsive_partial": (result.scan.groups_feed_responsive_partial),
                     "groups_retried": result.scan.groups_retried,
                     "groups_recovered": result.scan.groups_recovered,
                     "posts_seen": result.scan.posts_seen,

@@ -291,6 +291,40 @@ def test_repeated_materially_incomplete_cycles_trip_pause_circuit_breaker(
     assert scan["groups_severely_partial"] == 2
 
 
+def test_feed_responsive_severe_partials_do_not_pause_all_groups(tmp_path: Path) -> None:
+    state = OperationsState(operation_paths(tmp_path))
+    runner = OperationsCycleRunner(
+        state,
+        degraded_cycle_limit=2,
+        incomplete_group_rate_threshold=0.25,
+    )
+    times = iter(datetime(2026, 8, 8, 12, minute, tzinfo=UTC) for minute in range(4))
+
+    for _ in range(2):
+        result = runner.run(
+            scan=lambda: ScanCycleSummary(
+                groups_scanned=8,
+                groups_failed=0,
+                posts_seen=35,
+                posts_new=0,
+                duplicates=35,
+                groups_partial=4,
+                groups_severely_partial=3,
+                groups_feed_responsive_partial=3,
+                posts_requested=80,
+            ),
+            classify=lambda: ClassificationSummary(0, (), ()),
+            notify=None,
+            retain=RetentionSummary,
+            now=lambda: next(times),
+        )
+        assert result is not None
+        assert result.status == "success"
+        assert result.circuit_breaker_tripped is False
+
+    assert state.paused is False
+
+
 def test_repeated_fatal_cycles_trip_pause_circuit_breaker(tmp_path: Path) -> None:
     state = OperationsState(operation_paths(tmp_path))
     runner = OperationsCycleRunner(state, degraded_cycle_limit=2)

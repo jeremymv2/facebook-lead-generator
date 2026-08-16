@@ -19,6 +19,8 @@ class FacebookReader(Protocol):
         group: FacebookGroup,
         *,
         max_posts: int,
+        attempt: int = 0,
+        known_identities: frozenset[str] = frozenset(),
     ) -> FacebookReadResult | list[FacebookPost]: ...
 
 
@@ -58,7 +60,20 @@ class FacebookReadDiagnostics:
     detached_nodes: int = 0
     duplicate_identities: int = 0
     progress_events: int = 0
+    top_level_story_nodes_seen: int = 0
+    collapsed_unexpanded_observations: int = 0
+    comment_observations: int = 0
+    nested_article_observations: int = 0
+    short_text_observations: int = 0
+    feed_movement_events: int = 0
+    feed_height_growth_events: int = 0
+    loading_observations: int = 0
     stop_reason: str = "unknown"
+
+    @property
+    def feed_responsive(self) -> bool:
+        """Whether Facebook visibly rendered enough top-level content to avoid a false alarm."""
+        return self.top_level_story_nodes_seen >= 2 or self.collapsed_unexpanded_observations > 0
 
     def combine(self, other: FacebookReadDiagnostics) -> FacebookReadDiagnostics:
         """Combine bounded retry diagnostics without exposing Facebook content."""
@@ -77,6 +92,23 @@ class FacebookReadDiagnostics:
             detached_nodes=self.detached_nodes + other.detached_nodes,
             duplicate_identities=self.duplicate_identities + other.duplicate_identities,
             progress_events=self.progress_events + other.progress_events,
+            top_level_story_nodes_seen=max(
+                self.top_level_story_nodes_seen,
+                other.top_level_story_nodes_seen,
+            ),
+            collapsed_unexpanded_observations=(
+                self.collapsed_unexpanded_observations + other.collapsed_unexpanded_observations
+            ),
+            comment_observations=self.comment_observations + other.comment_observations,
+            nested_article_observations=(
+                self.nested_article_observations + other.nested_article_observations
+            ),
+            short_text_observations=(self.short_text_observations + other.short_text_observations),
+            feed_movement_events=self.feed_movement_events + other.feed_movement_events,
+            feed_height_growth_events=(
+                self.feed_height_growth_events + other.feed_height_growth_events
+            ),
+            loading_observations=self.loading_observations + other.loading_observations,
             stop_reason=other.stop_reason,
         )
 
@@ -93,6 +125,14 @@ class FacebookReadDiagnostics:
             "detached_nodes": self.detached_nodes,
             "duplicate_identities": self.duplicate_identities,
             "progress_events": self.progress_events,
+            "top_level_story_nodes_seen": self.top_level_story_nodes_seen,
+            "collapsed_unexpanded_observations": self.collapsed_unexpanded_observations,
+            "comment_observations": self.comment_observations,
+            "nested_article_observations": self.nested_article_observations,
+            "short_text_observations": self.short_text_observations,
+            "feed_movement_events": self.feed_movement_events,
+            "feed_height_growth_events": self.feed_height_growth_events,
+            "loading_observations": self.loading_observations,
             "stop_reason": self.stop_reason,
         }
 
@@ -138,6 +178,11 @@ class ScanSummary:
             and self.posts_seen / self.posts_requested < self.severe_yield_rate
         )
 
+    @property
+    def materially_incomplete(self) -> bool:
+        """A severe shortfall without evidence that Facebook rendered a usable feed."""
+        return self.severe_partial and not self.diagnostics.feed_responsive
+
 
 class ReadOnlyScanService:
     """Persist visible posts once and maintain per-group scan state."""
@@ -168,7 +213,12 @@ class ReadOnlyScanService:
         try:
             while True:
                 try:
-                    raw_result = await self.reader.read_group(group, max_posts=max_posts)
+                    raw_result = await self.reader.read_group(
+                        group,
+                        max_posts=max_posts,
+                        attempt=retry_count,
+                        known_identities=frozenset(collected),
+                    )
                 except FacebookSafetyStop:
                     raise
                 except TransientFacebookReadError as error:
