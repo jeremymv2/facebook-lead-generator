@@ -410,6 +410,7 @@ def test_scroll_uses_a_feed_container_without_clicking(tmp_path: Path) -> None:
     script = page.evaluate.await_args.args[0]
     assert "scroller.scrollBy" in script
     assert "window.scrollBy" in script
+    assert "anchor.scrollIntoView" in script
     assert "comment by" in script
 
 
