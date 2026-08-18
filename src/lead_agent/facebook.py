@@ -651,11 +651,14 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 )
 
             await self._require_normal_page(page, group_id=group.id)
-            reason = (
-                "Facebook displayed post containers, but no readable post text loaded"
-                if visible_article_seen
-                else "No visible Facebook posts appeared before the safety timeout"
-            )
+            if visible_article_seen:
+                return self._read_result(
+                    loop.time(),
+                    [],
+                    telemetry,
+                    "no_readable_text",
+                )
+            reason = "No visible Facebook posts appeared before the safety timeout"
             await self._stop(page, group.id, FacebookPageState.UNEXPECTED, reason)
         finally:
             self._active_feed_telemetry = None
