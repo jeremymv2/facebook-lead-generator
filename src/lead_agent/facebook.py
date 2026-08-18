@@ -779,6 +779,9 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                         && !article?.parentElement?.closest('article, [role=article]');
                 });
                 const anchor = topLevel[topLevel.length - 1];
+                if (anchor) {
+                    anchor.scrollIntoView({block: 'center', inline: 'nearest'});
+                }
                 const root = document.scrollingElement || document.documentElement;
                 let scroller = anchor;
                 while (scroller && scroller !== document.body) {
