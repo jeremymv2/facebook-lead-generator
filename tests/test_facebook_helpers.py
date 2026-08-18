@@ -3,7 +3,7 @@ import json
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -33,13 +33,14 @@ from lead_agent.scanner import FacebookReadDiagnostics, FacebookReadResult
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "facebook_post_candidates.json"
 
 
-def browser_settings(tmp_path: Path) -> Settings:
+def browser_settings(tmp_path: Path, **overrides: Any) -> Settings:
     return Settings(
         _env_file=None,
         facebook_profile_path=tmp_path.parent / "facebook-profile",
         screenshot_dir=tmp_path / "screenshots",
         facebook_scan_max_wait_seconds=25,
         facebook_scan_idle_seconds=5,
+        **overrides,
     )
 
 
@@ -412,6 +413,44 @@ def test_scroll_uses_a_feed_container_without_clicking(tmp_path: Path) -> None:
     assert "window.scrollBy" in script
     assert "anchor.scrollIntoView" in script
     assert "comment by" in script
+
+
+def test_normal_page_without_readable_text_is_a_bounded_partial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = FacebookGroup(
+        id="fixture-group",
+        name="Fixture Group",
+        url="https://www.facebook.com/groups/111",
+        enabled=True,
+    )
+    browser = FacebookReadOnlyBrowser(browser_settings(tmp_path, facebook_max_scrolls=0))
+    page = MagicMock()
+    page.url = group.url
+    page.wait_for_timeout = AsyncMock()
+    page.locator.return_value.count = AsyncMock(return_value=1)
+    article = MagicMock()
+    article.is_visible = AsyncMock(return_value=True)
+    article.get_attribute = AsyncMock(return_value=None)
+    articles = MagicMock()
+    articles.count = AsyncMock(return_value=1)
+    articles.nth.return_value = article
+    monkeypatch.setattr(browser, "_post_articles", AsyncMock(return_value=articles))
+    monkeypatch.setattr(browser, "_extract_story_posts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(browser, "_extract_article", AsyncMock(return_value=None))
+    monkeypatch.setattr(browser, "_is_nested_article", AsyncMock(return_value=False))
+    monkeypatch.setattr(browser, "_require_normal_page", AsyncMock())
+    monkeypatch.setattr(
+        browser,
+        "_observe_feed",
+        AsyncMock(return_value=(0, 1000, 0, 0, 1000, 500, 0)),
+    )
+
+    result = asyncio.run(browser._wait_for_readable_posts(page, group, max_posts=10))
+
+    assert result.posts == ()
+    assert result.diagnostics.stop_reason == "no_readable_text"
 
 
 def test_target_batch_gets_a_fresh_permalink_hydration_window(
