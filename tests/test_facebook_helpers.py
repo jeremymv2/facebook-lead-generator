@@ -390,6 +390,29 @@ def test_progress_aware_feed_collection_keeps_scrolling_until_target(
     assert scroll.await_count == 2
 
 
+def test_feed_observation_includes_inner_scroll_container_progress(tmp_path: Path) -> None:
+    browser = FacebookReadOnlyBrowser(browser_settings(tmp_path))
+    page = MagicMock()
+    page.evaluate = AsyncMock(return_value=[0, 1200, 1, 480, 6000, 900, 6])
+
+    observation = asyncio.run(browser._observe_feed(page))
+
+    assert observation == (0, 1200, 1, 480, 6000, 900, 6)
+
+
+def test_scroll_uses_a_feed_container_without_clicking(tmp_path: Path) -> None:
+    browser = FacebookReadOnlyBrowser(browser_settings(tmp_path))
+    page = MagicMock()
+    page.evaluate = AsyncMock()
+
+    asyncio.run(browser._scroll_for_more(page))
+
+    script = page.evaluate.await_args.args[0]
+    assert "scroller.scrollBy" in script
+    assert "window.scrollBy" in script
+    assert "comment by" in script
+
+
 def test_target_batch_gets_a_fresh_permalink_hydration_window(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
