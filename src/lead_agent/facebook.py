@@ -491,7 +491,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         initial_grace_deadline = started_at + 2
         permalink_grace_deadline: float | None = None
         last_feed_activity_at = started_at
-        previous_feed_observation: tuple[int, int, int] | None = None
+        previous_feed_observation: tuple[int, int, int, int, int, int, int] | None = None
         visible_article_seen = False
         collected: dict[str, FacebookPost] = {}
         scrolls = 0
@@ -506,12 +506,35 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 observation = await self._observe_feed(page)
                 if observation is not None:
                     if previous_feed_observation is not None:
-                        previous_top, previous_height, previous_loading = previous_feed_observation
-                        current_top, current_height, current_loading = observation
-                        moved = current_top != previous_top
-                        grew = current_height > previous_height
+                        (
+                            previous_top,
+                            previous_height,
+                            previous_loading,
+                            previous_container_top,
+                            previous_container_height,
+                            _previous_container_viewport,
+                            previous_story_count,
+                        ) = previous_feed_observation
+                        (
+                            current_top,
+                            current_height,
+                            current_loading,
+                            current_container_top,
+                            current_container_height,
+                            _current_container_viewport,
+                            current_story_count,
+                        ) = observation
+                        moved = (
+                            current_top != previous_top
+                            or current_container_top != previous_container_top
+                        )
+                        grew = (
+                            current_height > previous_height
+                            or current_container_height > previous_container_height
+                        )
                         hydrated = current_loading < previous_loading
-                        if moved or grew or hydrated:
+                        story_nodes_changed = current_story_count != previous_story_count
+                        if moved or grew or hydrated or story_nodes_changed:
                             last_feed_activity_at = loop.time()
                         if moved:
                             telemetry.feed_movement_events += 1
@@ -682,60 +705,93 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
             ),
         )
 
-    async def _observe_feed(self, page: Page) -> tuple[int, int, int] | None:
-        """Return content-free viewport, document-height, and loading measurements."""
+    async def _observe_feed(
+        self,
+        page: Page,
+    ) -> tuple[int, int, int, int, int, int, int] | None:
+        """Measure window and inner-feed progress without reading post content."""
         try:
             raw = await page.evaluate(
                 """
                 () => {
                     const root = document.scrollingElement || document.documentElement;
+                    const candidates = [
+                        root,
+                        ...Array.from(
+                            document.querySelectorAll('[role="feed"], main, [role="main"]')
+                        ),
+                    ].filter(node => node && node.scrollHeight > node.clientHeight + 20);
+                    const scroller = candidates.sort(
+                        (left, right) =>
+                            (right.scrollHeight - right.clientHeight)
+                            - (left.scrollHeight - left.clientHeight)
+                    )[0] || root;
                     const loading = document.querySelectorAll(
                         '[role="progressbar"], [aria-busy="true"], '
                         '[data-visualcompletion="loading-state"]'
                     ).length;
+                    const topLevelStories = Array.from(document.querySelectorAll(
+                        '[data-ad-rendering-role="story_message"], '
+                        '[data-ad-preview="message"], '
+                        '[data-ad-comet-preview="message"]'
+                    )).filter(node => {
+                        const article = node.closest('article, [role=article]');
+                        const label = (article?.getAttribute('aria-label') || '').toLowerCase();
+                        return Boolean(node.getClientRects().length)
+                            && !label.startsWith('comment by ')
+                            && !label.startsWith('reply by ')
+                            && !article?.parentElement?.closest('article, [role=article]');
+                    }).length;
                     return [
                         Math.round(window.scrollY || window.pageYOffset || 0),
                         Math.round(root?.scrollHeight || 0),
                         Math.min(loading, 100),
+                        Math.round(scroller?.scrollTop || 0),
+                        Math.round(scroller?.scrollHeight || 0),
+                        Math.round(scroller?.clientHeight || 0),
+                        topLevelStories,
                     ];
                 }
                 """
             )
         except (Error, TypeError):
             return None
-        if isinstance(raw, list) and len(raw) == 3 and all(isinstance(value, int) for value in raw):
-            return cast(tuple[int, int, int], tuple(raw))
+        if isinstance(raw, list) and len(raw) == 7 and all(isinstance(value, int) for value in raw):
+            return cast(tuple[int, int, int, int, int, int, int], tuple(raw))
         return None
 
     async def _scroll_for_more(self, page: Page) -> None:
-        """Anchor on a top-level story, then move less than one viewport without clicking."""
-        messages = page.locator(STORY_MESSAGE_SELECTOR)
-        count = min(await messages.count(), 50)
-        for index in range(count - 1, -1, -1):
-            message = messages.nth(index)
-            try:
-                if not await message.is_visible(timeout=500):
-                    continue
-                article_label = await message.evaluate(
-                    "node => node.closest('article, [role=article]')?.getAttribute('aria-label')"
-                )
-                if is_facebook_comment_label(cast(str | None, article_label)):
-                    continue
-                nested = await message.evaluate(
-                    "node => { const article = node.closest('article, [role=article]'); "
-                    "return Boolean(article?.parentElement?.closest('article, [role=article]')); }"
-                )
-                if nested:
-                    continue
-                await message.scroll_into_view_if_needed(timeout=1000)
-                break
-            except Error:
-                continue
+        """Scroll the nearest scrollable feed container after selecting a top-level story."""
         await page.evaluate(
             """
             () => {
+                const messages = Array.from(document.querySelectorAll(
+                    '[data-ad-rendering-role="story_message"], '
+                    '[data-ad-preview="message"], '
+                    '[data-ad-comet-preview="message"]'
+                ));
+                const topLevel = messages.filter(node => {
+                    const article = node.closest('article, [role=article]');
+                    const label = (article?.getAttribute('aria-label') || '').toLowerCase();
+                    return Boolean(node.getClientRects().length)
+                        && !label.startsWith('comment by ')
+                        && !label.startsWith('reply by ')
+                        && !article?.parentElement?.closest('article, [role=article]');
+                });
+                const anchor = topLevel[topLevel.length - 1];
+                const root = document.scrollingElement || document.documentElement;
+                let scroller = anchor;
+                while (scroller && scroller !== document.body) {
+                    if (scroller.scrollHeight > scroller.clientHeight + 20) break;
+                    scroller = scroller.parentElement;
+                }
+                if (!scroller || scroller === document.body) scroller = root;
                 const distance = Math.max(Math.floor(window.innerHeight * 0.85), 600);
-                window.scrollBy(0, distance);
+                if (scroller === root) {
+                    window.scrollBy(0, distance);
+                } else {
+                    scroller.scrollBy(0, distance);
+                }
             }
             """
         )
