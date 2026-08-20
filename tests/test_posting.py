@@ -287,6 +287,23 @@ def test_disabled_group_stops_before_claim_or_browser(
     assert adapter.validate_calls == 0
 
 
+def test_posting_validation_waits_through_facebook_loading_splash(tmp_path: Path) -> None:
+    browser = FacebookCommentBrowser(settings(tmp_path, facebook_post_load_timeout_seconds=5))
+    page = MagicMock()
+    page.wait_for_timeout = AsyncMock()
+    message = MagicMock()
+    browser._require_normal_page = AsyncMock()  # type: ignore[method-assign]
+    browser._top_level_post_messages = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[[], [("Rendered source post", message)]]
+    )
+
+    rendered = asyncio.run(browser._wait_for_top_level_post_messages(page, lead_id=123))
+
+    assert rendered == [("Rendered source post", message)]
+    assert browser._require_normal_page.await_count == 2
+    page.wait_for_timeout.assert_awaited_once_with(250)
+
+
 def test_live_validation_failure_returns_for_fresh_review_and_can_retry(
     database: Database,
     tmp_path: Path,

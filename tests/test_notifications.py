@@ -168,7 +168,7 @@ def test_notification_sends_one_tokenized_single_segment_sms(tmp_path: Path) -> 
     message = provider.messages[0]
     assert message.to == "+15025550101"
     assert message.body == (
-        "JJ Miller & Co LLC lead 95: decks. Review: "
+        "JJ Miller & Co LLC lead 1: decks, score 95. "
         f"https://approve.example/review/{token} Reply STOP to opt out."
     )
     assert len(message.body) <= 160
@@ -207,9 +207,9 @@ def test_notification_uses_compliant_fallback_at_maximum_origin_length(tmp_path:
 
     assert summary.sent == 1
     assert provider.messages[0].body == (
-        f"JJ Miller & Co LLC lead. Review: {public_base_url}/review/{token} Reply STOP to opt out."
+        f"JJ Miller & Co LLC lead 1. {public_base_url}/review/{token} Reply STOP to opt out."
     )
-    assert len(provider.messages[0].body) == 160
+    assert len(provider.messages[0].body) <= 160
 
 
 def test_failed_send_clears_link_and_requires_explicit_retry(tmp_path: Path) -> None:

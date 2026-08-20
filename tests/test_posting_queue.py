@@ -346,6 +346,45 @@ def test_validation_failure_sms_names_the_safe_pre_submission_reason(tmp_path: P
     assert "stopped before sending: the source post changed" in provider.messages[0].body
 
 
+def test_source_load_timeout_sms_does_not_claim_the_post_changed(tmp_path: Path) -> None:
+    settings = live_settings(tmp_path)
+    database = Database(settings.database_path)
+    database.initialize()
+    now = datetime(2026, 8, 14, 16, tzinfo=UTC)
+    _, job_id = queued_job(database, now=now)
+    service = processor(database, settings)
+    claimed = service.claim(now=now + timedelta(minutes=2))
+    assert claimed is not None
+
+    result = asyncio.run(
+        service.process(
+            claimed,
+            FakePostingAdapter(
+                validation_error=PostingValidationError(
+                    "Source did not load",
+                    code="source_post_load_timeout",
+                )
+            ),
+            now=now + timedelta(minutes=2),
+        )
+    )
+
+    assert result.result == "failed"
+    job = database.get_posting_job(job_id)
+    assert job is not None
+    assert job.error_code == "source_post_load_timeout"
+    provider = FakeSmsProvider()
+    notifier = PostingOutcomeNotificationService(
+        database,
+        provider,
+        recipient_number="+15025280858",
+    )
+
+    assert notifier.notify_pending(now=now + timedelta(minutes=3)) == 1
+    assert "Facebook did not finish loading the source post" in provider.messages[0].body
+    assert "source post changed" not in provider.messages[0].body
+
+
 def test_outcome_sms_failure_is_recorded_without_automatic_retry(tmp_path: Path) -> None:
     settings = live_settings(tmp_path)
     database = Database(settings.database_path)

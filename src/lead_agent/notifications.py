@@ -297,14 +297,19 @@ def remote_token_hash(token: str) -> str:
 
 def _approval_sms_body(review: ApprovalReview, review_url: str) -> str:
     score = review.lead.overall_score if review.lead.overall_score is not None else "new"
+    lead_id = review.lead.id if review.lead.id is not None else "new"
     service = (review.lead.service_category or "project").replace("_", " ")
     service = re.sub(r"[^A-Za-z0-9 /&-]", "", service)[:30].strip() or "project"
     body = (
-        f"{SMS_BRAND_NAME} lead {score}: {service}. Review: {review_url} {SMS_OPT_OUT_INSTRUCTION}"
+        f"{SMS_BRAND_NAME} lead {lead_id}: {service}, score {score}. "
+        f"{review_url} {SMS_OPT_OUT_INSTRUCTION}"
     )
     if len(body) <= 160:
         return body
-    fallback = f"{SMS_BRAND_NAME} lead. Review: {review_url} {SMS_OPT_OUT_INSTRUCTION}"
+    compact = f"{SMS_BRAND_NAME} lead {lead_id}: {service}. {review_url} {SMS_OPT_OUT_INSTRUCTION}"
+    if len(compact) <= 160:
+        return compact
+    fallback = f"{SMS_BRAND_NAME} lead {lead_id}. {review_url} {SMS_OPT_OUT_INSTRUCTION}"
     if len(fallback) > 160:
         raise ValueError("REMOTE_APPROVAL_BASE_URL is too long for a single SMS segment")
     return fallback
