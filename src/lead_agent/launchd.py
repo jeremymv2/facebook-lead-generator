@@ -15,11 +15,13 @@ POSTING_AGENT_LABEL = "com.jjmillerco.lead-agent-posting-queue"
 
 
 def fixed_calendar_intervals(interval_seconds: int) -> list[dict[str, int]]:
-    """Return fixed minute boundaries so runtime does not extend scan cadence."""
+    """Return nearest fixed minute boundaries so runtime does not extend scan cadence."""
     if interval_seconds < 60 or interval_seconds > 3600 or 3600 % interval_seconds:
         raise ValueError("cycle interval must evenly divide one hour")
-    interval_minutes = interval_seconds // 60
-    return [{"Minute": minute} for minute in range(0, 60, interval_minutes)]
+    return [
+        {"Minute": (elapsed_seconds + 30) // 60}
+        for elapsed_seconds in range(0, 3600, interval_seconds)
+    ]
 
 
 @dataclass(frozen=True, slots=True)

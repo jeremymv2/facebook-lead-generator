@@ -16,6 +16,7 @@ from lead_agent.operations import (
     OperationPaths,
     OperationsCycleRunner,
     OperationsState,
+    RecoverableCycleError,
     RetentionService,
     RetentionSummary,
     ScanCycleSummary,
@@ -346,6 +347,29 @@ def test_repeated_fatal_cycles_trip_pause_circuit_breaker(tmp_path: Path) -> Non
     assert health["circuit_breaker_tripped"] is True
     assert health["circuit_breaker_reason"] == "consecutive_cycle_failures"
     assert "private failure details" not in paths_text(state.paths.health_path)
+
+
+def test_recoverable_connectivity_failures_never_latch_the_pause(tmp_path: Path) -> None:
+    state = OperationsState(operation_paths(tmp_path))
+    runner = OperationsCycleRunner(state, degraded_cycle_limit=2)
+    times = iter(datetime(2026, 8, 8, 12, minute, tzinfo=UTC) for minute in range(4))
+
+    for _ in range(2):
+        with pytest.raises(RecoverableCycleError):
+            runner.run(
+                scan=lambda: (_ for _ in ()).throw(RecoverableCycleError("network unavailable")),
+                classify=lambda: ClassificationSummary(0, (), ()),
+                notify=None,
+                retain=RetentionSummary,
+                now=lambda: next(times),
+            )
+
+    health = state.read_health()
+    assert state.paused is False
+    assert health["status"] == "failed"
+    assert health["consecutive_failures"] == 2
+    assert health["circuit_breaker_tripped"] is False
+    assert health["circuit_breaker_reason"] is None
 
 
 def test_retention_removes_only_expired_known_artifacts_and_rotates_logs(

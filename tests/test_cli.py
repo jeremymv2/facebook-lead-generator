@@ -21,6 +21,7 @@ from lead_agent.operations import (
     OperationPaths,
     OperationsState,
     QuietHoursActiveError,
+    RecoverableCycleError,
     ScanCycleSummary,
 )
 from lead_agent.scanner import ScanSummary, TransientFacebookReadError
@@ -799,6 +800,62 @@ def test_unattended_cycle_never_retries_a_facebook_safety_stop(
 
     with pytest.raises(FacebookSafetyStop):
         asyncio.run(cli_module._scan_groups_for_cycle(settings, [group], max_posts=10))
+
+
+def test_unattended_cycle_aborts_repeated_offline_groups_without_latching_pause(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    groups = [
+        FacebookGroup(
+            id=f"offline-{index}",
+            name=f"Offline Group {index}",
+            url=f"https://www.facebook.com/groups/{index}",
+            enabled=True,
+        )
+        for index in range(3)
+    ]
+    calls: list[str] = []
+
+    class FakeBrowser:
+        def __init__(self, settings: Settings) -> None:
+            del settings
+
+        async def __aenter__(self) -> "FakeBrowser":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+    class FakeScanner:
+        def __init__(self, database: Database, browser: object) -> None:
+            del database, browser
+
+        async def scan_group(
+            self,
+            group: FacebookGroup,
+            *,
+            max_posts: int,
+            **kwargs: object,
+        ) -> ScanSummary:
+            del max_posts, kwargs
+            calls.append(group.id)
+            raise TransientFacebookReadError(stage="navigation", kind="offline")
+
+    monkeypatch.setattr(cli_module, "FacebookReadOnlyBrowser", FakeBrowser)
+    monkeypatch.setattr(cli_module, "ReadOnlyScanService", FakeScanner)
+    settings = Settings(
+        _env_file=None,
+        database_path=tmp_path / "offline-cycle.sqlite3",
+        data_dir=tmp_path / "data",
+        facebook_profile_path=tmp_path.parent / "browser-profile",
+        facebook_group_delay_seconds=0.25,
+    )
+
+    with pytest.raises(RecoverableCycleError):
+        asyncio.run(cli_module._scan_groups_for_cycle(settings, groups, max_posts=10))
+
+    assert calls == ["offline-0", "offline-1"]
 
 
 def configure_cycle_fixture(

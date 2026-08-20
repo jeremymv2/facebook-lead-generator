@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -42,8 +43,20 @@ STORY_MESSAGE_SELECTOR = (
     '[data-ad-preview="message"], '
     '[data-ad-comet-preview="message"]'
 )
+LOADING_STATE_SELECTOR = (
+    '[role="progressbar"], [aria-busy="true"], [data-visualcompletion="loading-state"]'
+)
 SEE_MORE_SUFFIX_PATTERN = re.compile(r"(?:\s*(?:…|\.\.\.)?\s*see more)+\s*$", re.IGNORECASE)
 REPEATED_MESSAGE_PREFIX_LENGTH = 80
+BROWSER_NETWORK_ERROR_MARKERS = (
+    "err_internet_disconnected",
+    "err_network_changed",
+    "err_name_not_resolved",
+    "err_connection_timed_out",
+    "err_connection_reset",
+    "no internet",
+    "you are offline",
+)
 
 
 class FacebookBrowserError(RuntimeError):
@@ -105,6 +118,12 @@ def clean_facebook_message_text(value: str) -> str:
 def message_text_requires_expansion(value: str) -> bool:
     """Identify a collapsed Facebook message whose visible text ends at “See more”."""
     return bool(SEE_MORE_SUFFIX_PATTERN.search(normalize_post_text(value)))
+
+
+def is_browser_network_error_text(value: str) -> bool:
+    """Recognize Chromium's content-free network error pages as transient outages."""
+    normalized = " ".join(value.casefold().split())
+    return any(marker in normalized for marker in BROWSER_NETWORK_ERROR_MARKERS)
 
 
 def extract_post_id(url: str) -> str | None:
@@ -352,7 +371,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
 
     async def manual_login(self) -> None:
         """Open Facebook for human-only login and verify the resulting page."""
-        page = await self._page()
+        page = await self._page(fresh=True)
         try:
             await page.goto(FACEBOOK_HOME, wait_until="domcontentloaded")
         except Error:
@@ -387,7 +406,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         known_identities: frozenset[str] = frozenset(),
     ) -> FacebookReadResult:
         """Wait for and read visible posts from one allowlisted group."""
-        page = await self._page()
+        page = await self._page(fresh=True)
         try:
             await page.goto(group.url, wait_until="domcontentloaded")
             await self._require_normal_page(page, group_id=group.id)
@@ -716,35 +735,41 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         try:
             raw = await page.evaluate(
                 """
-                () => {
+                selectors => {
                     const root = document.scrollingElement || document.documentElement;
-                    const candidates = [
-                        root,
-                        ...Array.from(
-                            document.querySelectorAll('[role="feed"], main, [role="main"]')
-                        ),
-                    ].filter(node => node && node.scrollHeight > node.clientHeight + 20);
-                    const scroller = candidates.sort(
-                        (left, right) =>
-                            (right.scrollHeight - right.clientHeight)
-                            - (left.scrollHeight - left.clientHeight)
-                    )[0] || root;
-                    const loading = document.querySelectorAll(
-                        '[role="progressbar"], [aria-busy="true"], '
-                        '[data-visualcompletion="loading-state"]'
-                    ).length;
-                    const topLevelStories = Array.from(document.querySelectorAll(
-                        '[data-ad-rendering-role="story_message"], '
-                        '[data-ad-preview="message"], '
-                        '[data-ad-comet-preview="message"]'
-                    )).filter(node => {
+                    const messages = Array.from(
+                        document.querySelectorAll(selectors.storyMessage)
+                    );
+                    const topLevel = messages.filter(node => {
                         const article = node.closest('article, [role=article]');
                         const label = (article?.getAttribute('aria-label') || '').toLowerCase();
                         return Boolean(node.getClientRects().length)
                             && !label.startsWith('comment by ')
                             && !label.startsWith('reply by ')
                             && !article?.parentElement?.closest('article, [role=article]');
-                    }).length;
+                    });
+                    const anchor = topLevel[topLevel.length - 1];
+                    const ancestors = [];
+                    for (let node = anchor?.parentElement; node; node = node.parentElement) {
+                        ancestors.push(node);
+                    }
+                    const candidates = [
+                        ...ancestors,
+                        anchor?.closest('[role="feed"]'),
+                        ...Array.from(
+                            document.querySelectorAll('[role="feed"], main, [role="main"]')
+                        ),
+                        root,
+                    ].filter((node, index, values) => node && values.indexOf(node) === index);
+                    const isScrollable = node => {
+                        if (!node || node.scrollHeight <= node.clientHeight + 20) return false;
+                        if (node === root) return true;
+                        const overflowY = window.getComputedStyle(node).overflowY;
+                        return ['auto', 'scroll', 'overlay'].includes(overflowY);
+                    };
+                    const scroller = candidates.find(isScrollable) || root;
+                    const loading = document.querySelectorAll(selectors.loadingState).length;
+                    const topLevelStories = topLevel.length;
                     return [
                         Math.round(window.scrollY || window.pageYOffset || 0),
                         Math.round(root?.scrollHeight || 0),
@@ -755,7 +780,11 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                         topLevelStories,
                     ];
                 }
-                """
+                """,
+                {
+                    "storyMessage": STORY_MESSAGE_SELECTOR,
+                    "loadingState": LOADING_STATE_SELECTOR,
+                },
             )
         except (Error, TypeError):
             return None
@@ -765,14 +794,12 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
 
     async def _scroll_for_more(self, page: Page) -> None:
         """Scroll the nearest scrollable feed container after selecting a top-level story."""
-        await page.evaluate(
+        moved = await page.evaluate(
             """
-            () => {
-                const messages = Array.from(document.querySelectorAll(
-                    '[data-ad-rendering-role="story_message"], '
-                    '[data-ad-preview="message"], '
-                    '[data-ad-comet-preview="message"]'
-                ));
+            storyMessageSelector => {
+                const messages = Array.from(
+                    document.querySelectorAll(storyMessageSelector)
+                );
                 const topLevel = messages.filter(node => {
                     const article = node.closest('article, [role=article]');
                     const label = (article?.getAttribute('aria-label') || '').toLowerCase();
@@ -782,25 +809,71 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                         && !article?.parentElement?.closest('article, [role=article]');
                 });
                 const anchor = topLevel[topLevel.length - 1];
-                if (anchor) {
-                    anchor.scrollIntoView({block: 'center', inline: 'nearest'});
+                const anchorRect = anchor?.getBoundingClientRect();
+                if (anchor && anchorRect && anchorRect.top >= window.innerHeight) {
+                    anchor.scrollIntoView({block: 'end', inline: 'nearest'});
                 }
                 const root = document.scrollingElement || document.documentElement;
-                let scroller = anchor;
-                while (scroller && scroller !== document.body) {
-                    if (scroller.scrollHeight > scroller.clientHeight + 20) break;
-                    scroller = scroller.parentElement;
+                const ancestors = [];
+                for (let node = anchor?.parentElement; node; node = node.parentElement) {
+                    ancestors.push(node);
                 }
-                if (!scroller || scroller === document.body) scroller = root;
+                const candidates = [
+                    ...ancestors,
+                    anchor?.closest('[role="feed"]'),
+                    ...Array.from(
+                        document.querySelectorAll('[role="feed"], main, [role="main"]')
+                    ),
+                    root,
+                ].filter((node, index, values) => node && values.indexOf(node) === index);
+                const isScrollable = node => {
+                    if (!node || node.scrollHeight <= node.clientHeight + 20) return false;
+                    if (node === root) return true;
+                    const overflowY = window.getComputedStyle(node).overflowY;
+                    return ['auto', 'scroll', 'overlay'].includes(overflowY);
+                };
+                const scroller = candidates.find(isScrollable) || root;
                 const distance = Math.max(Math.floor(window.innerHeight * 0.85), 600);
+                const beforeWindow = Math.round(window.scrollY || window.pageYOffset || 0);
+                const beforeScroller = Math.round(scroller.scrollTop || 0);
                 if (scroller === root) {
-                    window.scrollBy(0, distance);
+                    root.scrollTop = Math.min(
+                        root.scrollTop + distance,
+                        root.scrollHeight - root.clientHeight
+                    );
+                    if (root.scrollTop === beforeScroller) window.scrollBy(0, distance);
                 } else {
-                    scroller.scrollBy(0, distance);
+                    scroller.scrollTop = Math.min(
+                        scroller.scrollTop + distance,
+                        scroller.scrollHeight - scroller.clientHeight
+                    );
                 }
+                return Math.round(window.scrollY || window.pageYOffset || 0) !== beforeWindow
+                    || Math.round(scroller.scrollTop || 0) !== beforeScroller;
             }
-            """
+            """,
+            STORY_MESSAGE_SELECTOR,
         )
+        if moved is False:
+            viewport = page.viewport_size
+            if viewport is None:
+                raw_viewport = await page.evaluate("() => [window.innerWidth, window.innerHeight]")
+                viewport = (
+                    {"width": raw_viewport[0], "height": raw_viewport[1]}
+                    if isinstance(raw_viewport, list)
+                    and len(raw_viewport) == 2
+                    and all(isinstance(value, int) for value in raw_viewport)
+                    else None
+                )
+            if viewport is not None:
+                await page.mouse.move(
+                    round(viewport["width"] * 0.4),
+                    round(viewport["height"] * 0.75),
+                )
+                await page.mouse.wheel(
+                    0,
+                    max(round(viewport["height"] * 0.85), 600),
+                )
 
     async def _extract_story_posts(
         self,
@@ -1076,9 +1149,16 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
         )
         return cast(str, value)
 
-    async def _page(self) -> Page:
+    async def _page(self, *, fresh: bool = False) -> Page:
         if self._context is None:
             raise RuntimeError("Facebook browser context is not open")
+        if fresh:
+            existing_pages = list(self._context.pages)
+            page = await self._context.new_page()
+            for existing in existing_pages:
+                with suppress(Error):
+                    await existing.close()
+            return page
         if self._context.pages:
             return self._context.pages[0]
         return await self._context.new_page()
@@ -1133,6 +1213,16 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                 group_id,
                 FacebookPageState.UNEXPECTED,
                 "Facebook page content did not become readable",
+            )
+        if is_browser_network_error_text(visible_text):
+            raise TransientFacebookReadError(
+                stage="navigation",
+                kind="offline",
+                screenshot_path=await self._capture_failure(
+                    page,
+                    group_id,
+                    "transient-navigation-offline",
+                ),
             )
         assessment = assess_facebook_page(page.url, visible_text)
         if assessment.state is not FacebookPageState.NORMAL:

@@ -43,9 +43,13 @@ def test_cycle_launch_agent_uses_fixed_cadence_and_contains_no_environment_secre
     cycle = next(value for value in definitions if value.label == CYCLE_AGENT_LABEL)
     assert cycle.payload["StartCalendarInterval"] == [
         {"Minute": 0},
+        {"Minute": 8},
         {"Minute": 15},
+        {"Minute": 23},
         {"Minute": 30},
+        {"Minute": 38},
         {"Minute": 45},
+        {"Minute": 53},
     ]
     assert "StartInterval" not in cycle.payload
     assert cycle.payload["ProgramArguments"][-1] == "run-cycle"  # type: ignore[index]
