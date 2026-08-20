@@ -82,7 +82,7 @@ class Settings(BaseSettings):
     posting_queue_enabled: bool = False
     posting_queue_poll_interval_seconds: int = Field(default=60, ge=30, le=900)
 
-    scan_interval_seconds: int = Field(default=900, ge=300, le=3600)
+    scan_interval_seconds: int = Field(default=450, ge=300, le=3600)
     lead_threshold: int = Field(default=75, ge=0, le=100)
     service_area: str = "Louisville, Kentucky"
     service_radius_miles: int = Field(default=50, ge=1, le=250)

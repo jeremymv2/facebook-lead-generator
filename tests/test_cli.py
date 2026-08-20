@@ -21,6 +21,7 @@ from lead_agent.operations import (
     OperationPaths,
     OperationsState,
     QuietHoursActiveError,
+    RecoverableCycleError,
     ScanCycleSummary,
 )
 from lead_agent.scanner import ScanSummary, TransientFacebookReadError
@@ -851,7 +852,7 @@ def test_unattended_cycle_aborts_repeated_offline_groups_without_latching_pause(
         facebook_group_delay_seconds=0.25,
     )
 
-    with pytest.raises(cli_module.RecoverableCycleError):
+    with pytest.raises(RecoverableCycleError):
         asyncio.run(cli_module._scan_groups_for_cycle(settings, groups, max_posts=10))
 
     assert calls == ["offline-0", "offline-1"]

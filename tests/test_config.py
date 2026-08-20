@@ -20,7 +20,7 @@ def test_safe_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert settings.posting_enabled is False
     assert settings.dry_run is True
     assert settings.posting_allowed is False
-    assert settings.scan_interval_seconds == 900
+    assert settings.scan_interval_seconds == 450
     assert settings.lead_threshold == 75
     assert settings.approval_expiration_minutes == 600
     assert settings.approval_local_port == 8765

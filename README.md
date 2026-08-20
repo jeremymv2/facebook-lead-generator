@@ -150,7 +150,7 @@ Important settings include:
 | `DRY_RUN` | `true` | Prevents submission while exercising future workflows |
 | `POSTING_QUEUE_ENABLED` | `false` | Show guarded Approve & Post controls and permit the queue worker |
 | `POSTING_QUEUE_POLL_INTERVAL_SECONDS` | `60` | Delay between one-shot queued-posting workers |
-| `SCAN_INTERVAL_SECONDS` | `900` | Fixed wall-clock cadence between unattended cycle starts |
+| `SCAN_INTERVAL_SECONDS` | `450` | Average fixed cadence; minute-only launchd boundaries alternate 7 and 8 minutes |
 | `LEAD_THRESHOLD` | `75` | Minimum score for an approval candidate |
 | `SERVICE_AREA` | `Louisville, Kentucky` | Primary geographic target |
 | `APPROVAL_EXPIRATION_MINUTES` | `600` | Single-use local and mobile review lifetime (10 hours) |
@@ -759,7 +759,7 @@ By default, invocations from 10:00 PM through 4:59 AM in `BUSINESS_TIMEZONE` exi
 group allowlist, opening SQLite or Facebook, classifying posts, creating backups, or sending SMS.
 At exactly 5:00 AM, cycles are eligible again. launchd remains loaded during this window; the gate
 is enforced inside `run-cycle`, so reinstalling the launch agent is unnecessary. The next normal
-15-minute launchd interval performs the first eligible cycle.
+7- or 8-minute launchd interval performs the first eligible cycle.
 
 `lead-agent doctor` and `lead-agent operations-status` show the configured window and whether it is
 currently active. Expected inactivity during quiet hours is not reported as stale health. For an
