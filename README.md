@@ -183,14 +183,14 @@ Important settings include:
 | `CYCLE_CLASSIFICATION_LIMIT` | `100` | Maximum saved posts classified per cycle |
 | `FACEBOOK_PROFILE_PATH` | `~/.jjmiller-lead-agent/facebook-profile` | Dedicated persistent profile |
 | `BROWSER_HEADLESS` | `false` | Keeps manual login and scan behavior visible |
-| `FACEBOOK_GROUP_MAX_RETRIES` | `1` | Bounded transient or severe-partial retries per group and cycle |
+| `FACEBOOK_GROUP_MAX_RETRIES` | `1` | Bounded transient or materially incomplete retries per group and cycle |
 | `FACEBOOK_GROUP_RETRY_BACKOFF_SECONDS` | `5` | Delay before the one bounded group retry |
 | `FACEBOOK_GROUP_DELAY_SECONDS` | `2` | Delay between unattended group navigations |
 | `FACEBOOK_SCAN_MAX_WAIT_SECONDS` | `25` | Hard cap for initial feed collection |
 | `FACEBOOK_SCAN_IDLE_SECONDS` | `5` | Stop after this long without feed movement, loading progress, or DOM growth |
-| `FACEBOOK_RETRY_SCAN_MAX_WAIT_SECONDS` | `45` | Longer cap for the one fresh retry after a severe partial |
+| `FACEBOOK_RETRY_SCAN_MAX_WAIT_SECONDS` | `45` | Longer cap for one fresh retry after a materially incomplete read |
 | `FACEBOOK_RETRY_SCAN_IDLE_SECONDS` | `10` | Longer idle allowance for the fresh retry |
-| `FACEBOOK_MAX_SCROLLS` | `12` | Maximum bounded lazy-load scrolls per group |
+| `FACEBOOK_MAX_SCROLLS` | `20` | Maximum bounded lazy-load scrolls per group |
 | `FACEBOOK_SCROLL_SETTLE_SECONDS` | `0.75` | Wait after each bounded scroll |
 | `FACEBOOK_RETRY_SCROLL_SETTLE_SECONDS` | `1.25` | Wait after each bounded retry scroll |
 | `MAX_POSTS_PER_GROUP` | `10` | Conservative visible-post target per run |
@@ -845,6 +845,12 @@ circuit-breaker purposes, a group is materially incomplete only when it fails or
 Two consecutive cycles where at least 25% of attempted groups are materially incomplete still
 pause the worker. These thresholds are configurable, while the detailed per-group health remains
 available for diagnosing normal Facebook feed variability.
+
+Each group attempt uses a fresh browser page so one failed navigation cannot poison later groups.
+A visibly responsive severe partial is retained without repeating the same Facebook navigation.
+Two consecutive Chromium offline pages stop the current cycle early as a recoverable connectivity
+failure; this does not latch the pause circuit, so the next scheduled cycle can recover when the Mac
+is back online.
 
 Each successful cycle also creates at most one private SQLite backup per configured interval,
 verifies its integrity and schema by restoring it into a disposable database, and removes only

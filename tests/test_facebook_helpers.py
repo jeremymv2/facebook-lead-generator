@@ -10,6 +10,7 @@ import pytest
 
 from lead_agent.config import Settings
 from lead_agent.facebook import (
+    LOADING_STATE_SELECTOR,
     STORY_MESSAGE_SELECTOR,
     FacebookPostCandidate,
     FacebookReadOnlyBrowser,
@@ -17,6 +18,7 @@ from lead_agent.facebook import (
     cleanup_old_screenshots,
     extract_post_id,
     facebook_group_key,
+    is_browser_network_error_text,
     is_facebook_comment_label,
     merge_facebook_post,
     select_facebook_permalink,
@@ -399,20 +401,75 @@ def test_feed_observation_includes_inner_scroll_container_progress(tmp_path: Pat
     observation = asyncio.run(browser._observe_feed(page))
 
     assert observation == (0, 1200, 1, 480, 6000, 900, 6)
+    script = page.evaluate.await_args.args[0]
+    selectors = page.evaluate.await_args.args[1]
+    assert "selectors.storyMessage" in script
+    assert "selectors.loadingState" in script
+    assert selectors == {
+        "storyMessage": STORY_MESSAGE_SELECTOR,
+        "loadingState": LOADING_STATE_SELECTOR,
+    }
 
 
 def test_scroll_uses_a_feed_container_without_clicking(tmp_path: Path) -> None:
     browser = FacebookReadOnlyBrowser(browser_settings(tmp_path))
     page = MagicMock()
-    page.evaluate = AsyncMock()
+    page.evaluate = AsyncMock(return_value=True)
 
     asyncio.run(browser._scroll_for_more(page))
 
     script = page.evaluate.await_args.args[0]
-    assert "scroller.scrollBy" in script
+    selector = page.evaluate.await_args.args[1]
+    assert "document.querySelectorAll(storyMessageSelector)" in script
+    assert selector == STORY_MESSAGE_SELECTOR
+    assert "window.getComputedStyle(node).overflowY" in script
+    assert "scroller.scrollTop" in script
     assert "window.scrollBy" in script
+    assert "anchorRect.top >= window.innerHeight" in script
     assert "anchor.scrollIntoView" in script
     assert "comment by" in script
+
+
+def test_scroll_falls_back_to_a_wheel_over_the_feed_column(tmp_path: Path) -> None:
+    browser = FacebookReadOnlyBrowser(browser_settings(tmp_path))
+    page = MagicMock()
+    page.evaluate = AsyncMock(return_value=False)
+    page.viewport_size = {"width": 1200, "height": 800}
+    page.mouse.move = AsyncMock()
+    page.mouse.wheel = AsyncMock()
+
+    asyncio.run(browser._scroll_for_more(page))
+
+    page.mouse.move.assert_awaited_once_with(480, 600)
+    page.mouse.wheel.assert_awaited_once_with(0, 680)
+
+
+@pytest.mark.parametrize(
+    "visible_text",
+    [
+        "Press space to play ERR_INTERNET_DISCONNECTED",
+        "This site cannot be reached ERR_NAME_NOT_RESOLVED",
+        "You are offline",
+    ],
+)
+def test_chromium_network_error_pages_are_transient(visible_text: str) -> None:
+    assert is_browser_network_error_text(visible_text) is True
+
+
+def test_fresh_scan_page_replaces_a_stale_page(tmp_path: Path) -> None:
+    browser = FacebookReadOnlyBrowser(browser_settings(tmp_path))
+    stale_page = MagicMock()
+    stale_page.close = AsyncMock()
+    fresh_page = MagicMock()
+    context = MagicMock()
+    context.pages = [stale_page]
+    context.new_page = AsyncMock(return_value=fresh_page)
+    browser._context = context
+
+    result = asyncio.run(browser._page(fresh=True))
+
+    assert result is fresh_page
+    stale_page.close.assert_awaited_once_with()
 
 
 def test_normal_page_without_readable_text_is_a_bounded_partial(

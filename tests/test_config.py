@@ -43,7 +43,7 @@ def test_safe_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert settings.facebook_retry_scan_max_wait_seconds == 45
     assert settings.facebook_retry_scan_idle_seconds == 10
     assert settings.facebook_group_delay_seconds == 2
-    assert settings.facebook_max_scrolls == 12
+    assert settings.facebook_max_scrolls == 20
     assert settings.facebook_scroll_settle_seconds == 0.75
     assert settings.facebook_retry_scroll_settle_seconds == 1.25
     assert settings.ai_provider == "disabled"

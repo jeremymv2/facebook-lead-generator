@@ -246,7 +246,8 @@ class ReadOnlyScanService:
                 )
                 _merge_read_posts(collected, result.posts)
                 severe = max_posts > 0 and len(collected) / max_posts < severe_yield_rate
-                if not severe or retry_count >= max_retries:
+                materially_incomplete = severe and not diagnostics.feed_responsive
+                if not materially_incomplete or retry_count >= max_retries:
                     break
                 retry_count += 1
                 if retry_backoff_seconds:

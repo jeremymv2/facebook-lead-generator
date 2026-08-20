@@ -129,7 +129,7 @@ class Settings(BaseSettings):
     facebook_group_max_retries: int = Field(default=1, ge=0, le=2)
     facebook_group_retry_backoff_seconds: float = Field(default=5, ge=1, le=30)
     facebook_group_delay_seconds: float = Field(default=2, ge=0.25, le=30)
-    facebook_max_scrolls: int = Field(default=12, ge=0, le=30)
+    facebook_max_scrolls: int = Field(default=20, ge=0, le=30)
     facebook_scroll_settle_seconds: float = Field(default=0.75, ge=0.25, le=5)
     facebook_retry_scroll_settle_seconds: float = Field(default=1.25, ge=0.25, le=5)
     max_posts_per_group: int = Field(default=10, ge=1, le=50)

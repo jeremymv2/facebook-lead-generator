@@ -51,6 +51,7 @@ from lead_agent.operations import (
     OperationsCycleRunner,
     OperationsState,
     QuietHoursActiveError,
+    RecoverableCycleError,
     RetentionService,
     RetentionSummary,
     ScanCycleSummary,
@@ -69,6 +70,7 @@ from lead_agent.remote_approval_web import (
 from lead_agent.scanner import (
     ReadOnlyScanService,
     ScanSummary,
+    TransientFacebookReadError,
     safe_scan_error_code,
 )
 
@@ -452,6 +454,7 @@ async def _scan_groups_for_cycle(
     summaries: list[ScanSummary] = []
     failures = 0
     failed_retries = 0
+    consecutive_offline_failures = 0
     logger = logging.getLogger("lead_agent.operations")
     async with FacebookReadOnlyBrowser(settings) as browser:
         scanner = ReadOnlyScanService(database, browser)
@@ -468,6 +471,7 @@ async def _scan_groups_for_cycle(
                     severe_yield_rate=settings.operations_minimum_group_post_yield_rate,
                 )
                 summaries.append(summary)
+                consecutive_offline_failures = 0
                 if summary.retry_count:
                     logger.info(
                         "Bounded group scan retry completed",
@@ -496,6 +500,18 @@ async def _scan_groups_for_cycle(
                         "error_code": safe_scan_error_code(error),
                     },
                 )
+                if (
+                    isinstance(error, TransientFacebookReadError)
+                    and error.stage == "navigation"
+                    and error.kind == "offline"
+                ):
+                    consecutive_offline_failures += 1
+                    if consecutive_offline_failures >= 2:
+                        raise RecoverableCycleError(
+                            "Facebook scanning is waiting for network connectivity"
+                        ) from error
+                else:
+                    consecutive_offline_failures = 0
     return ScanCycleSummary(
         groups_scanned=len(summaries),
         groups_failed=failures,

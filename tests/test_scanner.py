@@ -203,6 +203,33 @@ def test_visible_but_safely_rejected_feed_is_not_materially_incomplete(
     assert summary.materially_incomplete is False
 
 
+def test_feed_responsive_severe_partial_does_not_repeat_navigation(
+    database: Database,
+    group: FacebookGroup,
+) -> None:
+    reader = FakeReader(
+        outcomes=[
+            FacebookReadResult(
+                posts=(post(group),),
+                diagnostics=FacebookReadDiagnostics(top_level_story_nodes_seen=4),
+            )
+        ]
+    )
+
+    summary = asyncio.run(
+        ReadOnlyScanService(database, reader).scan_group(
+            group,
+            max_posts=10,
+            max_retries=1,
+        )
+    )
+
+    assert summary.severe_partial is True
+    assert summary.materially_incomplete is False
+    assert summary.retry_count == 0
+    assert reader.calls == 1
+
+
 def test_retry_merge_preserves_distinct_permalinks_with_identical_text(
     database: Database,
     group: FacebookGroup,

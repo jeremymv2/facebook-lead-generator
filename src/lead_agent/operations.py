@@ -34,6 +34,10 @@ class QuietHoursActiveError(OperationsError):
     """Raised when a scheduled cycle reaches the configured overnight quiet window."""
 
 
+class RecoverableCycleError(OperationsError):
+    """A transient cycle-wide outage that should be retried by the next schedule."""
+
+
 @dataclass(frozen=True, slots=True)
 class OperationPaths:
     """Non-secret files used by the local operations process."""
@@ -305,12 +309,13 @@ class OperationsState:
         started_at: datetime,
         failed_at: datetime,
         failure_limit: int,
+        circuit_breaker_enabled: bool = True,
     ) -> bool:
         previous = self.read_health()
         previous_failures = previous.get("consecutive_failures", 0)
         failure_count = previous_failures if isinstance(previous_failures, int) else 0
         next_failure_count = failure_count + 1
-        circuit_breaker_tripped = next_failure_count >= failure_limit
+        circuit_breaker_tripped = circuit_breaker_enabled and next_failure_count >= failure_limit
         self._write_health(
             {
                 **_preserved_health(previous),
@@ -459,6 +464,7 @@ class OperationsCycleRunner:
                     started_at=started_at,
                     failed_at=clock(),
                     failure_limit=self.degraded_cycle_limit,
+                    circuit_breaker_enabled=not isinstance(error, RecoverableCycleError),
                 )
                 raise
             completed_at = clock()
