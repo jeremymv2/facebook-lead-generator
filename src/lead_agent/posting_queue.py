@@ -256,6 +256,7 @@ class PostingOutcomeNotificationService:
             "source_text_expanded": "Facebook revealed more post text; review it again",
             "source_text_mismatch": "the source post changed",
             "source_text_updated": "the saved source post changed; review it again",
+            "source_post_load_timeout": "Facebook did not finish loading the source post",
             "comment_composer_missing": "Facebook did not expose a comment box",
             "comment_composer_ambiguous": "Facebook exposed ambiguous comment boxes",
             "response_already_visible": "the approved response may already be visible",

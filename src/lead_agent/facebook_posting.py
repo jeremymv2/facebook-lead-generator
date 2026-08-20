@@ -267,8 +267,10 @@ class FacebookCommentBrowser:  # pragma: no cover - requires an interactive Face
         page = await self._page()
         try:
             await page.goto(work.attempt.post_url, wait_until="domcontentloaded")
-            await self._require_normal_page(page, lead_id=work.lead.id or 0)
-            rendered = await self._top_level_post_messages(page)
+            rendered = await self._wait_for_top_level_post_messages(
+                page,
+                lead_id=work.lead.id or 0,
+            )
             matched_text = validate_post_snapshot(
                 work,
                 current_url=page.url,
@@ -423,6 +425,27 @@ class FacebookCommentBrowser:  # pragma: no cover - requires an interactive Face
                 "Facebook stopped before the submission boundary",
                 screenshot_path=screenshot,
             ) from error
+
+    async def _wait_for_top_level_post_messages(
+        self,
+        page: Page,
+        *,
+        lead_id: int,
+    ) -> list[tuple[str, Locator]]:
+        """Wait through Facebook's loading splash before validating source text."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.settings.facebook_post_load_timeout_seconds
+        while True:
+            await self._require_normal_page(page, lead_id=lead_id)
+            rendered = await self._top_level_post_messages(page)
+            if rendered:
+                return rendered
+            if loop.time() >= deadline:
+                raise PostingValidationError(
+                    "Facebook did not finish rendering the source post before timeout",
+                    code="source_post_load_timeout",
+                )
+            await page.wait_for_timeout(250)
 
     async def _top_level_post_messages(self, page: Page) -> list[tuple[str, Locator]]:
         scope = await self._story_message_scope(page)
