@@ -689,7 +689,7 @@ def _render_review(
     <span>Intent: {html.escape(lead.intent.value if lead.intent else "unknown")}</span>
   </div>
   <p class="expiry">{approval_label}</p>
-  {f'<p class="safety">SMS: {html.escape(sms_status)}</p>' if sms_status else ''}
+  {f'<p class="safety">SMS: {html.escape(sms_status)}</p>' if sms_status else ""}
   <h3>Facebook post</h3>
   <p class="post">{html.escape(post.post_text)}</p>
   {post_link}

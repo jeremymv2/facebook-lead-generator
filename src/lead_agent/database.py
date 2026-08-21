@@ -440,9 +440,7 @@ class Database:
             _add_column_if_missing(connection, "leads", "classification_version", "TEXT")
             _add_column_if_missing(connection, "approval_requests", "remote_token_hash", "TEXT")
             _add_column_if_missing(connection, "approval_requests", "rejection_reason", "TEXT")
-            _add_column_if_missing(
-                connection, "approval_notifications", "delivery_status", "TEXT"
-            )
+            _add_column_if_missing(connection, "approval_notifications", "delivery_status", "TEXT")
             _add_column_if_missing(
                 connection, "approval_notifications", "delivery_checked_at", "TEXT"
             )
