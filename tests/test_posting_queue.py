@@ -115,6 +115,7 @@ def queued_job(
     database: Database,
     *,
     now: datetime,
+    queue_posting: bool = True,
 ) -> tuple[int, int]:
     post = database.save_post(
         FacebookPost(
@@ -140,12 +141,14 @@ def queued_job(
     review = approvals.decide(
         request.id or 0,
         ApprovalAction.APPROVE,
-        queue_posting=True,
+        queue_posting=queue_posting,
         now=now + timedelta(minutes=1),
     )
-    job = database.get_posting_job_for_approval(request.id or 0)
-    assert job is not None
-    return review.lead.id or 0, job.id or 0
+    if queue_posting:
+        job = database.get_posting_job_for_approval(request.id or 0)
+        assert job is not None
+        return review.lead.id or 0, job.id or 0
+    return review.lead.id or 0, 0
 
 
 def processor(database: Database, settings: Settings) -> PostingQueueProcessor:
@@ -251,6 +254,56 @@ def test_expired_queue_job_returns_lead_for_fresh_review_without_browser(
     )
     assert len(refreshed) == 1
     assert refreshed[0].lead.id == lead_id
+
+
+def test_blocked_unstarted_job_can_return_for_fresh_review(tmp_path: Path) -> None:
+    settings = live_settings(tmp_path)
+    database = Database(settings.database_path)
+    database.initialize()
+    now = datetime(2026, 8, 14, 16, tzinfo=UTC)
+    lead_id, job_id = queued_job(database, now=now)
+    claimed = database.claim_next_posting_job(claimed_at=now + timedelta(minutes=2))
+    assert claimed is not None
+    database.complete_posting_job(
+        job_id,
+        status=PostingJobStatus.FAILED,
+        completed_at=now + timedelta(minutes=2),
+        error_code="posting_ineligible",
+    )
+
+    recovered = database.expire_posting_job_for_rereview(
+        job_id,
+        expired_at=now + timedelta(minutes=3),
+    )
+
+    assert recovered.status is PostingJobStatus.EXPIRED
+    assert database.get_lead(lead_id).status is LeadStatus.CANDIDATE  # type: ignore[union-attr]
+
+
+def test_queued_job_keeps_its_fresh_reservation_while_waiting_for_the_worker(
+    tmp_path: Path,
+) -> None:
+    settings = live_settings(tmp_path)
+    database = Database(settings.database_path)
+    database.initialize()
+    now = datetime(2026, 8, 14, 16, tzinfo=UTC)
+    lead_id, _ = queued_job(database, now=now, queue_posting=False)
+    # Simulate a dashboard user approving first, then queuing eight minutes later.
+    database.queue_approved_posting(
+        lead_id,
+        requested_at=now + timedelta(minutes=8),
+        approval_max_age_minutes=settings.posting_approval_max_age_minutes,
+    )
+    # The original approval is now 26 minutes old, but the queue request is only 19 minutes old.
+    process_time = now + timedelta(minutes=27)
+    service = processor(database, settings)
+    claimed = service.claim(now=process_time)
+    assert claimed is not None
+
+    result = asyncio.run(service.process(claimed, FakePostingAdapter(), now=process_time))
+
+    assert result.result == "posted"
+    assert database.get_lead(lead_id).status is LeadStatus.POSTED  # type: ignore[union-attr]
 
 
 def test_stale_claim_without_a_live_attempt_is_safe_to_requeue(tmp_path: Path) -> None:
