@@ -1932,7 +1932,7 @@ class Database:
         *,
         expired_at: datetime,
     ) -> PostingJob:
-        """Expire an unsubmitted queue job and return its lead to the review backlog."""
+        """Return an unsubmitted or safely blocked job to the review backlog."""
         with self.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -1943,7 +1943,10 @@ class Database:
             job = _posting_job_from_row(row)
             if job.status is PostingJobStatus.EXPIRED:
                 return job
-            if job.status is not PostingJobStatus.PROCESSING:
+            recoverable = job.status is PostingJobStatus.PROCESSING or (
+                job.status is PostingJobStatus.FAILED and job.error_code == "posting_ineligible"
+            )
+            if not recoverable:
                 raise ValueError("Posting job is not being processed")
             live_attempt = connection.execute(
                 "SELECT 1 FROM posting_attempts WHERE lead_id = ? AND dry_run = 0 LIMIT 1",

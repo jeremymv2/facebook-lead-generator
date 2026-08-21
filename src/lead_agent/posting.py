@@ -141,6 +141,7 @@ class ApprovedPostingService:
         adapter: FacebookPostingAdapter,
         *,
         dry_run: bool,
+        approval_not_before: datetime | None = None,
         now: datetime | None = None,
     ) -> PostingExecutionResult:
         """Validate repeatedly in dry-run, or reserve and submit one live attempt exactly once."""
@@ -173,9 +174,8 @@ class ApprovedPostingService:
                 lead_id,
                 dry_run=dry_run,
                 started_at=timestamp,
-                oldest_approval_at=(
-                    timestamp - timedelta(minutes=self.settings.posting_approval_max_age_minutes)
-                ),
+                oldest_approval_at=approval_not_before
+                or timestamp - timedelta(minutes=self.settings.posting_approval_max_age_minutes),
                 day_started_at=day_started_at,
                 next_day_started_at=next_day_started_at,
                 daily_limit=self.settings.daily_posting_limit,

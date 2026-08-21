@@ -132,6 +132,10 @@ class PostingQueueProcessor:
                 job.lead_id,
                 adapter,
                 dry_run=False,
+                # Queue creation already verifies the human decision was fresh. Once accepted,
+                # preserve that reservation while this single-browser worker drains the queue.
+                # The processor's requested_at check above still expires an overlong wait.
+                approval_not_before=job.requested_at - self.approval_max_age,
                 now=timestamp,
             )
         except PostingError as error:
