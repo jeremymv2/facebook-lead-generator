@@ -25,6 +25,7 @@ from lead_agent.dashboard_metrics import CycleTrend, DashboardMetricsService, Da
 from lead_agent.models import (
     ApprovalReview,
     ApprovalStatus,
+    NotificationStatus,
     RejectionReason,
     is_exact_facebook_post_url,
     utc_now,
@@ -72,6 +73,13 @@ class LocalApprovalController:
 
     def render(self, *, message: str | None = None, now: datetime | None = None) -> str:
         reviews = self.service.list_local_backlog(limit=self.candidate_limit, now=now)
+        sms_statuses = {
+            review.request.id: _sms_status_label(
+                self.service.database.get_approval_notification(review.request.id)
+            )
+            for review in reviews
+            if review.request is not None and review.request.id is not None
+        }
         return render_dashboard(
             reviews,
             trends=self.metrics.snapshot(),
@@ -82,6 +90,7 @@ class LocalApprovalController:
             posting_queue_enabled=self.posting_queue_enabled,
             posting_enabled_group_ids=self.posting_enabled_group_ids,
             posting_approval_max_age_minutes=self.posting_approval_max_age_minutes,
+            sms_statuses=sms_statuses,
         )
 
     def submit(
@@ -190,6 +199,7 @@ def render_dashboard(
     posting_queue_enabled: bool = False,
     posting_enabled_group_ids: set[str] | None = None,
     posting_approval_max_age_minutes: int = 20,
+    sms_statuses: dict[int, str | None] | None = None,
 ) -> str:
     enabled_group_ids = posting_enabled_group_ids or set()
     cards = "".join(
@@ -202,6 +212,9 @@ def render_dashboard(
                 and is_exact_facebook_post_url(review.post.post_url)
             ),
             posting_approval_max_age_minutes=posting_approval_max_age_minutes,
+            sms_status=(sms_statuses or {}).get(review.request.id)
+            if review.request is not None and review.request.id is not None
+            else None,
             now=now,
         )
         for review in reviews
@@ -569,6 +582,7 @@ def _render_review(
     csrf_token: str,
     posting_available: bool = False,
     posting_approval_max_age_minutes: int = 20,
+    sms_status: str | None = None,
     now: datetime | None = None,
 ) -> str:
     lead_id = review.lead.id
@@ -609,6 +623,16 @@ def _render_review(
         and (now or utc_now()) - review.request.decided_at
         < timedelta(minutes=posting_approval_max_age_minutes)
     )
+    if terminal_approval:
+        approval_label = (
+            "Approved; ready to queue for Facebook posting."
+            if approval_is_fresh and posting_available
+            else "Approved, but the posting approval is stale; re-review is required."
+            if posting_available
+            else "Approved locally; Facebook posting is unavailable for this group."
+        )
+    else:
+        approval_label = "Awaiting your approval or rejection."
     edit_button = (
         '<button class="edit" type="submit">Approve edited response</button>'
         if not terminal_approval
@@ -656,11 +680,6 @@ def _render_review(
             else ""
         )
     )
-    approval_label = (
-        "Already approved; awaiting Facebook posting."
-        if terminal_approval
-        else "Remains in this local backlog until you approve or reject it."
-    )
     return f"""
 <section class="card">
   <h2>{html.escape(service.title())} lead</h2>
@@ -670,6 +689,7 @@ def _render_review(
     <span>Intent: {html.escape(lead.intent.value if lead.intent else "unknown")}</span>
   </div>
   <p class="expiry">{approval_label}</p>
+  {f'<p class="safety">SMS: {html.escape(sms_status)}</p>' if sms_status else ''}
   <h3>Facebook post</h3>
   <p class="post">{html.escape(post.post_text)}</p>
   {post_link}
@@ -691,6 +711,22 @@ def _render_review(
     {reject_form}
   </div>
 </section>"""
+
+
+def _sms_status_label(notification: object | None) -> str | None:
+    """Return a plain-language SMS status without exposing provider identifiers."""
+    if notification is None:
+        return None
+    delivery_status = getattr(notification, "delivery_status", None)
+    if delivery_status == "delivered":
+        return "Delivered to your phone."
+    if delivery_status in {"delivery_failed", "sending_failed"}:
+        return "Delivery failed; the agent will flag this for follow-up."
+    if getattr(notification, "status", None) is NotificationStatus.SENDING:
+        return "Awaiting dispatch."
+    if getattr(notification, "status", None) is NotificationStatus.FAILED:
+        return "SMS dispatch failed; retry is required."
+    return "Accepted by Telnyx; awaiting carrier delivery confirmation."
 
 
 def _safe_facebook_post_url(value: str | None) -> str | None:

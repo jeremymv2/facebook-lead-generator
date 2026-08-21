@@ -1024,11 +1024,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     limit=candidate_limit,
                     retry_failed=retry_failed,
                 )
+                delivery = notifier.reconcile_delivery_statuses(
+                    minimum_interval_seconds=settings.sms_delivery_status_poll_interval_seconds,
+                )
                 retry_failed = False
-                if summary.considered:
+                if summary.considered or delivery.checked:
                     print(
                         f"notifications considered={summary.considered} "
-                        f"sent={summary.sent} failed={summary.failed}"
+                        f"sent={summary.sent} failed={summary.failed}; "
+                        f"delivery checked={delivery.checked} delivered={delivery.delivered} "
+                        f"failed={delivery.failed}"
                     )
 
             run_remote_approval_server(

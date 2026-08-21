@@ -120,6 +120,7 @@ class Settings(BaseSettings):
     facebook_profile_path: Path = Path("~/.jjmiller-lead-agent/facebook-profile")
     browser_channel: str | None = None
     browser_headless: bool = False
+    browser_start_minimized: bool = True
     facebook_navigation_timeout_seconds: int = Field(default=30, ge=10, le=120)
     facebook_post_load_timeout_seconds: int = Field(default=15, ge=5, le=60)
     facebook_scan_max_wait_seconds: int = Field(default=25, ge=10, le=90)
@@ -143,6 +144,7 @@ class Settings(BaseSettings):
     ai_max_input_characters: int = Field(default=5000, ge=500, le=20000)
     notifications_enabled: bool = False
     notification_poll_interval_seconds: int = Field(default=10, ge=5, le=300)
+    sms_delivery_status_poll_interval_seconds: int = Field(default=60, ge=30, le=3600)
     remote_approval_base_url: HttpUrl | None = None
     approval_signing_key: SecretStr | None = None
     sms_provider: str = "disabled"

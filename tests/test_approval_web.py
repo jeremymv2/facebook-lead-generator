@@ -63,7 +63,7 @@ def test_dashboard_escapes_facebook_content_and_states_safety_boundary(tmp_path:
     assert "&lt;img src=x onerror=alert(1)&gt;" in page
     assert "<script>Fixture Group</script>" not in page
     assert "This dashboard cannot post to Facebook" in page
-    assert "Remains in this local backlog until you approve or reject it" in page
+    assert "Awaiting your approval or rejection" in page
     assert 'name="csrf_token" value="fixture-csrf"' in page
     assert controller.service.database.list_pending_approval_reviews() == []
     assert "View original Facebook post" in page

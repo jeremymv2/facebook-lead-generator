@@ -292,6 +292,9 @@ class Database:
                     sent_at TEXT,
                     provider_message_id TEXT,
                     error_code TEXT,
+                    delivery_status TEXT,
+                    delivery_checked_at TEXT,
+                    delivery_error_code TEXT,
                     FOREIGN KEY(approval_request_id)
                         REFERENCES approval_requests(id) ON DELETE RESTRICT
                 );
@@ -437,6 +440,15 @@ class Database:
             _add_column_if_missing(connection, "leads", "classification_version", "TEXT")
             _add_column_if_missing(connection, "approval_requests", "remote_token_hash", "TEXT")
             _add_column_if_missing(connection, "approval_requests", "rejection_reason", "TEXT")
+            _add_column_if_missing(
+                connection, "approval_notifications", "delivery_status", "TEXT"
+            )
+            _add_column_if_missing(
+                connection, "approval_notifications", "delivery_checked_at", "TEXT"
+            )
+            _add_column_if_missing(
+                connection, "approval_notifications", "delivery_error_code", "TEXT"
+            )
             connection.execute(
                 """
                 UPDATE approval_requests SET rejection_reason = ?
@@ -1421,6 +1433,82 @@ class Database:
             ).fetchone()
         return _approval_notification_from_row(row) if row is not None else None
 
+    def get_approval_review(self, request_id: int) -> ApprovalReview | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT id FROM approval_requests WHERE id = ?", (request_id,)
+            ).fetchone()
+            return (
+                _approval_review_from_connection(connection, int(row["id"]))
+                if row is not None
+                else None
+            )
+
+    def list_approval_notifications_due_delivery_check(
+        self,
+        *,
+        checked_before: datetime,
+        limit: int,
+    ) -> list[ApprovalNotification]:
+        """Return recent, accepted SMS notifications whose final delivery state is unknown."""
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        terminal_statuses = ("delivered", "delivery_failed", "sending_failed")
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM approval_notifications
+                WHERE provider = ?
+                  AND status = ?
+                  AND provider_message_id IS NOT NULL
+                  AND (delivery_status IS NULL OR delivery_status NOT IN (?, ?, ?))
+                  AND (delivery_checked_at IS NULL OR delivery_checked_at <= ?)
+                ORDER BY sent_at, approval_request_id
+                LIMIT ?
+                """,
+                (
+                    "telnyx",
+                    NotificationStatus.SENT.value,
+                    *terminal_statuses,
+                    _serialize_datetime(checked_before),
+                    limit,
+                ),
+            ).fetchall()
+        return [_approval_notification_from_row(row) for row in rows]
+
+    def record_approval_delivery_status(
+        self,
+        request_id: int,
+        *,
+        delivery_status: str | None,
+        checked_at: datetime,
+        error_code: str | None = None,
+    ) -> ApprovalNotification:
+        """Persist Telnyx delivery state separately from API acceptance."""
+        with self.connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE approval_notifications
+                SET delivery_status = ?, delivery_checked_at = ?, delivery_error_code = ?
+                WHERE approval_request_id = ? AND status = ?
+                """,
+                (
+                    delivery_status,
+                    _serialize_datetime(checked_at),
+                    error_code,
+                    request_id,
+                    NotificationStatus.SENT.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(f"Sent approval notification {request_id} does not exist")
+            row = connection.execute(
+                "SELECT * FROM approval_notifications WHERE approval_request_id = ?", (request_id,)
+            ).fetchone()
+        if row is None:  # pragma: no cover - protected by the update above
+            raise RuntimeError("Failed to retrieve approval delivery status")
+        return _approval_notification_from_row(row)
+
     def get_approval_review_by_remote_token_hash(
         self,
         remote_token_hash: str,
@@ -1579,6 +1667,8 @@ class Database:
                     SELECT 1 FROM posting_jobs
                     WHERE posting_jobs.approval_request_id = requests.id
                   )
+                  AND requests.decided_at = leads.approval_timestamp
+                  AND requests.decided_response = leads.approved_response
                 ORDER BY requests.decided_at DESC, requests.id DESC
                 LIMIT ?
                 """,
@@ -2883,6 +2973,9 @@ def _approval_notification_from_row(row: sqlite3.Row) -> ApprovalNotification:
         sent_at=_parse_datetime(row["sent_at"]),
         provider_message_id=row["provider_message_id"],
         error_code=row["error_code"],
+        delivery_status=row["delivery_status"],
+        delivery_checked_at=_parse_datetime(row["delivery_checked_at"]),
+        delivery_error_code=row["delivery_error_code"],
     )
 
 

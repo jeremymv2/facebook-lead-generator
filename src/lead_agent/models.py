@@ -322,6 +322,9 @@ class ApprovalNotification:
     sent_at: datetime | None = None
     provider_message_id: str | None = None
     error_code: str | None = None
+    delivery_status: str | None = None
+    delivery_checked_at: datetime | None = None
+    delivery_error_code: str | None = None
 
     def __post_init__(self) -> None:
         if self.approval_request_id < 1:

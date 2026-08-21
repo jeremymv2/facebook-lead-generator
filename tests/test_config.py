@@ -10,6 +10,7 @@ from lead_agent.config import (
     Settings,
     UnsafeReadOnlyModeError,
 )
+from lead_agent.facebook import browser_launch_arguments
 
 
 def test_safe_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -38,6 +39,8 @@ def test_safe_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert settings.operations_minimum_group_post_yield_rate == 0.5
     assert settings.browser_channel is None
     assert settings.browser_headless is False
+    assert settings.browser_start_minimized is True
+    assert settings.sms_delivery_status_poll_interval_seconds == 60
     assert settings.facebook_group_max_retries == 1
     assert settings.facebook_group_retry_backoff_seconds == 5
     assert settings.facebook_retry_scan_max_wait_seconds == 45
@@ -52,6 +55,15 @@ def test_safe_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert settings.ai_max_posts_per_run == 20
     assert settings.sms_provider == "disabled"
     assert settings.remote_approval_ready is False
+    assert browser_launch_arguments(settings) == ["--start-minimized"]
+
+
+def test_browser_can_be_left_visible_for_login(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    assert browser_launch_arguments(Settings(_env_file=None, browser_start_minimized=False)) == []
 
 
 def test_backup_directory_expands_user_path(

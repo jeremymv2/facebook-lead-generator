@@ -160,6 +160,7 @@ Important settings include:
 | `POSTING_APPROVAL_MAX_AGE_MINUTES` | `20` | Maximum terminal-approval age at posting time |
 | `REMOTE_APPROVAL_BASE_URL` | empty | Stable HTTPS relay origin used in SMS links |
 | `NOTIFICATIONS_ENABLED` | `false` | Explicit remote-notification switch |
+| `SMS_DELIVERY_STATUS_POLL_INTERVAL_SECONDS` | `60` | How often to verify recent Telnyx messages reached the handset |
 | `SMS_PROVIDER` | `disabled` | `disabled` or `telnyx` |
 | `SMS_RECIPIENT_NUMBER` | empty | Reviewer's phone in E.164 format |
 | `TELNYX_FROM_NUMBER` | empty | Registered Telnyx sender in E.164 format |
@@ -183,6 +184,7 @@ Important settings include:
 | `CYCLE_CLASSIFICATION_LIMIT` | `100` | Maximum saved posts classified per cycle |
 | `FACEBOOK_PROFILE_PATH` | `~/.jjmiller-lead-agent/facebook-profile` | Dedicated persistent profile |
 | `BROWSER_HEADLESS` | `false` | Keeps manual login and scan behavior visible |
+| `BROWSER_START_MINIMIZED` | `true` | Starts headed scan and posting windows minimized so they do not take focus |
 | `FACEBOOK_GROUP_MAX_RETRIES` | `1` | Bounded transient or materially incomplete retries per group and cycle |
 | `FACEBOOK_GROUP_RETRY_BACKOFF_SECONDS` | `5` | Delay before the one bounded group retry |
 | `FACEBOOK_GROUP_DELAY_SECONDS` | `2` | Delay between unattended group navigations |
