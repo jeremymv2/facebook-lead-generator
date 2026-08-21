@@ -28,6 +28,7 @@ from lead_agent.facebook import (
     SAFE_FILENAME_PATTERN,
     STORY_MESSAGE_SELECTOR,
     FacebookBrowserError,
+    browser_launch_arguments,
     clean_facebook_message_text,
     cleanup_old_screenshots,
     extract_post_id,
@@ -224,6 +225,7 @@ class FacebookCommentBrowser:  # pragma: no cover - requires an interactive Face
                     headless=self.settings.browser_headless,
                     accept_downloads=False,
                     locale="en-US",
+                    args=browser_launch_arguments(self.settings),
                 )
             else:
                 self._context = await self._playwright.chromium.launch_persistent_context(
@@ -232,6 +234,7 @@ class FacebookCommentBrowser:  # pragma: no cover - requires an interactive Face
                     accept_downloads=False,
                     locale="en-US",
                     channel=self.settings.browser_channel,
+                    args=browser_launch_arguments(self.settings),
                 )
         except Exception as error:
             if self._playwright is not None:

@@ -63,6 +63,11 @@ class FacebookBrowserError(RuntimeError):
     """Raised when the dedicated Playwright browser cannot be started safely."""
 
 
+def browser_launch_arguments(settings: Settings) -> list[str]:
+    """Keep a headed automation window out of the user's active work area by default."""
+    return ["--start-minimized"] if settings.browser_start_minimized else []
+
+
 @dataclass(slots=True)
 class _FeedTelemetry:
     started_at: float
@@ -333,6 +338,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                     headless=self.settings.browser_headless,
                     accept_downloads=False,
                     locale="en-US",
+                    args=browser_launch_arguments(self.settings),
                 )
             else:
                 self._context = await self._playwright.chromium.launch_persistent_context(
@@ -341,6 +347,7 @@ class FacebookReadOnlyBrowser:  # pragma: no cover - requires an interactive Fac
                     accept_downloads=False,
                     locale="en-US",
                     channel=self.settings.browser_channel,
+                    args=browser_launch_arguments(self.settings),
                 )
         except Exception as error:
             if self._playwright is not None:

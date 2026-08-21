@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
@@ -74,6 +74,7 @@ class FakeTransport:
         self.headers: Mapping[str, str] = {}
         self.payload: Mapping[str, object] = {}
         self.timeout_seconds = 0
+        self.get_url = ""
 
     def post(
         self,
@@ -86,6 +87,18 @@ class FakeTransport:
         self.url = url
         self.headers = headers
         self.payload = payload
+        self.timeout_seconds = timeout_seconds
+        return self.response
+
+    def get(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        timeout_seconds: int,
+    ) -> Mapping[str, object]:
+        self.get_url = url
+        self.headers = headers
         self.timeout_seconds = timeout_seconds
         return self.response
 
@@ -184,6 +197,55 @@ def test_notification_sends_one_tokenized_single_segment_sms(tmp_path: Path) -> 
         "approval.requested",
         "approval.sms",
     ]
+
+
+def test_notification_records_actual_telnyx_delivery_status(tmp_path: Path) -> None:
+    class DeliveryAwareFakeSmsProvider(FakeSmsProvider):
+        name = "telnyx"
+
+        def delivery_status(self, provider_message_id: str) -> str:
+            assert provider_message_id == "message-fixture"
+            return "delivered"
+
+    database = Database(tmp_path / "delivery.sqlite3")
+    database.initialize()
+    create_candidate(database)
+    approvals = LocalApprovalService(database, expiration_minutes=20)
+    notifier = ApprovalNotificationService(
+        database,
+        approvals,
+        DeliveryAwareFakeSmsProvider(),
+        public_base_url="https://approve.example",
+        recipient_number="+15025550101",
+    )
+    now = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+
+    notifier.notify_candidates(limit=1, now=now)
+    summary = notifier.reconcile_delivery_statuses(
+        minimum_interval_seconds=60,
+        now=now + timedelta(seconds=60),
+    )
+
+    notification = database.get_approval_notification(1)
+    assert notification is not None
+    assert summary.checked == 1
+    assert summary.delivered == 1
+    assert notification.delivery_status == "delivered"
+    assert notification.delivery_checked_at == now + timedelta(seconds=60)
+    assert "approval.sms_delivery" in [event.action for event in database.list_audit_events()]
+
+
+def test_telnyx_adapter_reads_recipient_delivery_status() -> None:
+    transport = FakeTransport({"data": {"to": [{"status": "delivered"}]}})
+    provider = TelnyxSmsProvider(
+        api_key="secret-api-key",
+        from_number="+15025550100",
+        timeout_seconds=12,
+        transport=transport,
+    )
+
+    assert provider.delivery_status("telnyx-message-id") == "delivered"
+    assert transport.get_url == "https://api.telnyx.com/v2/messages/telnyx-message-id"
 
 
 def test_notification_uses_compliant_fallback_at_maximum_origin_length(tmp_path: Path) -> None:

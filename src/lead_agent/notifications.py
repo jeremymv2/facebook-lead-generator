@@ -7,7 +7,7 @@ import re
 import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -62,6 +62,12 @@ class SmsProvider(Protocol):
     def send(self, message: SmsMessage) -> SmsDeliveryReceipt: ...
 
 
+class DeliveryStatusProvider(Protocol):
+    """Optional provider capability for verifying handset-delivery outcomes."""
+
+    def delivery_status(self, provider_message_id: str) -> str: ...
+
+
 class JsonPostTransport(Protocol):
     def post(
         self,
@@ -69,6 +75,14 @@ class JsonPostTransport(Protocol):
         *,
         headers: Mapping[str, str],
         payload: Mapping[str, object],
+        timeout_seconds: int,
+    ) -> Mapping[str, object]: ...
+
+    def get(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str],
         timeout_seconds: int,
     ) -> Mapping[str, object]: ...
 
@@ -98,6 +112,32 @@ class UrllibJsonPostTransport:
             raise SmsProviderError(f"Telnyx rejected the message ({error_code})") from None
         except (TimeoutError, URLError, OSError):
             raise SmsProviderError("Telnyx request failed before acceptance") from None
+        if len(raw_response) > 65_536:
+            raise SmsProviderError("Telnyx returned an oversized response")
+        try:
+            decoded = json.loads(raw_response)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise SmsProviderError("Telnyx returned an invalid response") from None
+        if not isinstance(decoded, dict):
+            raise SmsProviderError("Telnyx returned an invalid response")
+        return cast(dict[str, object], decoded)
+
+    def get(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        timeout_seconds: int,
+    ) -> Mapping[str, object]:
+        request = Request(url, headers=dict(headers), method="GET")
+        try:
+            with urlopen(request, timeout=timeout_seconds) as response:
+                raw_response = response.read(65_537)
+        except HTTPError as error:
+            error_code = _telnyx_error_code(error.read(16_384))
+            raise SmsProviderError(f"Telnyx delivery lookup failed ({error_code})") from None
+        except (TimeoutError, URLError, OSError):
+            raise SmsProviderError("Telnyx delivery lookup failed") from None
         if len(raw_response) > 65_536:
             raise SmsProviderError("Telnyx returned an oversized response")
         try:
@@ -154,11 +194,43 @@ class TelnyxSmsProvider:
             raise SmsProviderError("Telnyx response did not contain a message ID")
         return SmsDeliveryReceipt(provider_message_id=message_id, status="accepted")
 
+    def delivery_status(self, provider_message_id: str) -> str:
+        if not provider_message_id.strip():
+            raise ValueError("Telnyx message ID cannot be empty")
+        response = self._transport.get(
+            f"{TELNYX_MESSAGES_URL}/{provider_message_id}",
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Accept": "application/json",
+            },
+            timeout_seconds=self._timeout_seconds,
+        )
+        data = response.get("data")
+        if not isinstance(data, Mapping):
+            raise SmsProviderError("Telnyx delivery response did not contain message data")
+        recipients = data.get("to")
+        if not isinstance(recipients, list) or not recipients:
+            raise SmsProviderError("Telnyx delivery response did not contain a recipient")
+        recipient = recipients[0]
+        if not isinstance(recipient, Mapping):
+            raise SmsProviderError("Telnyx delivery response did not contain a recipient")
+        status = recipient.get("status")
+        if not isinstance(status, str) or not status.strip():
+            raise SmsProviderError("Telnyx delivery response did not contain a delivery status")
+        return status.strip().casefold()
+
 
 @dataclass(frozen=True, slots=True)
 class NotificationSummary:
     considered: int
     sent: int
+    failed: int
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryCheckSummary:
+    checked: int
+    delivered: int
     failed: int
 
 
@@ -254,17 +326,67 @@ class ApprovalNotificationService:
         self._record_event(review, result="sent")
         return True
 
+    def reconcile_delivery_statuses(
+        self,
+        *,
+        minimum_interval_seconds: int,
+        limit: int = 20,
+        now: datetime | None = None,
+    ) -> DeliveryCheckSummary:
+        """Record actual Telnyx recipient status; API acceptance alone is not delivery."""
+        if minimum_interval_seconds < 1:
+            raise ValueError("minimum_interval_seconds must be positive")
+        lookup = getattr(self.provider, "delivery_status", None)
+        if not callable(lookup):
+            return DeliveryCheckSummary(checked=0, delivered=0, failed=0)
+        timestamp = now or utc_now()
+        notifications = self.database.list_approval_notifications_due_delivery_check(
+            checked_before=timestamp - timedelta(seconds=minimum_interval_seconds),
+            limit=limit,
+        )
+        delivered = 0
+        failed = 0
+        for notification in notifications:
+            try:
+                status = lookup(notification.provider_message_id or "")
+                updated = self.database.record_approval_delivery_status(
+                    notification.approval_request_id,
+                    delivery_status=status,
+                    checked_at=timestamp,
+                )
+            except SmsProviderError as error:
+                updated = self.database.record_approval_delivery_status(
+                    notification.approval_request_id,
+                    delivery_status=None,
+                    checked_at=timestamp,
+                    error_code=type(error).__name__,
+                )
+                failed += 1
+            else:
+                if updated.delivery_status == "delivered":
+                    delivered += 1
+            review = self.database.get_approval_review(notification.approval_request_id)
+            if review is not None:
+                self._record_event(
+                    review,
+                    action="approval.sms_delivery",
+                    result=updated.delivery_status or "lookup_failed",
+                    details={"delivery_error": updated.delivery_error_code} if failed else None,
+                )
+        return DeliveryCheckSummary(checked=len(notifications), delivered=delivered, failed=failed)
+
     def _record_event(
         self,
         review: ApprovalReview,
         *,
         result: str,
+        action: str = "approval.sms",
         details: dict[str, object] | None = None,
     ) -> None:
         self.database.record_audit_event(
             AuditEvent(
                 component="notification",
-                action="approval.sms",
+                action=action,
                 result=result,
                 lead_id=review.lead.id,
                 post_id=review.post.id,
