@@ -1,6 +1,6 @@
 import socket
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from http.server import HTTPServer
 from pathlib import Path
@@ -194,6 +194,98 @@ def test_controller_rejects_missing_csrf_and_accepts_once(tmp_path: Path) -> Non
 
     assert result.result == "approved"
     assert "No Facebook action" in result.message
+
+
+def test_dashboard_can_approve_and_queue_posting(tmp_path: Path) -> None:
+    controller, lead_id, now = prepared_controller(tmp_path)
+    posting_controller = LocalApprovalController(
+        controller.service,
+        csrf_token="fixture-csrf",
+        posting_queue_enabled=True,
+        posting_enabled_group_ids={"fixture-group"},
+        posting_approval_max_age_minutes=20,
+    )
+
+    page = posting_controller.render(now=now)
+    assert "Approve draft" in page
+    assert "Approve edited response &amp; queue post" in page
+
+    result = posting_controller.submit(
+        lead_id,
+        "approve-post",
+        {"csrf_token": ["fixture-csrf"]},
+        now=now,
+    )
+
+    assert result.result == "approved"
+    assert "queued for Facebook posting" in result.message
+    approval = controller.service.database.list_pending_approval_reviews()
+    assert approval == []
+    job = controller.service.database.get_posting_job_for_approval(1)
+    assert job is not None
+    assert job.status.value == "queued"
+
+
+def test_dashboard_can_queue_a_recent_existing_approval(tmp_path: Path) -> None:
+    controller, lead_id, now = prepared_controller(tmp_path)
+    controller.submit(
+        lead_id,
+        "approve",
+        {"csrf_token": ["fixture-csrf"]},
+        now=now,
+    )
+    posting_controller = LocalApprovalController(
+        controller.service,
+        csrf_token="fixture-csrf",
+        posting_queue_enabled=True,
+        posting_enabled_group_ids={"fixture-group"},
+        posting_approval_max_age_minutes=20,
+    )
+
+    page = posting_controller.render(now=now)
+    assert "Queue approved response for Facebook" in page
+
+    result = posting_controller.submit(
+        lead_id,
+        "post",
+        {"csrf_token": ["fixture-csrf"]},
+        now=now + timedelta(minutes=1),
+    )
+
+    assert result.result == "queued"
+    assert "queued for Facebook posting" in result.message
+
+
+def test_dashboard_reopens_stale_approval_for_fresh_review(tmp_path: Path) -> None:
+    controller, lead_id, now = prepared_controller(tmp_path)
+    controller.submit(
+        lead_id,
+        "approve",
+        {"csrf_token": ["fixture-csrf"]},
+        now=now,
+    )
+    posting_controller = LocalApprovalController(
+        controller.service,
+        csrf_token="fixture-csrf",
+        posting_queue_enabled=True,
+        posting_enabled_group_ids={"fixture-group"},
+        posting_approval_max_age_minutes=20,
+    )
+
+    page = posting_controller.render(now=now + timedelta(minutes=21))
+    assert "Return to fresh review" in page
+
+    result = posting_controller.submit(
+        lead_id,
+        "re-review",
+        {"csrf_token": ["fixture-csrf"]},
+        now=now + timedelta(minutes=21),
+    )
+
+    assert result.result == "reopened"
+    reopened = controller.service.database.get_lead(lead_id)
+    assert reopened is not None
+    assert reopened.status.value == "candidate"
 
 
 class FakeHTTPServer:

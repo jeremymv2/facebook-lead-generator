@@ -1,4 +1,4 @@
-"""Local, one-time human approval workflow with no Facebook posting capability."""
+"""Local, one-time human approval workflow with optional guarded posting queueing."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from lead_agent.models import (
     FacebookPost,
     Lead,
     LeadStatus,
+    PostingJob,
     RejectionReason,
     utc_now,
 )
@@ -125,6 +126,13 @@ class LocalApprovalService:
             if self.classification_version is None
             or review.lead.classification_version == self.classification_version
         ]
+        approved_unposted = self.database.list_approved_unposted_reviews(limit=50)
+        approved_unposted = [
+            review
+            for review in approved_unposted
+            if self.classification_version is None
+            or review.lead.classification_version == self.classification_version
+        ]
         remaining = None if limit is None else max(0, limit - len(pending))
         candidates = (
             self.database.list_candidate_leads(
@@ -139,6 +147,10 @@ class LocalApprovalService:
             LocalReviewItem(lead=review.lead, post=review.post, request=review.request)
             for review in pending
         ]
+        items.extend(
+            LocalReviewItem(lead=review.lead, post=review.post, request=review.request)
+            for review in approved_unposted
+        )
         for lead in candidates:
             post = self.database.get_post(lead.facebook_post_id)
             if post is None:  # pragma: no cover - protected by foreign key
@@ -160,6 +172,7 @@ class LocalApprovalService:
         *,
         edited_response: str | None = None,
         rejection_reason: RejectionReason | str | None = None,
+        queue_posting: bool = False,
         now: datetime | None = None,
     ) -> ApprovalReview:
         """Create a fresh snapshot at click time and immediately apply the local decision."""
@@ -207,12 +220,69 @@ class LocalApprovalService:
             action,
             edited_response=edited_response,
             rejection_reason=rejection_reason,
+            queue_posting=queue_posting,
             now=timestamp,
         )
 
     def list_pending(self, *, now: datetime | None = None) -> list[ApprovalReview]:
         self.expire_pending(now=now)
         return self.database.list_pending_approval_reviews()
+
+    def queue_approved_lead(
+        self,
+        lead_id: int,
+        *,
+        approval_max_age_minutes: int,
+        now: datetime | None = None,
+    ) -> PostingJob:
+        """Queue an existing fresh approval for posting without changing its decision."""
+        try:
+            review = next(
+                (
+                    item
+                    for item in self.database.list_approved_unposted_reviews(limit=50)
+                    if item.lead.id == lead_id
+                ),
+                None,
+            )
+            if review is None:
+                raise ValueError("Approved lead is not awaiting posting")
+            timestamp = now or utc_now()
+            job = self.database.queue_approved_posting(
+                lead_id,
+                requested_at=timestamp,
+                approval_max_age_minutes=approval_max_age_minutes,
+            )
+            self._record_event(
+                review,
+                action="approval.posting_queued",
+                result="queued",
+                details={"posting_job_id": job.id or 0},
+            )
+            return job
+        except (LookupError, ValueError) as error:
+            raise ApprovalStateError(str(error)) from error
+
+    def reopen_approved_lead(self, lead_id: int, *, now: datetime | None = None) -> Lead:
+        """Return an unposted terminal approval to the candidate backlog for fresh review."""
+        review = next(
+            (
+                item
+                for item in self.database.list_approved_unposted_reviews(limit=50)
+                if item.lead.id == lead_id
+            ),
+            None,
+        )
+        if review is None:
+            raise ApprovalStateError("Approved lead is not awaiting posting")
+        reopened = self.database.reopen_approved_lead(lead_id, reopened_at=now or utc_now())
+        self._record_event(
+            review,
+            action="approval.reopened",
+            result="candidate",
+            details={"reason": "fresh_review_required"},
+        )
+        return reopened
 
     def expire_pending(self, *, now: datetime | None = None) -> list[ApprovalReview]:
         expired = self.database.expire_approval_requests(expired_at=now or utc_now())

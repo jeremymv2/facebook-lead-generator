@@ -528,10 +528,16 @@ def test_approval_dashboard_command_uses_local_service_without_facebook(
         port: int,
         candidate_limit: int,
         business_timezone: str,
+        posting_queue_enabled: bool,
+        posting_enabled_group_ids: set[str],
+        posting_approval_max_age_minutes: int,
     ) -> None:
         calls["port"] = port
         calls["candidate_limit"] = candidate_limit
         assert business_timezone == "America/New_York"
+        assert posting_queue_enabled is False
+        assert posting_enabled_group_ids == set()
+        assert posting_approval_max_age_minutes == 20
         assert service.__class__.__name__ == "LocalApprovalService"
 
     monkeypatch.setattr(cli_module, "run_local_approval_dashboard", fake_dashboard)

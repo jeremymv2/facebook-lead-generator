@@ -6,7 +6,7 @@ import html
 import re
 import secrets
 from dataclasses import dataclass
-from datetime import UTC, datetime, tzinfo
+from datetime import UTC, datetime, timedelta, tzinfo
 from hmac import compare_digest
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,11 +22,19 @@ from lead_agent.approvals import (
     LocalReviewItem,
 )
 from lead_agent.dashboard_metrics import CycleTrend, DashboardMetricsService, DashboardTrendSnapshot
-from lead_agent.models import RejectionReason, is_exact_facebook_post_url, utc_now
+from lead_agent.models import (
+    ApprovalReview,
+    ApprovalStatus,
+    RejectionReason,
+    is_exact_facebook_post_url,
+    utc_now,
+)
 
 LOOPBACK_HOST = "127.0.0.1"
 MAX_FORM_BYTES = 4096
-LOCAL_REVIEW_PATH = re.compile(r"^/leads/(\d+)/(approve|edit|reject)$")
+LOCAL_REVIEW_PATH = re.compile(
+    r"^/leads/(\d+)/(approve(?:-post)?|edit(?:-post)?|reject|post|re-review)$"
+)
 
 
 class CSRFFailure(ApprovalError):
@@ -49,11 +57,17 @@ class LocalApprovalController:
         csrf_token: str | None = None,
         display_timezone: tzinfo = UTC,
         candidate_limit: int | None = None,
+        posting_queue_enabled: bool = False,
+        posting_enabled_group_ids: set[str] | None = None,
+        posting_approval_max_age_minutes: int = 20,
     ) -> None:
         self.service = service
         self.csrf_token = csrf_token or secrets.token_urlsafe(32)
         self.display_timezone = display_timezone
         self.candidate_limit = candidate_limit
+        self.posting_queue_enabled = posting_queue_enabled
+        self.posting_enabled_group_ids = posting_enabled_group_ids or set()
+        self.posting_approval_max_age_minutes = posting_approval_max_age_minutes
         self.metrics = DashboardMetricsService(service.database)
 
     def render(self, *, message: str | None = None, now: datetime | None = None) -> str:
@@ -65,6 +79,9 @@ class LocalApprovalController:
             message=message,
             now=now or utc_now(),
             display_timezone=self.display_timezone,
+            posting_queue_enabled=self.posting_queue_enabled,
+            posting_enabled_group_ids=self.posting_enabled_group_ids,
+            posting_approval_max_age_minutes=self.posting_approval_max_age_minutes,
         )
 
     def submit(
@@ -82,7 +99,30 @@ class LocalApprovalController:
         if not compare_digest(submitted_token, self.csrf_token):
             raise CSRFFailure("Approval form expired or failed CSRF validation")
         try:
-            action = ApprovalAction(action_value)
+            queue_posting = action_value in {"approve-post", "edit-post"}
+            base_action = action_value.removesuffix("-post")
+            if action_value == "re-review":
+                self.service.reopen_approved_lead(lead_id, now=now)
+                return DashboardResult(
+                    message="Lead returned for fresh review.",
+                    result="reopened",
+                )
+            if action_value == "post":
+                review = self._approved_review(lead_id)
+                if not self._posting_available(review):
+                    raise ApprovalStateError(
+                        "Queued posting is unavailable for this lead's group or source URL"
+                    )
+                self.service.queue_approved_lead(
+                    lead_id,
+                    approval_max_age_minutes=self.posting_approval_max_age_minutes,
+                    now=now,
+                )
+                return DashboardResult(
+                    message="Previously approved response queued for Facebook posting.",
+                    result="queued",
+                )
+            action = ApprovalAction(base_action)
         except ValueError as error:  # pragma: no cover - route regex contract
             raise ApprovalStateError("Unknown approval action") from error
         edited_response = _one_form_value(form, "response", required=False)
@@ -92,15 +132,37 @@ class LocalApprovalController:
             action,
             edited_response=edited_response,
             rejection_reason=rejection_reason,
+            queue_posting=queue_posting,
             now=now,
         )
         if action is ApprovalAction.REJECT:
             message = "Lead rejected. No Facebook action was taken."
         elif action is ApprovalAction.EDIT:
-            message = "Edited response approved locally. No Facebook action was taken."
+            message = (
+                "Edited response approved and queued for Facebook posting."
+                if queue_posting
+                else "Edited response approved locally. No Facebook action was taken."
+            )
         else:
-            message = "Draft approved locally. No Facebook action was taken."
+            message = (
+                "Draft approved and queued for Facebook posting."
+                if queue_posting
+                else "Draft approved locally. No Facebook action was taken."
+            )
         return DashboardResult(message=message, result=review.request.status.value)
+
+    def _approved_review(self, lead_id: int) -> ApprovalReview:
+        for review in self.service.database.list_approved_unposted_reviews(limit=50):
+            if review.lead.id == lead_id:
+                return review
+        raise ApprovalStateError("Approved lead is not awaiting posting")
+
+    def _posting_available(self, review: ApprovalReview) -> bool:
+        return (
+            self.posting_queue_enabled
+            and review.post.group_id in self.posting_enabled_group_ids
+            and is_exact_facebook_post_url(review.post.post_url)
+        )
 
 
 def _one_form_value(
@@ -125,8 +187,25 @@ def render_dashboard(
     message: str | None,
     now: datetime,
     display_timezone: tzinfo = UTC,
+    posting_queue_enabled: bool = False,
+    posting_enabled_group_ids: set[str] | None = None,
+    posting_approval_max_age_minutes: int = 20,
 ) -> str:
-    cards = "".join(_render_review(review, csrf_token=csrf_token) for review in reviews)
+    enabled_group_ids = posting_enabled_group_ids or set()
+    cards = "".join(
+        _render_review(
+            review,
+            csrf_token=csrf_token,
+            posting_available=(
+                posting_queue_enabled
+                and review.post.group_id in enabled_group_ids
+                and is_exact_facebook_post_url(review.post.post_url)
+            ),
+            posting_approval_max_age_minutes=posting_approval_max_age_minutes,
+            now=now,
+        )
+        for review in reviews
+    )
     if not cards:
         cards = (
             '<section class="empty"><h2>No leads awaiting review</h2>'
@@ -230,7 +309,12 @@ def render_dashboard(
 <main>
   <header>
     <h1>JJ Miller &amp; Co. Lead Review</h1>
-    <p class="safety">Local review only. This dashboard cannot post to Facebook.</p>
+      <p class="safety">{
+        "Local review only. Approve &amp; post queues one guarded Facebook submission; "
+        "the worker performs final validation."
+        if posting_queue_enabled
+        else "Local review only. This dashboard cannot post to Facebook."
+    }</p>
   </header>
   {flash}
   {trend_content}
@@ -479,7 +563,14 @@ def _full_time(value: datetime, display_timezone: tzinfo) -> str:
     return value.astimezone(display_timezone).strftime("%b %-d, %-I:%M %p")
 
 
-def _render_review(review: LocalReviewItem, *, csrf_token: str) -> str:
+def _render_review(
+    review: LocalReviewItem,
+    *,
+    csrf_token: str,
+    posting_available: bool = False,
+    posting_approval_max_age_minutes: int = 20,
+    now: datetime | None = None,
+) -> str:
     lead_id = review.lead.id
     if lead_id is None:  # pragma: no cover - persisted lead contract
         raise RuntimeError("Approval review is missing its lead ID")
@@ -507,32 +598,35 @@ def _render_review(review: LocalReviewItem, *, csrf_token: str) -> str:
         "</option>"
         for reason in RejectionReason
     )
-    return f"""
-<section class="card">
-  <h2>{html.escape(service.title())} lead</h2>
-  <div class="meta">
-    <span>Group: {html.escape(post.group_name)}</span>
-    <span>Score: {score}</span>
-    <span>Intent: {html.escape(lead.intent.value if lead.intent else "unknown")}</span>
-  </div>
-  <p class="expiry">Remains in this local backlog until you approve or reject it.</p>
-  <h3>Facebook post</h3>
-  <p class="post">{html.escape(post.post_text)}</p>
-  {post_link}
-  <h3>Proposed response</h3>
-  <form method="post" action="/leads/{lead_id}/edit">
-    <input type="hidden" name="csrf_token" value="{csrf}">
-    <textarea name="response" maxlength="300" required>{draft}</textarea>
-    <div class="actions">
-      <button class="edit" type="submit">Approve edited response</button>
-    </div>
-  </form>
-  <div class="actions">
-    <form method="post" action="/leads/{lead_id}/approve">
-      <input type="hidden" name="csrf_token" value="{csrf}">
-      <button class="approve" type="submit">Approve draft</button>
-    </form>
-    <form method="post" action="/leads/{lead_id}/reject">
+    terminal_approval = review.request is not None and review.request.status in {
+        ApprovalStatus.APPROVED,
+        ApprovalStatus.EDITED,
+    }
+    approval_is_fresh = bool(
+        terminal_approval
+        and review.request is not None
+        and review.request.decided_at is not None
+        and (now or utc_now()) - review.request.decided_at
+        < timedelta(minutes=posting_approval_max_age_minutes)
+    )
+    edit_button = (
+        '<button class="edit" type="submit">Approve edited response</button>'
+        if not terminal_approval
+        else ""
+    )
+    edit_post_button = (
+        f'<button class="post" type="submit" formaction="/leads/{lead_id}/edit-post">'
+        "Approve edited response &amp; queue post</button>"
+        if posting_available and not terminal_approval
+        else ""
+    )
+    approve_button = (
+        '<button class="approve" type="submit">Approve draft</button>'
+        if not terminal_approval
+        else ""
+    )
+    reject_form = (
+        f'''<form method="post" action="/leads/{lead_id}/reject">
       <input type="hidden" name="csrf_token" value="{csrf}">
       <label>Reason for rejection
         <select name="rejection_reason" required>
@@ -541,7 +635,60 @@ def _render_review(review: LocalReviewItem, *, csrf_token: str) -> str:
         </select>
       </label>
       <button class="reject" type="submit">Reject</button>
+    </form>'''
+        if not terminal_approval
+        else ""
+    )
+    queue_existing_form = (
+        f'''<form method="post" action="/leads/{lead_id}/post">
+      <input type="hidden" name="csrf_token" value="{csrf}">
+      <button class="post" type="submit">Queue approved response for Facebook</button>
+    </form>'''
+        if terminal_approval and posting_available and approval_is_fresh
+        else (
+            '<p class="postability">This approval is stale; re-review is required before '
+            f'''Facebook posting.</p>
+            <form method="post" action="/leads/{lead_id}/re-review">
+              <input type="hidden" name="csrf_token" value="{csrf}">
+              <button class="edit" type="submit">Return to fresh review</button>
+            </form>'''
+            if terminal_approval and posting_available
+            else ""
+        )
+    )
+    approval_label = (
+        "Already approved; awaiting Facebook posting."
+        if terminal_approval
+        else "Remains in this local backlog until you approve or reject it."
+    )
+    return f"""
+<section class="card">
+  <h2>{html.escape(service.title())} lead</h2>
+  <div class="meta">
+    <span>Group: {html.escape(post.group_name)}</span>
+    <span>Score: {score}</span>
+    <span>Intent: {html.escape(lead.intent.value if lead.intent else "unknown")}</span>
+  </div>
+  <p class="expiry">{approval_label}</p>
+  <h3>Facebook post</h3>
+  <p class="post">{html.escape(post.post_text)}</p>
+  {post_link}
+  <h3>Proposed response</h3>
+  <form method="post" action="/leads/{lead_id}/edit">
+    <input type="hidden" name="csrf_token" value="{csrf}">
+    <textarea name="response" maxlength="300" required>{draft}</textarea>
+    <div class="actions">
+      {edit_button}
+      {edit_post_button}
+    </div>
+  </form>
+  <div class="actions">
+    {queue_existing_form}
+    <form method="post" action="/leads/{lead_id}/approve">
+      <input type="hidden" name="csrf_token" value="{csrf}">
+      {approve_button}
     </form>
+    {reject_form}
   </div>
 </section>"""
 
@@ -604,16 +751,22 @@ def run_local_approval_dashboard(
     port: int,
     candidate_limit: int | None,
     business_timezone: str,
+    posting_queue_enabled: bool = False,
+    posting_enabled_group_ids: set[str] | None = None,
+    posting_approval_max_age_minutes: int = 20,
 ) -> None:  # pragma: no cover - interactive local server
     controller = LocalApprovalController(
         service,
         display_timezone=ZoneInfo(business_timezone),
         candidate_limit=candidate_limit,
+        posting_queue_enabled=posting_queue_enabled,
+        posting_enabled_group_ids=posting_enabled_group_ids,
+        posting_approval_max_age_minutes=posting_approval_max_age_minutes,
     )
     handler = _handler_class(controller, port=port)
     server = LocalApprovalHTTPServer((LOOPBACK_HOST, port), handler)
     print(f"Local approval dashboard: http://{LOOPBACK_HOST}:{port}")
-    print("No Facebook actions can be taken. Press Ctrl-C to stop.")
+    print("Dashboard approvals may queue guarded Facebook submissions. Press Ctrl-C to stop.")
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
