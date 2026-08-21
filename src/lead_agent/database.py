@@ -9,7 +9,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from functools import lru_cache
 from pathlib import Path
@@ -1562,6 +1562,140 @@ class Database:
                 "SELECT * FROM posting_jobs WHERE approval_request_id = ?", (request_id,)
             ).fetchone()
         return _posting_job_from_row(row) if row is not None else None
+
+    def list_approved_unposted_reviews(self, *, limit: int = 50) -> list[ApprovalReview]:
+        """Return terminal approvals that have not yet entered the posting queue."""
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT requests.id
+                FROM approval_requests AS requests
+                JOIN leads ON leads.id = requests.lead_id
+                WHERE requests.status IN (?, ?)
+                  AND leads.status IN (?, ?)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM posting_jobs
+                    WHERE posting_jobs.approval_request_id = requests.id
+                  )
+                ORDER BY requests.decided_at DESC, requests.id DESC
+                LIMIT ?
+                """,
+                (
+                    ApprovalStatus.APPROVED.value,
+                    ApprovalStatus.EDITED.value,
+                    LeadStatus.APPROVED.value,
+                    LeadStatus.EDITED.value,
+                    limit,
+                ),
+            ).fetchall()
+            return [_approval_review_from_connection(connection, int(row["id"])) for row in rows]
+
+    def queue_approved_posting(
+        self,
+        lead_id: int,
+        *,
+        requested_at: datetime,
+        approval_max_age_minutes: int,
+    ) -> PostingJob:
+        """Queue one fresh-enough terminal approval without changing its decision."""
+        if approval_max_age_minutes < 1:
+            raise ValueError("approval_max_age_minutes must be positive")
+        oldest_approval_at = requested_at - timedelta(minutes=approval_max_age_minutes)
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            lead_row = connection.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
+            if lead_row is None:
+                raise LookupError(f"Lead {lead_id} does not exist")
+            lead = _lead_from_row(lead_row)
+            if lead.status not in {LeadStatus.APPROVED, LeadStatus.EDITED}:
+                raise ValueError("Only approved or edited leads can enter posting")
+            if lead.approval_timestamp is None or lead.approval_timestamp < oldest_approval_at:
+                raise ValueError("Approval is stale; re-review is required before posting")
+            if lead.approved_response is None:
+                raise ValueError("Approved posting requires a response")
+            post_row = connection.execute(
+                "SELECT * FROM facebook_posts WHERE id = ?", (lead.facebook_post_id,)
+            ).fetchone()
+            if post_row is None or not is_exact_facebook_post_url(post_row["post_url"]):
+                raise ValueError("Approved posting requires an exact Facebook post URL")
+            approval_row = connection.execute(
+                """
+                SELECT * FROM approval_requests
+                WHERE lead_id = ? AND status IN (?, ?)
+                ORDER BY decided_at DESC, id DESC LIMIT 1
+                """,
+                (
+                    lead_id,
+                    ApprovalStatus.APPROVED.value,
+                    ApprovalStatus.EDITED.value,
+                ),
+            ).fetchone()
+            if approval_row is None:
+                raise ValueError("Approved lead is missing its terminal approval request")
+            approval = _approval_request_from_row(approval_row)
+            if (
+                approval.id is None
+                or approval.decided_at != lead.approval_timestamp
+                or approval.decided_response != lead.approved_response
+            ):
+                raise ValueError("Lead approval does not match its immutable review decision")
+            existing = connection.execute(
+                "SELECT * FROM posting_jobs WHERE approval_request_id = ?", (approval.id,)
+            ).fetchone()
+            if existing is not None:
+                raise ValueError("This approval already has a posting job")
+            cursor = connection.execute(
+                """
+                INSERT INTO posting_jobs (lead_id, approval_request_id, status, requested_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    lead_id,
+                    approval.id,
+                    PostingJobStatus.QUEUED.value,
+                    _serialize_datetime(requested_at),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM posting_jobs WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+            if row is None:  # pragma: no cover - insert contract
+                raise RuntimeError("Failed to retrieve queued posting job")
+            return _posting_job_from_row(row)
+
+    def reopen_approved_lead(self, lead_id: int, *, reopened_at: datetime) -> Lead:
+        """Return one unposted approval to candidate status for an explicit fresh review."""
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
+            if row is None:
+                raise LookupError(f"Lead {lead_id} does not exist")
+            lead = _lead_from_row(row)
+            if lead.status not in {LeadStatus.APPROVED, LeadStatus.EDITED}:
+                raise ValueError("Only approved or edited leads can be reopened")
+            existing = connection.execute(
+                "SELECT 1 FROM posting_jobs WHERE lead_id = ?", (lead_id,)
+            ).fetchone()
+            if existing is not None:
+                raise ValueError("A posting job already exists for this lead")
+            connection.execute(
+                """
+                UPDATE leads SET status = ?, approved_response = NULL,
+                    approval_timestamp = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    LeadStatus.CANDIDATE.value,
+                    _serialize_datetime(reopened_at),
+                    lead_id,
+                ),
+            )
+            updated = connection.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
+            if updated is None:  # pragma: no cover - update contract
+                raise RuntimeError("Failed to retrieve reopened lead")
+            return _lead_from_row(updated)
 
     def claim_next_posting_job(self, *, claimed_at: datetime) -> PostingJob | None:
         """Atomically claim the oldest queued mobile-authorized submission."""

@@ -952,13 +952,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 duplicate_window_hours=settings.candidate_duplicate_window_hours,
                 classification_version=CLASSIFICATION_VERSION,
             )
+            posting_groups = (
+                load_group_catalog(settings.groups_config_path).posting_enabled_groups()
+                if settings.posting_queue_enabled
+                else []
+            )
             run_local_approval_dashboard(
                 service,
                 port=args.port or settings.approval_local_port,
                 candidate_limit=args.limit,
                 business_timezone=settings.business_timezone,
+                posting_queue_enabled=settings.posting_queue_enabled,
+                posting_enabled_group_ids={group.id for group in posting_groups},
+                posting_approval_max_age_minutes=settings.posting_approval_max_age_minutes,
             )
-        except (ApprovalError, OSError, UnsafeReadOnlyModeError) as error:
+        except (ApprovalError, GroupsConfigError, OSError, UnsafeReadOnlyModeError) as error:
             print(f"Stopped safely: {error}", file=sys.stderr)
             return 2
         return 0
