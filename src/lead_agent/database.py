@@ -2302,6 +2302,25 @@ class Database:
                 ).fetchall()
         return [_posting_attempt_from_row(row) for row in rows]
 
+    def list_recent_successful_posting_work(self, *, limit: int = 10) -> list[PostingWorkItem]:
+        """Return the newest verified public Facebook replies, newest first."""
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id
+                FROM posting_attempts
+                WHERE dry_run = 0
+                  AND status = ?
+                  AND facebook_reply_url IS NOT NULL
+                ORDER BY completed_at DESC, id DESC
+                LIMIT ?
+                """,
+                (PostingAttemptStatus.POSTED.value, limit),
+            ).fetchall()
+            return [_posting_work_from_connection(connection, int(row["id"])) for row in rows]
+
     def posting_attempt_status_counts(self) -> dict[PostingAttemptStatus, int]:
         """Return content-free outcome counts for live Facebook posting attempts."""
         with self.connection() as connection:

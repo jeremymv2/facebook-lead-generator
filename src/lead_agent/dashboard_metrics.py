@@ -62,6 +62,16 @@ class PostingOutcomeSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class RecentSuccessfulPost:
+    """One verified public Facebook reply for the local dashboard."""
+
+    lead_id: int
+    group_name: str
+    posted_at: datetime
+    facebook_reply_url: str
+
+
+@dataclass(frozen=True, slots=True)
 class DashboardTrendSnapshot:
     """Recent cycle history plus the latest content-free state for each group."""
 
@@ -69,6 +79,7 @@ class DashboardTrendSnapshot:
     groups: tuple[GroupScanState, ...]
     feedback: ApprovalFeedbackSummary
     posting: PostingOutcomeSummary
+    recent_successful_posts: tuple[RecentSuccessfulPost, ...] = ()
 
     @property
     def groups_scanned(self) -> int:
@@ -148,6 +159,18 @@ class DashboardMetricsService:
         )
         cycles = tuple(_cycle_from_event(event) for event in reversed(newest_events))
         posting_counts = self.database.posting_attempt_status_counts()
+        recent_successful_posts = tuple(
+            RecentSuccessfulPost(
+                lead_id=work.lead.id or 0,
+                group_name=work.post.group_name,
+                posted_at=work.attempt.completed_at,
+                facebook_reply_url=work.attempt.facebook_reply_url,
+            )
+            for work in self.database.list_recent_successful_posting_work(limit=10)
+            if work.attempt.completed_at is not None
+            and work.attempt.facebook_reply_url is not None
+            and work.lead.id is not None
+        )
         return DashboardTrendSnapshot(
             cycles=cycles,
             groups=tuple(self.database.list_group_scan_states()),
@@ -158,6 +181,7 @@ class DashboardMetricsService:
                 needs_attention=posting_counts.get(PostingAttemptStatus.NEEDS_ATTENTION, 0),
                 failed=posting_counts.get(PostingAttemptStatus.FAILED, 0),
             ),
+            recent_successful_posts=recent_successful_posts,
         )
 
 
