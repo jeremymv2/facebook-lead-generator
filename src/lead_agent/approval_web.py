@@ -392,6 +392,7 @@ def _render_trends(trends: DashboardTrendSnapshot, *, display_timezone: tzinfo) 
     group_table = _render_group_health_table(trends, display_timezone=display_timezone)
     feedback_panel = _render_feedback_panel(trends)
     posting_panel = _render_posting_outcomes(trends)
+    recent_posts_panel = _render_recent_successful_posts(trends, display_timezone=display_timezone)
     return f"""
     <section aria-labelledby="historical-trends">
       <div class="section-heading">
@@ -403,6 +404,7 @@ def _render_trends(trends: DashboardTrendSnapshot, *, display_timezone: tzinfo) 
       {cycle_table}
       {group_table}
       {posting_panel}
+      {recent_posts_panel}
       {feedback_panel}
     </section>"""
 
@@ -424,6 +426,38 @@ def _render_posting_outcomes(trends: DashboardTrendSnapshot) -> str:
         <div class="outcome"><strong>{posting.failed}</strong>
           <span>Failed before confirmation</span></div>
       </div>
+    </section>"""
+
+
+def _render_recent_successful_posts(
+    trends: DashboardTrendSnapshot,
+    *,
+    display_timezone: tzinfo,
+) -> str:
+    if not trends.recent_successful_posts:
+        content = "<p>No publicly posted Facebook replies yet.</p>"
+    else:
+        rows = "".join(
+            f"""<tr>
+              <td>Lead {post.lead_id}</td>
+              <td>{html.escape(post.group_name)}</td>
+              <td>{html.escape(_full_time(post.posted_at, display_timezone))}</td>
+              <td><a href="{html.escape(post.facebook_reply_url, quote=True)}"
+                target="_blank" rel="noopener noreferrer">View Facebook reply</a></td>
+            </tr>"""
+            for post in trends.recent_successful_posts
+            if is_exact_facebook_post_url(post.facebook_reply_url)
+        )
+        content = (
+            '<div class="table-wrap"><table><thead><tr><th>Lead</th><th>Group</th>'
+            "<th>Posted</th><th>Permalink</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table></div>"
+        )
+    return f"""
+    <section class="panel">
+      <h3>Recent successful Facebook posts</h3>
+      <p class="legend">The latest 10 verified public replies.</p>
+      {content}
     </section>"""
 
 

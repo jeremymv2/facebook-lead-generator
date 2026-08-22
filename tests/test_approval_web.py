@@ -1,5 +1,6 @@
 import socket
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from http.server import HTTPServer
@@ -16,8 +17,10 @@ from lead_agent.approval_web import (
     _handler_class,
     _safe_facebook_post_url,
     _valid_local_origin,
+    render_dashboard,
 )
 from lead_agent.approvals import ApprovalAction, LocalApprovalService
+from lead_agent.dashboard_metrics import RecentSuccessfulPost
 from lead_agent.database import Database
 from lead_agent.models import AuditEvent, FacebookPost, Lead, LeadIntent, LeadStatus
 
@@ -138,6 +141,37 @@ def test_dashboard_renders_cycle_trends_and_current_group_health(tmp_path: Path)
     assert "4/1" in page
     assert "&lt;script&gt;Degraded Group&lt;/script&gt;" in page
     assert "<script>Degraded Group</script>" not in page
+
+
+def test_dashboard_shows_recent_successful_post_permalinks(tmp_path: Path) -> None:
+    controller, _, now = prepared_controller(tmp_path)
+    trends = replace(
+        controller.metrics.snapshot(),
+        recent_successful_posts=(
+            RecentSuccessfulPost(
+                lead_id=42,
+                group_name="<script>Safe Group</script>",
+                posted_at=now,
+                facebook_reply_url="https://www.facebook.com/groups/111/posts/222?comment_id=333",
+            ),
+        ),
+    )
+
+    page = render_dashboard(
+        [],
+        trends=trends,
+        csrf_token="fixture-csrf",
+        message=None,
+        now=now,
+    )
+
+    assert "Recent successful Facebook posts" in page
+    assert "The latest 10 verified public replies." in page
+    assert "Lead 42" in page
+    assert "&lt;script&gt;Safe Group&lt;/script&gt;" in page
+    assert "<script>Safe Group</script>" not in page
+    assert 'href="https://www.facebook.com/groups/111/posts/222?comment_id=333"' in page
+    assert "View Facebook reply" in page
 
 
 def test_dashboard_refresh_adds_candidates_without_starting_expiration(tmp_path: Path) -> None:
