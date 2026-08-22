@@ -248,6 +248,11 @@ class PostingOutcomeNotificationService:
         return sent
 
     def _body(self, job: PostingJob) -> str:
+        if job.status is PostingJobStatus.POSTED:
+            lead = self.database.get_lead(job.lead_id)
+            if lead is not None and lead.facebook_reply_url:
+                return self._posted_body(lead.facebook_reply_url)
+
         outcomes = {
             PostingJobStatus.POSTED: "posted publicly",
             PostingJobStatus.PENDING_MODERATION: "is pending group moderation",
@@ -272,6 +277,24 @@ class PostingOutcomeNotificationService:
         body = f"{SMS_BRAND_NAME}: Lead {job.lead_id} {result}. {SMS_OPT_OUT_INSTRUCTION}"
         if len(body) > 160:  # pragma: no cover - fixed messages stay within one segment
             raise ValueError("Posting outcome SMS exceeds one segment")
+        return body
+
+    @staticmethod
+    def _posted_body(facebook_reply_url: str) -> str:
+        """Build a one-segment public-post receipt with the exact reply permalink.
+
+        Facebook HTTPS permalinks are universal links, so iOS can open the matching
+        thread in the Facebook app while remaining usable in a browser as a fallback.
+        """
+        body = f"{SMS_BRAND_NAME}: Posted. {facebook_reply_url} {SMS_OPT_OUT_INSTRUCTION}"
+        if len(body) <= 160:
+            return body
+
+        # Preserve the actionable permalink if an unusually long Facebook URL leaves
+        # insufficient room for the descriptive wording.
+        body = f"{SMS_BRAND_NAME}: {facebook_reply_url} {SMS_OPT_OUT_INSTRUCTION}"
+        if len(body) > 160:  # pragma: no cover - Facebook reply URLs are compact
+            raise ValueError("Facebook reply permalink is too long for one SMS segment")
         return body
 
     def _record(self, job: PostingJob, *, result: str) -> None:

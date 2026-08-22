@@ -891,6 +891,104 @@ groups:
     return groups_path
 
 
+def test_manual_read_only_helpers_manage_the_browser_and_inspection_pause(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[str] = []
+    group = FacebookGroup(
+        id="fixture-group",
+        name="Fixture Group",
+        url="https://www.facebook.com/groups/111",
+        enabled=True,
+    )
+
+    class FakeBrowser:
+        def __init__(self, settings: Settings) -> None:
+            del settings
+
+        async def __aenter__(self) -> "FakeBrowser":
+            calls.append("opened")
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+            calls.append("closed")
+
+        async def manual_login(self) -> None:
+            calls.append("login")
+
+    class FakeScanner:
+        def __init__(self, database: Database, browser: FakeBrowser) -> None:
+            del database, browser
+
+        async def scan_group(self, scanned_group: FacebookGroup, *, max_posts: int) -> ScanSummary:
+            assert scanned_group is group
+            assert max_posts == 10
+            return ScanSummary(group, posts_seen=1, new_posts=(), posts_requested=10)
+
+    settings = Settings(
+        _env_file=None,
+        database_path=tmp_path / "read-only.sqlite3",
+        data_dir=tmp_path / "data",
+        facebook_profile_path=tmp_path / "browser-profile",
+    )
+
+    def acknowledge(prompt: str) -> str:
+        calls.append(prompt)
+        return ""
+
+    monkeypatch.setattr(cli_module, "FacebookReadOnlyBrowser", FakeBrowser)
+    monkeypatch.setattr(cli_module, "ReadOnlyScanService", FakeScanner)
+    monkeypatch.setattr("builtins.input", acknowledge)
+
+    asyncio.run(cli_module._manual_login(settings))
+    summaries = asyncio.run(
+        cli_module._scan_groups(settings, [group], max_posts=10, pause_after_scan=True)
+    )
+    cli_module._print_scan_results(summaries)
+
+    assert calls == [
+        "opened",
+        "login",
+        "closed",
+        "opened",
+        "Press Enter to close the browser... ",
+        "closed",
+    ]
+    output = capsys.readouterr().out
+    assert "Browser paused for inspection" in output
+    assert "requested=10 PARTIAL" in output
+
+
+def test_approval_notifier_builder_uses_the_configured_sms_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        database_path=tmp_path / "notifications.sqlite3",
+        notifications_enabled=True,
+        sms_provider="telnyx",
+        remote_approval_base_url="https://approve.example",
+        approval_signing_key="s" * 48,
+        sms_recipient_number="+15025550101",
+        telnyx_api_key="fixture-secret",
+        telnyx_from_number="+15025550100",
+    )
+    database = Database(settings.database_path)
+    database.initialize()
+    provider = object()
+    monkeypatch.setattr(cli_module, "build_sms_provider", lambda configured: provider)
+
+    notifier = cli_module._build_approval_notifier(settings, database)
+
+    assert notifier.provider is provider
+    assert notifier.public_base_url == "https://approve.example"
+    assert notifier.recipient_number == "+15025550101"
+
+
 def test_run_cycle_command_executes_content_free_pipeline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
