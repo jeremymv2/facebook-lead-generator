@@ -188,12 +188,34 @@ def test_queue_posts_once_and_sends_one_outcome_sms(tmp_path: Path) -> None:
         recipient_number="+15025280858",
     )
     assert notifier.notify_pending(now=now + timedelta(minutes=3)) == 1
-    assert "posted publicly" in provider.messages[0].body
+    assert provider.messages[0].body == (
+        "JJ Miller & Co LLC: Posted. "
+        "https://www.facebook.com/groups/111/posts/222?comment_id=333 "
+        "Reply STOP to opt out."
+    )
+    assert len(provider.messages[0].body) <= 160
     assert notifier.notify_pending(now=now + timedelta(minutes=4)) == 0
     assert len(provider.messages) == 1
     persisted = database.get_posting_job(job_id)
     assert persisted is not None
     assert persisted.outcome_notification_status is NotificationStatus.SENT
+
+
+def test_posted_outcome_sms_keeps_a_long_facebook_permalink(tmp_path: Path) -> None:
+    settings = live_settings(tmp_path)
+    database = Database(settings.database_path)
+    database.initialize()
+    notifier = PostingOutcomeNotificationService(
+        database,
+        FakeSmsProvider(),
+        recipient_number="+15025280858",
+    )
+    permalink = "https://www.facebook.com/" + "a" * 85
+
+    body = notifier._posted_body(permalink)
+
+    assert body == f"JJ Miller & Co LLC: {permalink} Reply STOP to opt out."
+    assert len(body) <= 160
 
 
 def test_queue_preserves_pending_moderation_and_uncertain_no_retry_states(
